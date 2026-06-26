@@ -1,0 +1,9 @@
+# Local Qwen3-TTS sidecar + test CLI deps. Recreate with:
+#   uv venv --python 3.12 .venv
+#   VIRTUAL_ENV=$PWD/.venv uv pip install -r requirements.txt
+mlx-audio
+soundfile
+fastapi
+uvicorn
+prompt_toolkit
+huggingface_hub[hf_xet]

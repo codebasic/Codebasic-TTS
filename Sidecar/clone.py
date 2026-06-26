@@ -21,7 +21,6 @@ the REPL warms up once at launch so subsequent sentences are ~1s.
 """
 import argparse
 import os
-import select
 import subprocess
 import sys
 import tempfile
@@ -124,13 +123,12 @@ class Engine:
         dur = len(audio) / self.sr
         if not quiet:
             rtf = total / dur if dur else 0
-            print(f"[time] first_sound={t_first:.2f}s  total={total:.2f}s  "
-                  f"audio={dur:.2f}s  RTF={rtf:.2f}x", flush=True)
+            print(f"[{self.quant} ref={os.path.basename(self.ref_audio)} "
+                  f"temp={self.temperature}] first={t_first:.2f}s total={total:.2f}s "
+                  f"audio={dur:.2f}s RTF={rtf:.2f}x", flush=True)
         return audio
 
     def synth(self, text, out_path=None, play=True):
-        ref = os.path.basename(self.ref_audio)
-        print(f"[synth] ({self.quant}, ref={ref}, temp={self.temperature}) {text!r}", flush=True)
         audio = self._gen(text, stream=True)
         if self.norm:
             audio = normalize(audio, target_rms_db=self.rms_db)
@@ -143,41 +141,51 @@ class Engine:
         return path
 
 
-def read_block(prompt="> "):
-    """Read one logical input.
+def _make_reader():
+    """Return read_block(prompt)->str|None. Uses prompt_toolkit when available so
+    that (a) multibyte editing (Korean backspace) is correct and (b) bracketed
+    paste collects a multi-line paste into one buffer (Enter submits the whole
+    thing). Falls back to input() if prompt_toolkit is missing."""
+    try:
+        if not sys.stdin.isatty():
+            raise ImportError                  # piped/non-interactive: use plain input()
+        from prompt_toolkit import PromptSession
+        session = PromptSession()
 
-    A manually typed line submits on a single Enter. A pasted block of several
-    lines arrives as back-to-back lines; we detect the burst with select() and
-    collect the whole paste into one block instead of synthesizing line-by-line.
-    Returns a list of raw lines, or None on EOF (Ctrl-D).
-    """
-    sys.stdout.write(prompt)
-    sys.stdout.flush()
-    first = sys.stdin.readline()
-    if first == "":                       # EOF
-        return None
-    lines = [first.rstrip("\n")]
-    # Keep pulling while more input is already buffered (i.e. a paste in flight).
-    while select.select([sys.stdin], [], [], 0.12)[0]:
-        nxt = sys.stdin.readline()
-        if nxt == "":
-            break
-        lines.append(nxt.rstrip("\n"))
-    return lines
+        def read_block(prompt="> "):
+            try:
+                return session.prompt(prompt)     # full string, paste-safe, unicode-correct
+            except EOFError:                       # Ctrl-D
+                return None
+            except KeyboardInterrupt:              # Ctrl-C cancels the current line
+                return ""
+        return read_block
+    except ImportError:
+        def read_block(prompt="> "):
+            try:
+                return input(prompt)
+            except EOFError:
+                return None
+            except KeyboardInterrupt:
+                return ""
+        return read_block
+
+
+read_block = _make_reader()
 
 
 def repl(eng: Engine, save: bool):
     out_dir = os.path.join(HERE, "out")
     n = 0
     print("\nREADY. Type text + Enter to synthesize. Paste multi-line freely — "
-          "it's collected as one block.\n:help for commands, Ctrl-D to quit.\n", flush=True)
+          "the whole paste is one utterance.\n:help for commands, Ctrl-D to quit.\n", flush=True)
     while True:
-        lines = read_block("> ")
-        if lines is None:                 # Ctrl-D
+        block = read_block("> ")
+        if block is None:                 # Ctrl-D
             print()
             break
-        while lines and lines[-1].strip() == "":
-            lines.pop()
+        # Collapse a (possibly multi-line / pasted) block into one utterance.
+        lines = [s for s in (ln.strip() for ln in block.splitlines()) if s]
         if not lines:
             continue
 
