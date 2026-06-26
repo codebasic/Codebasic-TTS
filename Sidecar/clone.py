@@ -147,15 +147,12 @@ class Engine:
     def _gen(self, text, stream=True, quiet=False, filler=None):
         gen_text = (text + filler) if filler else text
         t0 = time.time()
-        t_first = None
         chunks = []
         kw = dict(stream=True, streaming_interval=0.5) if stream else {}
         for r in self.model.generate(
             text=gen_text, ref_audio=self.ref_audio, ref_text=self.ref_text,
             temperature=self.temperature, speed=self.speed, verbose=False, **kw
         ):
-            if t_first is None:
-                t_first = time.time() - t0
             chunks.append(np.array(r.audio).reshape(-1))
         total = time.time() - t0
         audio = np.concatenate(chunks).astype(np.float32)
@@ -165,7 +162,7 @@ class Engine:
         if not quiet:
             rtf = total / dur if dur else 0
             print(f"[{self.quant} ref={os.path.basename(self.ref_audio)} "
-                  f"temp={self.temperature}] first={t_first:.2f}s total={total:.2f}s "
+                  f"temp={self.temperature}] total={total:.2f}s "
                   f"audio={dur:.2f}s RTF={rtf:.2f}x", flush=True)
         return audio
 
