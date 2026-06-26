@@ -54,11 +54,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Called by ServiceProvider when the user picks "Codebasic TTS": synthesize
-    /// the selected text (cache-first) and play it — without stealing focus.
-    func handleSelectedText(_ text: String) {
+    /// the selected text (cache-first) and play it. `source` is the app the user
+    /// triggered the Service from — we re-activate it so playing audio never
+    /// steals keyboard focus from where they're working.
+    func handleSelectedText(_ text: String, source: NSRunningApplication? = nil) {
         let preview = text.replacingOccurrences(of: "\n", with: " ").prefix(60)
         Log.app.info("handleSelectedText: \(text.count) chars — \"\(preview, privacy: .public)\"")
         appState.synthesize(text)
+
+        guard let source, source.processIdentifier != getpid() else { return }
+        // The overlay shows on the next runloop; re-assert the source app's focus
+        // a few times to cover whenever our app might have come forward.
+        for delay in [0.0, 0.12, 0.30] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                source.activate()
+            }
+        }
     }
 
     // MARK: - Main menu (regular app needs one for ⌘Q and text-editing shortcuts)

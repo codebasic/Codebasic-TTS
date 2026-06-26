@@ -19,8 +19,11 @@ final class ServiceProvider: NSObject {
         }
 
         Log.service.info("Service fired: received \(text.count) chars")
+        // Capture the app the user invoked the Service from, NOW (before our app
+        // can come forward), so we can hand keyboard focus back to it.
+        let source = NSWorkspace.shared.frontmostApplication
         Task { @MainActor in
-            AppDelegate.shared?.handleSelectedText(text)
+            AppDelegate.shared?.handleSelectedText(text, source: source)
         }
     }
 }
