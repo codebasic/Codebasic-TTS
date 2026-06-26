@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -8,66 +9,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var statusItem: NSStatusItem!
     private let serviceProvider = ServiceProvider()
-    private let player = AudioPlayer()
-    private var lastSelection: String = ""
-    private var speakTask: Task<Void, Never>?
-
-    // Active backend: ElevenLabs (cloud) when a key is present, else a no-op stub.
-    private var backend: TTSBackend = StubBackend()
-
-    // The user's cloned ElevenLabs voice (성주) + the low-latency model.
-    private let voice = VoiceConfig(voiceId: "Yp1WZJMrN7OSdP8PG9sm",
-                                    modelId: "eleven_flash_v2_5",
-                                    settingsHash: "")
+    let appState = AppState()
+    private lazy var mainWindow = MainWindow(appState: appState)
+    private var cancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
 
-        if let key = Secrets.elevenLabsKey {
-            backend = ElevenLabsBackend(apiKey: key)
-        } else {
-            Log.app.error("No ElevenLabs key at \(Secrets.appSupportDir)/eleven_key — speech disabled")
-        }
-
         setUpStatusItem()
         registerServices()
-        player.onFinish = { [weak self] in self?.setIcon(.idle) }
+        observeState()
+        if appState.keyPresent { appState.refreshVoices() }
 
-        Log.app.info("Codebasic TTS launched. Backend: \(self.backend.identity, privacy: .public)")
+        Log.app.info("Codebasic TTS launched. Backend: \(self.appState.backendIdentity, privacy: .public)")
     }
 
     // MARK: - Menu bar
 
-    private enum Icon: String { case idle = "🔊", working = "⏳", speaking = "🔈", error = "⚠️" }
-    private enum MenuTag: Int { case lastSelection = 100 }
-
-    private func setIcon(_ icon: Icon) { statusItem.button?.title = icon.rawValue }
+    private func setIcon(_ s: String) { statusItem.button?.title = s }
 
     private func setUpStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        setIcon(.idle)
+        setIcon("🔊")
 
         let menu = NSMenu()
-        menu.addItem(withTitle: "Codebasic TTS", action: nil, keyEquivalent: "")
+        let open = NSMenuItem(title: "Codebasic TTS 열기…", action: #selector(openWindow), keyEquivalent: "o")
+        open.target = self
+        menu.addItem(open)
         menu.addItem(.separator())
-
-        let lastItem = NSMenuItem(title: "Last selection: —", action: nil, keyEquivalent: "")
-        lastItem.tag = MenuTag.lastSelection.rawValue
-        lastItem.isEnabled = false
-        menu.addItem(lastItem)
-
-        menu.addItem(withTitle: "Stop", action: #selector(stopSpeaking), keyEquivalent: ".")
+        let stop = NSMenuItem(title: "중지", action: #selector(stopSpeaking), keyEquivalent: ".")
+        stop.target = self
+        menu.addItem(stop)
         menu.addItem(.separator())
-        menu.addItem(withTitle: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-
+        menu.addItem(withTitle: "종료", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         statusItem.menu = menu
     }
 
-    @objc private func stopSpeaking() {
-        speakTask?.cancel()
-        player.stop()
-        setIcon(.idle)
+    /// Reflect synthesis/playback state in the menu-bar icon.
+    private func observeState() {
+        appState.$isWorking.combineLatest(appState.$statusText)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] working, status in
+                guard let self else { return }
+                if status.hasPrefix("오류") { self.setIcon("⚠️") }
+                else if status.contains("합성") { self.setIcon("⏳") }
+                else if working { self.setIcon("🔈") }
+                else { self.setIcon("🔊") }
+            }
+            .store(in: &cancellables)
     }
+
+    @objc private func openWindow() { mainWindow.show() }
+    @objc private func stopSpeaking() { appState.stop() }
 
     // MARK: - Services
 
@@ -76,45 +69,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSUpdateDynamicServices()
     }
 
-    // MARK: - Entry point from the Services menu
-
     /// Called by ServiceProvider when the user picks "Codebasic TTS": synthesize
-    /// the selected text and play it.
+    /// the selected text (cache-first) and play it.
     func handleSelectedText(_ text: String) {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        lastSelection = trimmed
-
-        let preview = trimmed.replacingOccurrences(of: "\n", with: " ").prefix(60)
-        if let item = statusItem.menu?.item(withTag: MenuTag.lastSelection.rawValue) {
-            item.title = "Last selection: \(preview)\(trimmed.count > 60 ? "…" : "")"
-        }
-        Log.app.info("handleSelectedText: \(trimmed.count) chars — \"\(preview, privacy: .public)\"")
-
-        speak(trimmed)
-    }
-
-    private func speak(_ text: String) {
-        speakTask?.cancel()
-        player.stop()
-        setIcon(.working)
-
-        speakTask = Task { [weak self] in
-            guard let self else { return }
-            do {
-                for try await chunk in self.backend.stream(segment: text, voice: self.voice) {
-                    try Task.checkCancellation()
-                    self.setIcon(.speaking)
-                    try self.player.play(chunk)
-                }
-            } catch is CancellationError {
-                // user pressed Stop / new selection
-            } catch {
-                Log.app.error("speak failed: \(error.localizedDescription)")
-                self.setIcon(.error)
-                try? await Task.sleep(nanoseconds: 1_500_000_000)
-                self.setIcon(.idle)
-            }
-        }
+        let preview = text.replacingOccurrences(of: "\n", with: " ").prefix(60)
+        Log.app.info("handleSelectedText: \(text.count) chars — \"\(preview, privacy: .public)\"")
+        appState.synthesize(text)
     }
 }

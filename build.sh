@@ -31,7 +31,7 @@ build() {
   swiftc -O \
     -o "$MACOS_DIR/$APP_NAME" \
     $(find "$HERE/Sources" -name '*.swift') \
-    -framework AppKit
+    -framework AppKit -framework SwiftUI -framework AVFoundation
 
   cp "$HERE/Resources/Info.plist" "$APP_DIR/Contents/Info.plist"
   printf 'APPL????' > "$APP_DIR/Contents/PkgInfo"
