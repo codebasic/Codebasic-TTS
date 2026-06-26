@@ -32,9 +32,9 @@ struct GenerateView: View {
                 } label: {
                     Label("중지", systemImage: "stop.fill")
                 }
-                .disabled(!app.isWorking)
+                .disabled(!app.isBusy)
 
-                if app.isWorking { ProgressView().controlSize(.small) }
+                if app.isBusy { ProgressView().controlSize(.small) }
                 Text(app.statusText).font(.callout).foregroundStyle(.secondary)
                 Spacer()
             }

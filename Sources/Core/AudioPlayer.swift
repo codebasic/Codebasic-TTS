@@ -2,9 +2,14 @@ import AVFoundation
 
 /// Minimal playback: hold an AVAudioPlayer and play in-memory audio (mp3 Data).
 /// Retaining the player is required — otherwise it deallocates and goes silent.
+/// pause()/resume() keep the position (AVAudioPlayer resumes from currentTime).
 final class AudioPlayer: NSObject, AVAudioPlayerDelegate {
     private var player: AVAudioPlayer?
     var onFinish: (() -> Void)?
+
+    var isPlaying: Bool { player?.isPlaying ?? false }
+    var duration: TimeInterval { player?.duration ?? 0 }
+    var currentTime: TimeInterval { player?.currentTime ?? 0 }
 
     func play(_ data: Data) throws {
         let p = try AVAudioPlayer(data: data)
@@ -13,6 +18,9 @@ final class AudioPlayer: NSObject, AVAudioPlayerDelegate {
         p.prepareToPlay()
         p.play()
     }
+
+    func pause() { player?.pause() }
+    func resume() { player?.play() }
 
     func stop() {
         player?.stop()

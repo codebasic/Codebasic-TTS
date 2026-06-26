@@ -11,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let serviceProvider = ServiceProvider()
     let appState = AppState()
     private lazy var mainWindow = MainWindow(appState: appState)
+    private lazy var overlay = OverlayWindow(app: appState)
     private var cancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -33,6 +34,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setIcon("🔊")
 
         let menu = NSMenu()
+        menu.autoenablesItems = false        // we manage enablement; avoids validation quirks
         let open = NSMenuItem(title: "Codebasic TTS 열기…", action: #selector(openWindow), keyEquivalent: "o")
         open.target = self
         menu.addItem(open)
@@ -45,16 +47,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.menu = menu
     }
 
-    /// Reflect synthesis/playback state in the menu-bar icon.
+    /// Reflect playback phase in the menu-bar icon and the floating overlay.
     private func observeState() {
-        appState.$isWorking.combineLatest(appState.$statusText)
+        appState.$phase
             .receive(on: RunLoop.main)
-            .sink { [weak self] working, status in
+            .sink { [weak self] phase in
                 guard let self else { return }
-                if status.hasPrefix("오류") { self.setIcon("⚠️") }
-                else if status.contains("합성") { self.setIcon("⏳") }
-                else if working { self.setIcon("🔈") }
-                else { self.setIcon("🔊") }
+                switch phase {
+                case .idle:
+                    self.overlay.hide()
+                    self.setIcon(self.appState.statusText.hasPrefix("오류") ? "⚠️" : "🔊")
+                case .synthesizing: self.setIcon("⏳"); self.overlay.show()
+                case .playing:      self.setIcon("🔈"); self.overlay.show()
+                case .paused:       self.setIcon("⏸"); self.overlay.show()
+                }
             }
             .store(in: &cancellables)
     }

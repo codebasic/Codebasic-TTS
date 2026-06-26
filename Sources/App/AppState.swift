@@ -27,13 +27,19 @@ final class AppState: ObservableObject {
     @Published var localBaseURL = "http://127.0.0.1:8765"
 
     // Runtime
-    @Published var isWorking = false
+    enum Phase: Equatable { case idle, synthesizing, playing, paused }
+    @Published var phase: Phase = .idle
+    @Published var progress: Double = 0          // 0…1 playback position
+    @Published var currentText = ""              // text being spoken (overlay label)
     @Published var statusText = ""
     @Published private(set) var history: [HistoryEntry] = []
+
+    var isBusy: Bool { phase != .idle }
 
     private let cache = CacheStore()
     private let player = AudioPlayer()
     private var task: Task<Void, Never>?
+    private var timer: Timer?
 
     init() {
         loadSettings()
@@ -41,7 +47,43 @@ final class AppState: ObservableObject {
         player.onFinish = { [weak self] in self?.finish() }
     }
 
-    private func finish() { isWorking = false; statusText = "" }
+    private func finish() {
+        stopTimer()
+        phase = .idle; progress = 0; statusText = ""
+    }
+
+    /// Begin playback of ready audio and enter the .playing phase.
+    private func startPlayback(_ data: Data, status: String) {
+        do {
+            try player.play(data)
+            statusText = status; phase = .playing
+            startTimer()
+        } catch {
+            statusText = "재생 실패"; phase = .idle
+        }
+    }
+
+    // MARK: - Transport (overlay controls)
+
+    func togglePause() {
+        switch phase {
+        case .playing: player.pause(); phase = .paused; stopTimer()
+        case .paused:  player.resume(); phase = .playing; startTimer()
+        default: break
+        }
+    }
+
+    private func startTimer() {
+        stopTimer()
+        timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.tick() }
+        }
+    }
+    private func stopTimer() { timer?.invalidate(); timer = nil }
+    private func tick() {
+        let d = player.duration
+        progress = d > 0 ? min(1, player.currentTime / d) : 0
+    }
 
     var backendIdentity: String { backendKind == .elevenlabs ? "elevenlabs" : "qwen3-local" }
     var settingsHash: String { backendKind == .elevenlabs ? voiceSettings.hash : "" }
@@ -67,14 +109,14 @@ final class AppState: ObservableObject {
 
         let key = CacheStore.key(text: t, backend: backendIdentity,
                                  voiceId: voiceId, modelId: modelId, settingsHash: settingsHash)
+        currentText = t
         if useCache, let data = cache.data(forKey: key) {
             cache.touch(key); history = cache.entries
-            isWorking = true; statusText = "캐시에서 재생"
-            try? player.play(data)
+            startPlayback(data, status: "캐시에서 재생")
             return
         }
         guard let backend = makeBackend() else { statusText = "키/백엔드 미설정"; return }
-        isWorking = true; statusText = "합성 중…"
+        phase = .synthesizing; statusText = "합성 중…"; progress = 0
         let voice = VoiceConfig(voiceId: voiceId, modelId: modelId, settingsHash: settingsHash)
         let vName = voiceName, ident = backendIdentity, ext = audioExt
         task = Task { [weak self] in
@@ -89,12 +131,11 @@ final class AppState: ObservableObject {
                                     voiceName: vName, modelId: self.modelId, ext: ext, data: data)
                     self.history = self.cache.entries
                 }
-                self.statusText = "재생 중…"
-                try self.player.play(data)
+                self.startPlayback(data, status: "재생 중…")
             } catch is CancellationError {
                 self.finish()
             } catch {
-                self.isWorking = false
+                self.phase = .idle
                 self.statusText = "오류: \(error.localizedDescription)"
             }
         }
@@ -104,8 +145,8 @@ final class AppState: ObservableObject {
         task?.cancel(); player.stop()
         guard let data = cache.data(forKey: e.id) else { statusText = "오디오 파일 없음"; return }
         cache.touch(e.id); history = cache.entries
-        isWorking = true; statusText = "캐시에서 재생"
-        try? player.play(data)
+        currentText = e.text
+        startPlayback(data, status: "캐시에서 재생")
     }
 
     func stop() { task?.cancel(); player.stop(); finish() }
