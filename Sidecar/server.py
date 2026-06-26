@@ -67,9 +67,24 @@ class TTSRequest(BaseModel):
     speed: float = 1.0
 
 
+def _normalize(audio: np.ndarray, target_rms_db: float = -20.0, peak_limit: float = 0.97) -> np.ndarray:
+    """Loudness-normalize quiet model output (RMS target + peak cap)."""
+    audio = audio.reshape(-1).astype(np.float32)
+    if audio.size == 0:
+        return audio
+    rms = float(np.sqrt(np.mean(audio ** 2)))
+    if rms < 1e-6:
+        return audio
+    audio = audio * (10.0 ** (target_rms_db / 20.0) / rms)
+    peak = float(np.max(np.abs(audio)))
+    if peak > peak_limit:
+        audio = audio * (peak_limit / peak)
+    return audio
+
+
 def _pcm_wav_bytes(audio: np.ndarray, sr: int) -> bytes:
-    """float32 [-1,1] mono -> 16-bit PCM WAV container."""
-    audio = np.clip(audio.reshape(-1), -1.0, 1.0)
+    """float32 [-1,1] mono -> 16-bit PCM WAV container (loudness-normalized)."""
+    audio = np.clip(_normalize(audio).reshape(-1), -1.0, 1.0)
     pcm16 = (audio * 32767.0).astype("<i2")
     buf = io.BytesIO()
     with wave.open(buf, "wb") as w:

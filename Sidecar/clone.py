@@ -51,6 +51,23 @@ def read_text_file(path: str) -> str:
         return f.read().strip()
 
 
+def normalize(audio: np.ndarray, target_rms_db: float = -20.0,
+              peak_limit: float = 0.97) -> np.ndarray:
+    """Loudness-normalize quiet model output: scale to a target RMS, then cap
+    the peak so it can't clip. Near-silence is left untouched."""
+    audio = audio.reshape(-1).astype(np.float32)
+    if audio.size == 0:
+        return audio
+    rms = float(np.sqrt(np.mean(audio ** 2)))
+    if rms < 1e-6:                                   # silence: don't amplify noise
+        return audio
+    audio = audio * (10.0 ** (target_rms_db / 20.0) / rms)
+    peak = float(np.max(np.abs(audio)))
+    if peak > peak_limit:
+        audio = audio * (peak_limit / peak)
+    return audio
+
+
 def to_wav(audio: np.ndarray, sr: int, path: str):
     audio = np.clip(audio.reshape(-1), -1.0, 1.0)
     pcm16 = (audio * 32767.0).astype("<i2")
@@ -62,13 +79,16 @@ def to_wav(audio: np.ndarray, sr: int, path: str):
 
 
 class Engine:
-    def __init__(self, quant, ref_audio, ref_text, temperature, speed):
+    def __init__(self, quant, ref_audio, ref_text, temperature, speed,
+                 norm=True, rms_db=-20.0):
         self.quant = quant
         self.ref_audio = ref_audio
         self.ref_text_path = ref_text
         self.ref_text = read_text_file(ref_text)
         self.temperature = temperature
         self.speed = speed
+        self.norm = norm
+        self.rms_db = rms_db
         self.model = None
         self.sr = 24000
         self.load()
@@ -112,6 +132,8 @@ class Engine:
         ref = os.path.basename(self.ref_audio)
         print(f"[synth] ({self.quant}, ref={ref}, temp={self.temperature}) {text!r}", flush=True)
         audio = self._gen(text, stream=True)
+        if self.norm:
+            audio = normalize(audio, target_rms_db=self.rms_db)
         path = out_path or os.path.join(tempfile.gettempdir(), "clone_repl.wav")
         to_wav(audio, self.sr, path)
         if out_path:
@@ -167,7 +189,7 @@ def repl(eng: Engine, save: bool):
                 break
             elif cmd == ":help":
                 print(":ref PATH | :model 4bit|5bit|6bit|8bit|bf16 | :temp 0.x | "
-                      ":speed 1.0 | :save on|off | :q", flush=True)
+                      ":speed 1.0 | :norm on|off | :rms -20 | :save on|off | :q", flush=True)
             elif cmd.startswith(":ref "):
                 p = os.path.expanduser(cmd[5:].strip())
                 if os.path.exists(p):
@@ -184,6 +206,10 @@ def repl(eng: Engine, save: bool):
                 eng.speed = float(cmd[7:]); print(f"[speed] {eng.speed}", flush=True)
             elif cmd.startswith(":save "):
                 save = cmd[6:].strip() == "on"; print(f"[save] {save}", flush=True)
+            elif cmd.startswith(":norm "):
+                eng.norm = cmd[6:].strip() == "on"; print(f"[norm] {eng.norm}", flush=True)
+            elif cmd.startswith(":rms "):
+                eng.rms_db = float(cmd[5:]); print(f"[rms] target {eng.rms_db} dBFS", flush=True)
             else:
                 print(f"[?] unknown command: {cmd}  (try :help)", flush=True)
             continue
@@ -211,10 +237,15 @@ def main():
     ap.add_argument("--temp", type=float, default=0.9)
     ap.add_argument("--speed", type=float, default=1.0)
     ap.add_argument("--no-play", action="store_true", help="don't auto-play")
+    ap.add_argument("--no-normalize", action="store_true",
+                    help="disable loudness normalization (raw model level)")
+    ap.add_argument("--rms-db", type=float, default=-20.0,
+                    help="target RMS loudness in dBFS (default -20; higher=louder)")
     ap.add_argument("--save", action="store_true", help="REPL: keep each wav in ./out/")
     args = ap.parse_args()
 
-    eng = Engine(args.model, args.ref_audio, args.ref_text, args.temp, args.speed)
+    eng = Engine(args.model, args.ref_audio, args.ref_text, args.temp, args.speed,
+                 norm=not args.no_normalize, rms_db=args.rms_db)
 
     if args.text:  # one-shot
         eng.warmup()  # so the single run isn't the 30s cold path
