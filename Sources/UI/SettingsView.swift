@@ -38,11 +38,18 @@ struct SettingsView: View {
                 Toggle("speaker boost", isOn: $app.voiceSettings.useSpeakerBoost)
             }
 
-            Section("캐시") {
+            Section("캐시 / 문단 분할") {
                 Toggle("같은 텍스트는 캐시에서 재생 (API 재호출 안 함)", isOn: $app.useCache)
+                LabeledContent("문단 최대 글자수") {
+                    TextField("", value: $app.maxChunkChars, format: .number)
+                        .frame(width: 80).multilineTextAlignment(.trailing)
+                }
+                Text("긴 문단은 이 글자수 기준으로 나눠 따로 요청한 뒤 이어 재생합니다. 캐시도 이 단위.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
+        .onChange(of: app.maxChunkChars) { _, _ in app.saveSettings() }
         .onChange(of: app.voiceId) { _, newID in
             if let v = app.voices.first(where: { $0.id == newID }) { app.voiceName = v.name }
             app.saveSettings()

@@ -21,8 +21,14 @@ struct PlayerOverlay: View {
             }
 
             VStack(alignment: .leading, spacing: 5) {
-                Text(app.currentText.isEmpty ? "Codebasic TTS" : app.currentText)
-                    .lineLimit(1).font(.callout)
+                HStack(spacing: 6) {
+                    Text(app.currentText.isEmpty ? "Codebasic TTS" : app.currentText)
+                        .lineLimit(1).font(.callout)
+                    if app.chunkCount > 1 {
+                        Text("· 문단 \(app.chunkIndex)/\(app.chunkCount)")
+                            .font(.caption).foregroundStyle(.secondary).fixedSize()
+                    }
+                }
                 ProgressView(value: app.progress).progressViewStyle(.linear)
             }
 

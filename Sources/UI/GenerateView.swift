@@ -1,26 +1,26 @@
 import SwiftUI
 
-/// Direct text input → synthesize + play.
+/// Direct text input → synthesize + play. The editor is bound to AppState.inputText
+/// so text read via the Services menu also appears here.
 struct GenerateView: View {
     @EnvironmentObject var app: AppState
-    @State private var text = ""
 
     private var canPlay: Bool {
-        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !app.inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("텍스트 입력").font(.headline)
 
-            TextEditor(text: $text)
+            TextEditor(text: $app.inputText)
                 .font(.body)
                 .frame(minHeight: 200)
                 .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
 
             HStack(spacing: 10) {
                 Button {
-                    app.synthesize(text)
+                    app.synthesize(app.inputText)
                 } label: {
                     Label("생성 / 재생", systemImage: "play.fill")
                 }
@@ -35,7 +35,7 @@ struct GenerateView: View {
                 .disabled(!app.isBusy)
 
                 if app.isBusy { ProgressView().controlSize(.small) }
-                Text(app.statusText).font(.callout).foregroundStyle(.secondary)
+                Text(statusLine).font(.callout).foregroundStyle(.secondary)
                 Spacer()
             }
 
@@ -44,5 +44,12 @@ struct GenerateView: View {
             Spacer()
         }
         .padding()
+    }
+
+    private var statusLine: String {
+        if app.chunkCount > 1, app.isBusy {
+            return "\(app.statusText) · 문단 \(app.chunkIndex)/\(app.chunkCount)"
+        }
+        return app.statusText
     }
 }

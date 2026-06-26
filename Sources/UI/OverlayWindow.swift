@@ -1,8 +1,17 @@
 import AppKit
 import SwiftUI
 
+/// A panel that never becomes key or main, so showing it cannot pull keyboard
+/// focus away from the app the user is working in. Its buttons still receive
+/// mouse clicks.
+final class NonKeyPanel: NSPanel {
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+}
+
 /// A borderless, floating, non-activating HUD panel that hosts PlayerOverlay.
-/// Appears over whatever app the user is in while audio is synthesizing/playing.
+/// Appears over whatever app the user is in while audio is synthesizing/playing,
+/// WITHOUT stealing focus from the source window.
 @MainActor
 final class OverlayWindow {
     private var panel: NSPanel?
@@ -12,9 +21,9 @@ final class OverlayWindow {
 
     func show() {
         if panel == nil {
-            let p = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 340, height: 80),
-                            styleMask: [.nonactivatingPanel, .borderless],
-                            backing: .buffered, defer: false)
+            let p = NonKeyPanel(contentRect: NSRect(x: 0, y: 0, width: 340, height: 80),
+                                styleMask: [.nonactivatingPanel, .borderless],
+                                backing: .buffered, defer: false)
             p.level = .floating
             p.isFloatingPanel = true
             p.hidesOnDeactivate = false

@@ -48,6 +48,13 @@ final class CacheStore {
         return try? Data(contentsOf: audioURL(e))
     }
 
+    /// File URL for a cached key, only if the audio file actually exists.
+    func fileURL(forKey key: String) -> URL? {
+        guard let e = entry(forKey: key) else { return nil }
+        let url = audioURL(e)
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
+
     @discardableResult
     func save(key: String, text: String, backend: String, voiceId: String,
               voiceName: String, modelId: String, ext: String, data: Data) -> HistoryEntry {

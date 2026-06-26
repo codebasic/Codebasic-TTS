@@ -29,15 +29,19 @@ final class AppState: ObservableObject {
     // Runtime
     enum Phase: Equatable { case idle, synthesizing, playing, paused }
     @Published var phase: Phase = .idle
-    @Published var progress: Double = 0          // 0…1 playback position
+    @Published var progress: Double = 0          // 0…1 across all chunks
     @Published var currentText = ""              // text being spoken (overlay label)
+    @Published var inputText = ""                // mirrored into the Generate tab
+    @Published var chunkIndex = 0                // 1-based chunk being played
+    @Published var chunkCount = 0
     @Published var statusText = ""
+    @Published var maxChunkChars = TextSplitter.defaultMaxChars
     @Published private(set) var history: [HistoryEntry] = []
 
     var isBusy: Bool { phase != .idle }
 
     private let cache = CacheStore()
-    private let player = AudioPlayer()
+    private let player = QueuePlayer()
     private var task: Task<Void, Never>?
     private var timer: Timer?
 
@@ -49,18 +53,7 @@ final class AppState: ObservableObject {
 
     private func finish() {
         stopTimer()
-        phase = .idle; progress = 0; statusText = ""
-    }
-
-    /// Begin playback of ready audio and enter the .playing phase.
-    private func startPlayback(_ data: Data, status: String) {
-        do {
-            try player.play(data)
-            statusText = status; phase = .playing
-            startTimer()
-        } catch {
-            statusText = "재생 실패"; phase = .idle
-        }
+        phase = .idle; progress = 0; statusText = ""; chunkIndex = 0; chunkCount = 0
     }
 
     // MARK: - Transport (overlay controls)
@@ -81,8 +74,8 @@ final class AppState: ObservableObject {
     }
     private func stopTimer() { timer?.invalidate(); timer = nil }
     private func tick() {
-        let d = player.duration
-        progress = d > 0 ? min(1, player.currentTime / d) : 0
+        progress = player.progress
+        chunkIndex = min(max(1, player.finishedCount + 1), max(1, chunkCount))
     }
 
     var backendIdentity: String { backendKind == .elevenlabs ? "elevenlabs" : "qwen3-local" }
@@ -100,38 +93,63 @@ final class AppState: ObservableObject {
         }
     }
 
-    // MARK: - Synthesize (cache-first)
+    // MARK: - Synthesize (paragraph chunks, cache-first, queued playback)
 
     func synthesize(_ text: String) {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !t.isEmpty else { return }
-        task?.cancel(); player.stop()
+        let chunks = TextSplitter.paragraphs(t, maxChars: maxChunkChars)
+        guard !chunks.isEmpty else { return }
 
-        let key = CacheStore.key(text: t, backend: backendIdentity,
-                                 voiceId: voiceId, modelId: modelId, settingsHash: settingsHash)
+        task?.cancel(); player.stop()
+        inputText = t                            // mirror into the Generate tab (req: show source text)
         currentText = t
-        if useCache, let data = cache.data(forKey: key) {
-            cache.touch(key); history = cache.entries
-            startPlayback(data, status: "캐시에서 재생")
-            return
-        }
-        guard let backend = makeBackend() else { statusText = "키/백엔드 미설정"; return }
         phase = .synthesizing; statusText = "합성 중…"; progress = 0
-        let voice = VoiceConfig(voiceId: voiceId, modelId: modelId, settingsHash: settingsHash)
-        let vName = voiceName, ident = backendIdentity, ext = audioExt
+        player.start(expected: chunks.count)
+        chunkCount = chunks.count; chunkIndex = 0
+
+        let ident = backendIdentity, vid = voiceId, mid = modelId, sHash = settingsHash
+        let vName = voiceName, ext = audioExt
+        let voice = VoiceConfig(voiceId: vid, modelId: mid, settingsHash: sHash)
+
         task = Task { [weak self] in
             guard let self else { return }
+            var backend: TTSBackend?
             do {
-                var data = Data()
-                for try await chunk in backend.stream(segment: t, voice: voice) {
-                    try Task.checkCancellation(); data.append(chunk)
+                for chunk in chunks {
+                    try Task.checkCancellation()
+                    let key = CacheStore.key(text: chunk, backend: ident,
+                                             voiceId: vid, modelId: mid, settingsHash: sHash)
+                    var url: URL?
+                    if self.useCache, let u = self.cache.fileURL(forKey: key) {
+                        self.cache.touch(key); url = u
+                    } else {
+                        if backend == nil { backend = self.makeBackend() }
+                        guard let b = backend else {
+                            self.phase = .idle; self.statusText = "키/백엔드 미설정"; return
+                        }
+                        var data = Data()
+                        for try await c in b.stream(segment: chunk, voice: voice) {
+                            try Task.checkCancellation(); data.append(c)
+                        }
+                        if self.useCache {
+                            let e = self.cache.save(key: key, text: chunk, backend: ident, voiceId: vid,
+                                                    voiceName: vName, modelId: mid, ext: ext, data: data)
+                            url = self.cache.audioURL(e)
+                        } else {
+                            let tmp = FileManager.default.temporaryDirectory
+                                .appendingPathComponent("\(key).\(ext)")
+                            try? data.write(to: tmp); url = tmp
+                        }
+                    }
+                    if let url {
+                        self.player.enqueue(url)
+                        if self.phase == .synthesizing {
+                            self.phase = .playing; self.statusText = "재생 중…"; self.startTimer()
+                        }
+                    }
                 }
-                if self.useCache {
-                    self.cache.save(key: key, text: t, backend: ident, voiceId: self.voiceId,
-                                    voiceName: vName, modelId: self.modelId, ext: ext, data: data)
-                    self.history = self.cache.entries
-                }
-                self.startPlayback(data, status: "재생 중…")
+                self.history = self.cache.entries
             } catch is CancellationError {
                 self.finish()
             } catch {
@@ -143,10 +161,13 @@ final class AppState: ObservableObject {
 
     func replay(_ e: HistoryEntry) {
         task?.cancel(); player.stop()
-        guard let data = cache.data(forKey: e.id) else { statusText = "오디오 파일 없음"; return }
+        guard let url = cache.fileURL(forKey: e.id) else { statusText = "오디오 파일 없음"; return }
         cache.touch(e.id); history = cache.entries
-        currentText = e.text
-        startPlayback(data, status: "캐시에서 재생")
+        inputText = e.text; currentText = e.text
+        chunkCount = 1; chunkIndex = 1; progress = 0
+        player.start(expected: 1)
+        player.enqueue(url)
+        phase = .playing; statusText = "캐시에서 재생"; startTimer()
     }
 
     func stop() { task?.cancel(); player.stop(); finish() }
@@ -193,6 +214,7 @@ final class AppState: ObservableObject {
         let dict: [String: Any] = [
             "voiceId": voiceId, "voiceName": voiceName, "modelId": modelId,
             "backend": backendKind.rawValue, "useCache": useCache, "localBaseURL": localBaseURL,
+            "maxChunkChars": maxChunkChars,
             "stability": voiceSettings.stability, "similarity": voiceSettings.similarityBoost,
             "style": voiceSettings.style, "speakerBoost": voiceSettings.useSpeakerBoost,
         ]
@@ -210,6 +232,7 @@ final class AppState: ObservableObject {
         backendKind = BackendKind(rawValue: o["backend"] as? String ?? "") ?? backendKind
         useCache = o["useCache"] as? Bool ?? useCache
         localBaseURL = o["localBaseURL"] as? String ?? localBaseURL
+        maxChunkChars = o["maxChunkChars"] as? Int ?? maxChunkChars
         voiceSettings.stability = o["stability"] as? Double ?? voiceSettings.stability
         voiceSettings.similarityBoost = o["similarity"] as? Double ?? voiceSettings.similarityBoost
         voiceSettings.style = o["style"] as? Double ?? voiceSettings.style
