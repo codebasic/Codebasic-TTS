@@ -11,12 +11,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let appState = AppState()
     private lazy var mainWindow = MainWindow(appState: appState)
     private lazy var overlay = OverlayWindow(app: appState)
+    private var statusItem: NSStatusItem!
     private var cancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
 
         setUpMainMenu()
+        setUpStatusItem()
         registerServices()
         observeState()
         if appState.keyPresent { appState.refreshVoices() }
@@ -24,6 +26,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         Log.app.info("Codebasic TTS launched. Backend: \(self.appState.backendIdentity, privacy: .public)")
     }
+
+    // MARK: - Status item (persistent, focus-safe affordance to reopen the UI)
+
+    private func setUpStatusItem() {
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        statusItem.button?.title = "🔊"
+
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        let open = NSMenuItem(title: "Codebasic TTS 열기", action: #selector(openWindow), keyEquivalent: "")
+        open.target = self
+        menu.addItem(open)
+        menu.addItem(.separator())
+        let stop = NSMenuItem(title: "재생 중지", action: #selector(stopSpeaking), keyEquivalent: "")
+        stop.target = self
+        menu.addItem(stop)
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "종료", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        statusItem.menu = menu
+    }
+
+    @objc private func openWindow() { mainWindow.show() }
+    @objc private func stopSpeaking() { appState.stop() }
 
     /// Keep running as a background TTS service after the window is closed, so the
     /// Services menu still works.
@@ -35,13 +60,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
-    // MARK: - State → overlay
+    // MARK: - State → status icon + overlay
 
     private func observeState() {
         appState.$phase
             .receive(on: RunLoop.main)
             .sink { [weak self] phase in
-                if phase == .idle { self?.overlay.hide() } else { self?.overlay.show() }
+                guard let self else { return }
+                switch phase {
+                case .idle:         self.statusItem.button?.title = "🔊"; self.overlay.hide()
+                case .synthesizing: self.statusItem.button?.title = "⏳"; self.overlay.show()
+                case .playing:      self.statusItem.button?.title = "🔈"; self.overlay.show()
+                case .paused:       self.statusItem.button?.title = "⏸"; self.overlay.show()
+                }
             }
             .store(in: &cancellables)
     }
