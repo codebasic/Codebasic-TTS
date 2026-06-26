@@ -21,6 +21,7 @@ the REPL warms up once at launch so subsequent sentences are ~1s.
 """
 import argparse
 import os
+import select
 import subprocess
 import sys
 import tempfile
@@ -120,49 +121,83 @@ class Engine:
         return path
 
 
+def read_block(prompt="> "):
+    """Read one logical input.
+
+    A manually typed line submits on a single Enter. A pasted block of several
+    lines arrives as back-to-back lines; we detect the burst with select() and
+    collect the whole paste into one block instead of synthesizing line-by-line.
+    Returns a list of raw lines, or None on EOF (Ctrl-D).
+    """
+    sys.stdout.write(prompt)
+    sys.stdout.flush()
+    first = sys.stdin.readline()
+    if first == "":                       # EOF
+        return None
+    lines = [first.rstrip("\n")]
+    # Keep pulling while more input is already buffered (i.e. a paste in flight).
+    while select.select([sys.stdin], [], [], 0.12)[0]:
+        nxt = sys.stdin.readline()
+        if nxt == "":
+            break
+        lines.append(nxt.rstrip("\n"))
+    return lines
+
+
 def repl(eng: Engine, save: bool):
     out_dir = os.path.join(HERE, "out")
     n = 0
-    print("\nREADY. Type a sentence, or :help for commands. Ctrl-D to quit.\n", flush=True)
+    print("\nREADY. Type text + Enter to synthesize. Paste multi-line freely — "
+          "it's collected as one block.\n:help for commands, Ctrl-D to quit.\n", flush=True)
     while True:
-        try:
-            line = input("> ").strip()
-        except EOFError:
+        lines = read_block("> ")
+        if lines is None:                 # Ctrl-D
             print()
             break
-        if not line:
+        while lines and lines[-1].strip() == "":
+            lines.pop()
+        if not lines:
             continue
-        if line in (":q", ":quit", ":exit"):
-            break
-        if line == ":help":
-            print(":ref PATH | :model 4bit|5bit|6bit|8bit|bf16 | :temp 0.x | "
-                  ":speed 1.0 | :save on|off | :q", flush=True)
-            continue
-        if line.startswith(":ref "):
-            p = os.path.expanduser(line[5:].strip())
-            if os.path.exists(p):
-                eng.ref_audio = p
-                print(f"[ref] -> {p}  (NOTE: ref_text still '{eng.ref_text_path}')", flush=True)
-            else:
-                print(f"[ref] not found: {p}", flush=True)
-            continue
-        if line.startswith(":model "):
-            eng.quant = line[7:].strip()
-            eng.load(); eng.warmup()
-            continue
-        if line.startswith(":temp "):
-            eng.temperature = float(line[6:]); print(f"[temp] {eng.temperature}", flush=True); continue
-        if line.startswith(":speed "):
-            eng.speed = float(line[7:]); print(f"[speed] {eng.speed}", flush=True); continue
-        if line.startswith(":save "):
-            save = line[6:].strip() == "on"; print(f"[save] {save}", flush=True); continue
 
+        # Commands are recognized only as a single ':' line (so pasted text that
+        # happens to start with ':' is still treated as text).
+        if len(lines) == 1 and lines[0].strip().startswith(":"):
+            cmd = lines[0].strip()
+            if cmd in (":q", ":quit", ":exit"):
+                break
+            elif cmd == ":help":
+                print(":ref PATH | :model 4bit|5bit|6bit|8bit|bf16 | :temp 0.x | "
+                      ":speed 1.0 | :save on|off | :q", flush=True)
+            elif cmd.startswith(":ref "):
+                p = os.path.expanduser(cmd[5:].strip())
+                if os.path.exists(p):
+                    eng.ref_audio = p
+                    print(f"[ref] -> {p}  (NOTE: ref_text still '{eng.ref_text_path}')", flush=True)
+                else:
+                    print(f"[ref] not found: {p}", flush=True)
+            elif cmd.startswith(":model "):
+                eng.quant = cmd[7:].strip()
+                eng.load(); eng.warmup()
+            elif cmd.startswith(":temp "):
+                eng.temperature = float(cmd[6:]); print(f"[temp] {eng.temperature}", flush=True)
+            elif cmd.startswith(":speed "):
+                eng.speed = float(cmd[7:]); print(f"[speed] {eng.speed}", flush=True)
+            elif cmd.startswith(":save "):
+                save = cmd[6:].strip() == "on"; print(f"[save] {save}", flush=True)
+            else:
+                print(f"[?] unknown command: {cmd}  (try :help)", flush=True)
+            continue
+
+        # Join the block into one utterance; collapse internal blank lines.
+        text = " ".join(s for s in (l.strip() for l in lines) if s)
+        if not text:
+            continue
         out = None
         if save:
             os.makedirs(out_dir, exist_ok=True)
             n += 1
             out = os.path.join(out_dir, f"clone_{n:03d}.wav")
-        eng.synth(line, out_path=out, play=True)
+        eng.synth(text, out_path=out, play=True)
 
 
 def main():
