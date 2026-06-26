@@ -82,9 +82,39 @@ def _normalize(audio: np.ndarray, target_rms_db: float = -20.0, peak_limit: floa
     return audio
 
 
+FILLER = " 네."   # appended then trimmed so the real ending isn't truncated by early EOS
+
+
+def _trim_after_filler(audio: np.ndarray, sr: int, min_gap_ms: float = 120.0, thr_ratio: float = 0.02) -> np.ndarray:
+    """Cut at the last silence gap, dropping the appended filler word + its
+    leading pause and keeping the now-complete real ending."""
+    a = audio.reshape(-1)
+    pk = float(np.max(np.abs(a))) or 1e-9
+    idx = np.where(np.abs(a) > thr_ratio * pk)[0]
+    if idx.size == 0:
+        return a
+    big = np.where(np.diff(idx) > int(min_gap_ms * sr / 1000))[0]
+    if big.size == 0:
+        return a
+    return a[:idx[big[-1]] + 1]
+
+
+def _pad_tail(audio: np.ndarray, sr: int, pad_ms: float = 250.0, fade_ms: float = 25.0) -> np.ndarray:
+    """Append breathing-room silence (with a short fade-out) so endings don't
+    sound abruptly cut; the model leaves only ~10-70ms of trailing silence."""
+    audio = audio.reshape(-1).astype(np.float32).copy()
+    n_fade = int(sr * fade_ms / 1000)
+    if 0 < n_fade < audio.size:
+        audio[-n_fade:] *= np.linspace(1.0, 0.0, n_fade, dtype=np.float32)
+    n_pad = int(sr * pad_ms / 1000)
+    if n_pad > 0:
+        audio = np.concatenate([audio, np.zeros(n_pad, dtype=np.float32)])
+    return audio
+
+
 def _pcm_wav_bytes(audio: np.ndarray, sr: int) -> bytes:
-    """float32 [-1,1] mono -> 16-bit PCM WAV container (loudness-normalized)."""
-    audio = np.clip(_normalize(audio).reshape(-1), -1.0, 1.0)
+    """float32 [-1,1] mono -> 16-bit PCM WAV container (normalized + tail-padded)."""
+    audio = np.clip(_pad_tail(_normalize(audio), sr).reshape(-1), -1.0, 1.0)
     pcm16 = (audio * 32767.0).astype("<i2")
     buf = io.BytesIO()
     with wave.open(buf, "wb") as w:
@@ -117,7 +147,7 @@ def tts(req: TTSRequest):
 
     t0 = time.time()
     results = list(model.generate(
-        text=text,
+        text=text + FILLER,
         ref_audio=REF_AUDIO,
         ref_text=_state["ref_text"],
         temperature=req.temperature,
@@ -126,6 +156,7 @@ def tts(req: TTSRequest):
     ))
     sr = int(getattr(results[0], "sample_rate", 0) or _state["sample_rate"])
     audio = np.concatenate([np.array(r.audio).reshape(-1) for r in results]).astype(np.float32)
+    audio = _trim_after_filler(audio, sr)   # drop the filler + its leading pause
     wav = _pcm_wav_bytes(audio, sr)
     print(f"[sidecar] tts {len(text)} chars -> {len(audio)/sr:.2f}s audio "
           f"in {time.time()-t0:.1f}s", flush=True)

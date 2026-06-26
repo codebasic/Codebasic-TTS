@@ -67,6 +67,41 @@ def normalize(audio: np.ndarray, target_rms_db: float = -20.0,
     return audio
 
 
+def trim_after_filler(audio: np.ndarray, sr: int, min_gap_ms: float = 120.0,
+                      thr_ratio: float = 0.02) -> np.ndarray:
+    """The model truncates the final syllable of a sentence (early EOS), so the
+    real ending ('습니다') sounds cut. We synthesize with a short filler word
+    appended so the real ending is no longer terminal, then cut at the last
+    silence gap — dropping the filler and its leading pause and keeping the now-
+    complete ending. If no clear gap is found, return unchanged."""
+    a = audio.reshape(-1)
+    pk = float(np.max(np.abs(a))) or 1e-9
+    idx = np.where(np.abs(a) > thr_ratio * pk)[0]
+    if idx.size == 0:
+        return a
+    gap = int(min_gap_ms * sr / 1000)
+    big = np.where(np.diff(idx) > gap)[0]
+    if big.size == 0:
+        return a
+    cut = idx[big[-1]] + 1                  # last active sample before the final gap
+    return a[:cut]
+
+
+def pad_tail(audio: np.ndarray, sr: int, pad_ms: float = 250.0,
+             fade_ms: float = 12.0) -> np.ndarray:
+    """The model leaves almost no silence after the last phoneme (~10-70ms), so
+    endings feel abruptly cut. Apply a short fade-out (click safety) then append
+    breathing-room silence."""
+    audio = audio.reshape(-1).astype(np.float32).copy()
+    n_fade = int(sr * fade_ms / 1000)
+    if 0 < n_fade < audio.size:
+        audio[-n_fade:] *= np.linspace(1.0, 0.0, n_fade, dtype=np.float32)
+    n_pad = int(sr * pad_ms / 1000)
+    if n_pad > 0:
+        audio = np.concatenate([audio, np.zeros(n_pad, dtype=np.float32)])
+    return audio
+
+
 def to_wav(audio: np.ndarray, sr: int, path: str):
     audio = np.clip(audio.reshape(-1), -1.0, 1.0)
     pcm16 = (audio * 32767.0).astype("<i2")
@@ -79,7 +114,7 @@ def to_wav(audio: np.ndarray, sr: int, path: str):
 
 class Engine:
     def __init__(self, quant, ref_audio, ref_text, temperature, speed,
-                 norm=True, rms_db=-20.0):
+                 norm=True, rms_db=-20.0, tail_ms=250.0, fade_ms=25.0, filler=" 네."):
         self.quant = quant
         self.ref_audio = ref_audio
         self.ref_text_path = ref_text
@@ -88,6 +123,9 @@ class Engine:
         self.speed = speed
         self.norm = norm
         self.rms_db = rms_db
+        self.tail_ms = tail_ms
+        self.fade_ms = fade_ms
+        self.filler = filler
         self.model = None
         self.sr = 24000
         self.load()
@@ -103,16 +141,17 @@ class Engine:
     def warmup(self):
         print("[warmup] compiling graph (one-time ~30s on cold MLX) ...", flush=True)
         t0 = time.time()
-        self._gen("워밍업.", stream=True, quiet=True)
+        self._gen("워밍업.", stream=False, quiet=True)
         print(f"[warmup] ready in {time.time()-t0:.1f}s", flush=True)
 
-    def _gen(self, text, stream=True, quiet=False):
+    def _gen(self, text, stream=True, quiet=False, filler=None):
+        gen_text = (text + filler) if filler else text
         t0 = time.time()
         t_first = None
         chunks = []
         kw = dict(stream=True, streaming_interval=0.5) if stream else {}
         for r in self.model.generate(
-            text=text, ref_audio=self.ref_audio, ref_text=self.ref_text,
+            text=gen_text, ref_audio=self.ref_audio, ref_text=self.ref_text,
             temperature=self.temperature, speed=self.speed, verbose=False, **kw
         ):
             if t_first is None:
@@ -120,6 +159,8 @@ class Engine:
             chunks.append(np.array(r.audio).reshape(-1))
         total = time.time() - t0
         audio = np.concatenate(chunks).astype(np.float32)
+        if filler:                              # drop the filler + its leading pause
+            audio = trim_after_filler(audio, self.sr)
         dur = len(audio) / self.sr
         if not quiet:
             rtf = total / dur if dur else 0
@@ -129,9 +170,14 @@ class Engine:
         return audio
 
     def synth(self, text, out_path=None, play=True):
-        audio = self._gen(text, stream=True)
+        # Non-streaming: this CLI buffers the whole clip before playback anyway,
+        # so streaming gives no latency win and its final-chunk drop (~0.3-0.5s)
+        # truncated the ending. Non-stream keeps the full tail.
+        audio = self._gen(text, stream=False, filler=self.filler or None)
         if self.norm:
             audio = normalize(audio, target_rms_db=self.rms_db)
+        if self.tail_ms > 0 or self.fade_ms > 0:
+            audio = pad_tail(audio, self.sr, pad_ms=self.tail_ms, fade_ms=self.fade_ms)
         path = out_path or os.path.join(tempfile.gettempdir(), "clone_repl.wav")
         to_wav(audio, self.sr, path)
         if out_path:
@@ -211,7 +257,8 @@ def repl(eng: Engine, save: bool):
                 break
             elif cmd == ":help":
                 print(":ref PATH | :model 4bit|5bit|6bit|8bit|bf16 | :temp 0.x | "
-                      ":speed 1.0 | :norm on|off | :rms -20 | :save on|off | :q", flush=True)
+                      ":speed 1.0 | :norm on|off | :rms -20 | :tail 250 | :fade 25 | "
+                      ":filler ' 네.'|off | :save on|off | :q", flush=True)
             elif cmd.startswith(":ref "):
                 p = os.path.expanduser(cmd[5:].strip())
                 if os.path.exists(p):
@@ -232,6 +279,14 @@ def repl(eng: Engine, save: bool):
                 eng.norm = cmd[6:].strip() == "on"; print(f"[norm] {eng.norm}", flush=True)
             elif cmd.startswith(":rms "):
                 eng.rms_db = float(cmd[5:]); print(f"[rms] target {eng.rms_db} dBFS", flush=True)
+            elif cmd.startswith(":tail "):
+                eng.tail_ms = float(cmd[6:]); print(f"[tail] {eng.tail_ms} ms", flush=True)
+            elif cmd.startswith(":fade "):
+                eng.fade_ms = float(cmd[6:]); print(f"[fade] {eng.fade_ms} ms", flush=True)
+            elif cmd.startswith(":filler"):
+                v = cmd[len(":filler"):].strip()
+                eng.filler = "" if v in ("off", "''", '""') else (v or eng.filler)
+                print(f"[filler] {eng.filler!r}", flush=True)
             else:
                 print(f"[?] unknown command: {cmd}  (try :help)", flush=True)
             continue
@@ -263,11 +318,19 @@ def main():
                     help="disable loudness normalization (raw model level)")
     ap.add_argument("--rms-db", type=float, default=-20.0,
                     help="target RMS loudness in dBFS (default -20; higher=louder)")
+    ap.add_argument("--tail-ms", type=float, default=250.0,
+                    help="trailing silence appended after speech (default 250; 0=off)")
+    ap.add_argument("--fade-ms", type=float, default=25.0,
+                    help="fade-out over the speech end, click safety (default 25; 0=off)")
+    ap.add_argument("--filler", default=" 네.",
+                    help="filler appended then trimmed so the real ending isn't truncated "
+                         "(default ' 네.'; empty string disables)")
     ap.add_argument("--save", action="store_true", help="REPL: keep each wav in ./out/")
     args = ap.parse_args()
 
     eng = Engine(args.model, args.ref_audio, args.ref_text, args.temp, args.speed,
-                 norm=not args.no_normalize, rms_db=args.rms_db)
+                 norm=not args.no_normalize, rms_db=args.rms_db,
+                 tail_ms=args.tail_ms, fade_ms=args.fade_ms, filler=args.filler)
 
     if args.text:  # one-shot
         eng.warmup()  # so the single run isn't the 30s cold path

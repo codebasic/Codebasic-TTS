@@ -29,7 +29,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.title = "🔊"
 
         let menu = NSMenu()
-        menu.addItem(withTitle: "SelectedTextTTS", action: nil, keyEquivalent: "")
+        menu.addItem(withTitle: "Codebasic TTS", action: nil, keyEquivalent: "")
         menu.addItem(.separator())
 
         let lastItem = NSMenuItem(title: "Last selection: —", action: nil, keyEquivalent: "")
