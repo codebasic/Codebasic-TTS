@@ -150,14 +150,27 @@ def _make_reader():
         if not sys.stdin.isatty():
             raise ImportError                  # piped/non-interactive: use plain input()
         from prompt_toolkit import PromptSession
-        session = PromptSession()
+        from prompt_toolkit.key_binding import KeyBindings
+
+        kb = KeyBindings()
+
+        @kb.add("escape")                       # Esc clears the current input in place
+        def _(event):                           # (not eager, so arrow keys still work)
+            event.current_buffer.reset()
+
+        @kb.add("c-c")                          # Ctrl-C cancels the current line (no exit)
+        def _(event):
+            event.current_buffer.reset()
+            event.app.exit(result="")
+
+        session = PromptSession(key_bindings=kb)
 
         def read_block(prompt="> "):
             try:
                 return session.prompt(prompt)     # full string, paste-safe, unicode-correct
             except EOFError:                       # Ctrl-D
                 return None
-            except KeyboardInterrupt:              # Ctrl-C cancels the current line
+            except KeyboardInterrupt:              # fallback: Ctrl-C cancels the current line
                 return ""
         return read_block
     except ImportError:
@@ -178,7 +191,8 @@ def repl(eng: Engine, save: bool):
     out_dir = os.path.join(HERE, "out")
     n = 0
     print("\nREADY. Type text + Enter to synthesize. Paste multi-line freely — "
-          "the whole paste is one utterance.\n:help for commands, Ctrl-D to quit.\n", flush=True)
+          "the whole paste is one utterance.\n"
+          ":help for commands · Esc/Ctrl-C clears input · Ctrl-D quits.\n", flush=True)
     while True:
         block = read_block("> ")
         if block is None:                 # Ctrl-D
