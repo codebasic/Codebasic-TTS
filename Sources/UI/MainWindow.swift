@@ -19,17 +19,10 @@ final class MainWindow: NSObject, NSWindowDelegate {
             w.title = "Codebasic TTS"
             w.center()
             w.isReleasedWhenClosed = false
-            w.delegate = self
             w.contentView = NSHostingView(rootView: RootView().environmentObject(appState))
             window = w
         }
-        NSApp.setActivationPolicy(.regular)        // show in Dock while window is open
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
-    }
-
-    func windowWillClose(_ notification: Notification) {
-        // Back to a menu-bar-only agent when the window is dismissed.
-        NSApp.setActivationPolicy(.accessory)
     }
 }

@@ -19,9 +19,9 @@
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
 
-    <!-- Menu-bar agent: no Dock icon, no main window. -->
+    <!-- Regular Dock app (management window). Services still integrate below. -->
     <key>LSUIElement</key>
-    <true/>
+    <false/>
 
     <!-- macOS Services registration. NSMessage maps to the selector
          readSelectedText:userData:error: in ServiceProvider.swift. -->

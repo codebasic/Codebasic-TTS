@@ -75,11 +75,13 @@ install_and_register() {
 
   cat <<EOF
 
-Done. To smoke-test:
+Done. Regular Dock app — the management window opens on launch; closing it keeps
+the app running in the background. Click the Dock icon to reopen.
+To smoke-test the Services path:
   1. In TextEdit (or any app), select some text.
-  2. Right-click → Services → "Codebasic TTS" (or app menu → Services).
-  3. It should speak via ElevenLabs (🔊 → ⏳ → 🔈). Watch logs: ./build.sh logs
-  Menu-bar: ⏳ synthesizing, 🔈 speaking, ⚠️ error. "Stop" (⌘.) halts playback.
+  2. Right-click → Services → "Codebasic TTS".
+  3. It speaks via ElevenLabs; a floating HUD shows pause/stop (focus stays on
+     the source window). Watch logs: ./build.sh logs
 EOF
 }
 
