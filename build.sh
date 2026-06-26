@@ -12,7 +12,8 @@
 #
 set -euo pipefail
 
-APP_NAME="SelectedTextTTS"
+APP_NAME="Codebasic TTS"
+OLD_APP_NAME="SelectedTextTTS"      # previous bundle name, cleaned up on install
 BUNDLE_ID="com.seongjoo.SelectedTextTTS"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="$HERE/build"
@@ -45,7 +46,15 @@ build() {
 
 install_and_register() {
   echo "==> Stopping any running instance (so 'open' launches the new binary, not the old one)"
-  pkill -f "$APP_NAME.app/Contents/MacOS/$APP_NAME" 2>/dev/null && sleep 1 || true
+  pkill -f "$APP_NAME.app/Contents/MacOS/$APP_NAME" 2>/dev/null || true
+  pkill -f "$OLD_APP_NAME.app/Contents/MacOS/$OLD_APP_NAME" 2>/dev/null || true
+  sleep 1
+
+  echo "==> Removing the old '$OLD_APP_NAME' bundle if present (renamed to '$APP_NAME')"
+  if [ -d "$INSTALL_DIR/$OLD_APP_NAME.app" ]; then
+    "$LSREGISTER" -u "$INSTALL_DIR/$OLD_APP_NAME.app" 2>/dev/null || true
+    rm -rf "$INSTALL_DIR/$OLD_APP_NAME.app"
+  fi
 
   echo "==> Installing to $INSTALL_DIR (Launch Services only scans ~/Applications and /Applications)"
   mkdir -p "$INSTALL_DIR"
