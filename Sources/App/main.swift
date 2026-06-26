@@ -10,6 +10,8 @@ MainActor.assumeIsolated {
     let app = NSApplication.shared
     let delegate = AppDelegate()
     app.delegate = delegate
-    app.setActivationPolicy(.regular)        // regular Dock app with a window
+    // Agent by default so background (Services-triggered) playback never steals
+    // focus; MainWindow flips to .regular (Dock icon) while its window is open.
+    app.setActivationPolicy(.accessory)
     app.run()
 }
