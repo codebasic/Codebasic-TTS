@@ -1,0 +1,14 @@
+# Build output (swiftc-assembled .app bundle)
+build/
+
+# Python sidecar virtualenv + caches
+Sidecar/.venv/
+Sidecar/out/
+__pycache__/
+*.pyc
+
+# Generated audio / scratch
+*.wav
+
+# macOS
+.DS_Store

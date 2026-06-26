@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Voice-clone TTS test CLI wrapper. Uses the sidecar venv directly.
+#   ./tts                         REPL: load once, test many sentences
+#   ./tts "읽을 문장"              one-shot: synth + play
+#   ./tts "문장" -o out.wav        one-shot: also save to out.wav
+#   ./tts -m 4bit                 pick quant (4bit|5bit|6bit|8bit|bf16)
+#   ./tts --ref-audio ../ref_siwon.wav   use a different reference voice
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec "$HERE/.venv/bin/python" "$HERE/clone.py" "$@"
