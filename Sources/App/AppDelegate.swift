@@ -1,5 +1,6 @@
 import AppKit
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Singleton-ish handle so the Services provider can reach the running app.
@@ -7,26 +8,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var statusItem: NSStatusItem!
     private let serviceProvider = ServiceProvider()
+    private let player = AudioPlayer()
     private var lastSelection: String = ""
+    private var speakTask: Task<Void, Never>?
 
-    // Active backend. M1 just logs through it; later milestones swap in
-    // ElevenLabsBackend / Qwen3MLXBackend behind this same protocol.
-    private let backend: TTSBackend = StubBackend()
+    // Active backend: ElevenLabs (cloud) when a key is present, else a no-op stub.
+    private var backend: TTSBackend = StubBackend()
+
+    // The user's cloned ElevenLabs voice (성주) + the low-latency model.
+    private let voice = VoiceConfig(voiceId: "Yp1WZJMrN7OSdP8PG9sm",
+                                    modelId: "eleven_flash_v2_5",
+                                    settingsHash: "")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
 
+        if let key = Secrets.elevenLabsKey {
+            backend = ElevenLabsBackend(apiKey: key)
+        } else {
+            Log.app.error("No ElevenLabs key at \(Secrets.appSupportDir)/eleven_key — speech disabled")
+        }
+
         setUpStatusItem()
         registerServices()
+        player.onFinish = { [weak self] in self?.setIcon(.idle) }
 
-        Log.app.info("SelectedTextTTS launched. Active backend: \(self.backend.identity, privacy: .public)")
+        Log.app.info("Codebasic TTS launched. Backend: \(self.backend.identity, privacy: .public)")
     }
 
     // MARK: - Menu bar
 
+    private enum Icon: String { case idle = "🔊", working = "⏳", speaking = "🔈", error = "⚠️" }
+    private enum MenuTag: Int { case lastSelection = 100 }
+
+    private func setIcon(_ icon: Icon) { statusItem.button?.title = icon.rawValue }
+
     private func setUpStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.title = "🔊"
+        setIcon(.idle)
 
         let menu = NSMenu()
         menu.addItem(withTitle: "Codebasic TTS", action: nil, keyEquivalent: "")
@@ -37,46 +56,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         lastItem.isEnabled = false
         menu.addItem(lastItem)
 
+        menu.addItem(withTitle: "Stop", action: #selector(stopSpeaking), keyEquivalent: ".")
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
 
         statusItem.menu = menu
     }
 
-    private enum MenuTag: Int {
-        case lastSelection = 100
+    @objc private func stopSpeaking() {
+        speakTask?.cancel()
+        player.stop()
+        setIcon(.idle)
     }
 
     // MARK: - Services
 
     private func registerServices() {
-        // Wire the provider so the runtime can dispatch the Services menu item.
         NSApp.servicesProvider = serviceProvider
-        // Force a refresh of the dynamic services so the menu item shows up
-        // without requiring a logout/login on the very first run.
         NSUpdateDynamicServices()
     }
 
     // MARK: - Entry point from the Services menu
 
-    /// Called by ServiceProvider when the user picks "Read with SelectedTextTTS".
-    /// M1: log + reflect in the menu bar. M2+: hand to Segmenter → Cache → Player.
+    /// Called by ServiceProvider when the user picks "Codebasic TTS": synthesize
+    /// the selected text and play it.
     func handleSelectedText(_ text: String) {
-        lastSelection = text
-        let preview = text.replacingOccurrences(of: "\n", with: " ").prefix(60)
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        lastSelection = trimmed
 
-        DispatchQueue.main.async { [weak self] in
+        let preview = trimmed.replacingOccurrences(of: "\n", with: " ").prefix(60)
+        if let item = statusItem.menu?.item(withTag: MenuTag.lastSelection.rawValue) {
+            item.title = "Last selection: \(preview)\(trimmed.count > 60 ? "…" : "")"
+        }
+        Log.app.info("handleSelectedText: \(trimmed.count) chars — \"\(preview, privacy: .public)\"")
+
+        speak(trimmed)
+    }
+
+    private func speak(_ text: String) {
+        speakTask?.cancel()
+        player.stop()
+        setIcon(.working)
+
+        speakTask = Task { [weak self] in
             guard let self else { return }
-            if let item = self.statusItem.menu?.item(withTag: MenuTag.lastSelection.rawValue) {
-                item.title = "Last selection: \(preview)\(text.count > 60 ? "…" : "")"
-            }
-            // Brief visual confirmation that the service fired.
-            self.statusItem.button?.title = "🔈"
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-                self.statusItem.button?.title = "🔊"
+            do {
+                for try await chunk in self.backend.stream(segment: text, voice: self.voice) {
+                    try Task.checkCancellation()
+                    self.setIcon(.speaking)
+                    try self.player.play(chunk)
+                }
+            } catch is CancellationError {
+                // user pressed Stop / new selection
+            } catch {
+                Log.app.error("speak failed: \(error.localizedDescription)")
+                self.setIcon(.error)
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                self.setIcon(.idle)
             }
         }
-
-        Log.app.info("handleSelectedText: \(text.count) chars — \"\(preview, privacy: .public)\"")
     }
 }

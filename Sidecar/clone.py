@@ -340,7 +340,7 @@ def main():
                     help="fade-out over the speech end, click safety (default 25; 0=off)")
     ap.add_argument("--end-marker", default="…",
                     help="non-vocalized marker appended so the last syllable isn't clipped "
-                         "(default '…'; ' ^' also works; empty string disables)")
+                         "(default '…'; empty string disables). Model still clips occasionally.")
     ap.add_argument("--gap-ms", type=float, default=180.0,
                     help="silence between sentences in per-sentence fallback (default 180)")
     ap.add_argument("--trunc-ratio", type=float, default=2.0,

@@ -49,6 +49,17 @@ install_and_register() {
   rm -rf "$INSTALL_DIR/$APP_NAME.app"
   cp -R "$APP_DIR" "$INSTALL_DIR/$APP_NAME.app"
 
+  echo "==> Installing ElevenLabs key into Application Support (if present)"
+  local appsup="$HOME/Library/Application Support/Codebasic TTS"
+  if [ -f "$HERE/Sidecar/.eleven_key" ]; then
+    mkdir -p "$appsup"
+    tr -d ' \n\r' < "$HERE/Sidecar/.eleven_key" > "$appsup/eleven_key"
+    chmod 600 "$appsup/eleven_key"
+    echo "    key -> $appsup/eleven_key"
+  else
+    echo "    (no Sidecar/.eleven_key — speech will be disabled)"
+  fi
+
   echo "==> Registering with Launch Services"
   "$LSREGISTER" -f "$INSTALL_DIR/$APP_NAME.app"
 
@@ -61,13 +72,11 @@ install_and_register() {
 
   cat <<EOF
 
-Done. To smoke-test M1:
+Done. To smoke-test:
   1. In TextEdit (or any app), select some text.
-  2. Right-click → Services → "Read with SelectedTextTTS"
-     (or app menu → Services). If it is missing, see README "Service not appearing".
-  3. Watch the log:  ./build.sh logs
-     You should see: 'Service fired: received N chars'.
-  The 🔊 menu-bar icon briefly flips to 🔈 and its menu shows the last selection.
+  2. Right-click → Services → "Codebasic TTS" (or app menu → Services).
+  3. It should speak via ElevenLabs (🔊 → ⏳ → 🔈). Watch logs: ./build.sh logs
+  Menu-bar: ⏳ synthesizing, 🔈 speaking, ⚠️ error. "Stop" (⌘.) halts playback.
 EOF
 }
 

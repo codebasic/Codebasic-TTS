@@ -19,6 +19,8 @@ final class ServiceProvider: NSObject {
         }
 
         Log.service.info("Service fired: received \(text.count) chars")
-        AppDelegate.shared?.handleSelectedText(text)
+        Task { @MainActor in
+            AppDelegate.shared?.handleSelectedText(text)
+        }
     }
 }
