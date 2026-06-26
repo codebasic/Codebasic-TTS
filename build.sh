@@ -44,6 +44,9 @@ build() {
 }
 
 install_and_register() {
+  echo "==> Stopping any running instance (so 'open' launches the new binary, not the old one)"
+  pkill -f "$APP_NAME.app/Contents/MacOS/$APP_NAME" 2>/dev/null && sleep 1 || true
+
   echo "==> Installing to $INSTALL_DIR (Launch Services only scans ~/Applications and /Applications)"
   mkdir -p "$INSTALL_DIR"
   rm -rf "$INSTALL_DIR/$APP_NAME.app"
