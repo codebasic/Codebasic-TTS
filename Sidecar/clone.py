@@ -21,6 +21,7 @@ the REPL warms up once at launch so subsequent sentences are ~1s.
 """
 import argparse
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -67,26 +68,6 @@ def normalize(audio: np.ndarray, target_rms_db: float = -20.0,
     return audio
 
 
-def trim_after_filler(audio: np.ndarray, sr: int, min_gap_ms: float = 120.0,
-                      thr_ratio: float = 0.02) -> np.ndarray:
-    """The model truncates the final syllable of a sentence (early EOS), so the
-    real ending ('습니다') sounds cut. We synthesize with a short filler word
-    appended so the real ending is no longer terminal, then cut at the last
-    silence gap — dropping the filler and its leading pause and keeping the now-
-    complete ending. If no clear gap is found, return unchanged."""
-    a = audio.reshape(-1)
-    pk = float(np.max(np.abs(a))) or 1e-9
-    idx = np.where(np.abs(a) > thr_ratio * pk)[0]
-    if idx.size == 0:
-        return a
-    gap = int(min_gap_ms * sr / 1000)
-    big = np.where(np.diff(idx) > gap)[0]
-    if big.size == 0:
-        return a
-    cut = idx[big[-1]] + 1                  # last active sample before the final gap
-    return a[:cut]
-
-
 def pad_tail(audio: np.ndarray, sr: int, pad_ms: float = 250.0,
              fade_ms: float = 12.0) -> np.ndarray:
     """The model leaves almost no silence after the last phoneme (~10-70ms), so
@@ -102,6 +83,17 @@ def pad_tail(audio: np.ndarray, sr: int, pad_ms: float = 250.0,
     return audio
 
 
+def split_sentences(text: str):
+    """Split into sentences. The model emits an early EOS on long multi-sentence
+    input (it can stop mid-paragraph), so we synthesize one sentence at a time.
+    Splits after sentence-ending punctuation; falls back to the whole text."""
+    text = text.strip()
+    if not text:
+        return []
+    parts = re.split(r"(?<=[.!?。！？…])\s+", text)
+    return [p.strip() for p in parts if p.strip()] or [text]
+
+
 def to_wav(audio: np.ndarray, sr: int, path: str):
     audio = np.clip(audio.reshape(-1), -1.0, 1.0)
     pcm16 = (audio * 32767.0).astype("<i2")
@@ -114,7 +106,8 @@ def to_wav(audio: np.ndarray, sr: int, path: str):
 
 class Engine:
     def __init__(self, quant, ref_audio, ref_text, temperature, speed,
-                 norm=True, rms_db=-20.0, tail_ms=250.0, fade_ms=25.0, filler=" 네."):
+                 norm=True, rms_db=-20.0, tail_ms=250.0, fade_ms=25.0, end_marker="…",
+                 gap_ms=180.0, trunc_ratio=2.0):
         self.quant = quant
         self.ref_audio = ref_audio
         self.ref_text_path = ref_text
@@ -125,7 +118,9 @@ class Engine:
         self.rms_db = rms_db
         self.tail_ms = tail_ms
         self.fade_ms = fade_ms
-        self.filler = filler
+        self.end_marker = end_marker  # non-vocalized marker that prevents end-cut
+        self.gap_ms = gap_ms          # silence inserted between sentences (fallback)
+        self.trunc_ratio = trunc_ratio  # audio/text token ratio below this = truncated
         self.model = None
         self.sr = 24000
         self.load()
@@ -141,40 +136,60 @@ class Engine:
     def warmup(self):
         print("[warmup] compiling graph (one-time ~30s on cold MLX) ...", flush=True)
         t0 = time.time()
-        self._gen("워밍업.", stream=False, quiet=True)
+        self._gen("워밍업.")
         print(f"[warmup] ready in {time.time()-t0:.1f}s", flush=True)
 
-    def _gen(self, text, stream=True, quiet=False, filler=None):
-        gen_text = (text + filler) if filler else text
-        t0 = time.time()
-        chunks = []
-        kw = dict(stream=True, streaming_interval=0.5) if stream else {}
-        for r in self.model.generate(
+    def _gen(self, text):
+        """Synthesize `text` (non-streaming). A non-vocalized end marker ('…')
+        is appended so the model doesn't clip the last syllable (it isn't read,
+        so no trimming is needed). Returns (audio, generated_token_count)."""
+        gen_text = text + self.end_marker
+        results = list(self.model.generate(
             text=gen_text, ref_audio=self.ref_audio, ref_text=self.ref_text,
-            temperature=self.temperature, speed=self.speed, verbose=False, **kw
-        ):
-            chunks.append(np.array(r.audio).reshape(-1))
-        total = time.time() - t0
-        audio = np.concatenate(chunks).astype(np.float32)
-        if filler:                              # drop the filler + its leading pause
-            audio = trim_after_filler(audio, self.sr)
-        dur = len(audio) / self.sr
-        if not quiet:
-            rtf = total / dur if dur else 0
-            print(f"[{self.quant} ref={os.path.basename(self.ref_audio)} "
-                  f"temp={self.temperature}] total={total:.2f}s "
-                  f"audio={dur:.2f}s RTF={rtf:.2f}x", flush=True)
-        return audio
+            temperature=self.temperature, speed=self.speed, verbose=False))
+        audio = np.concatenate([np.array(r.audio).reshape(-1) for r in results]).astype(np.float32)
+        toks = sum(int(getattr(r, "token_count", 0)) for r in results)
+        return audio, toks
+
+    def _join(self, segs):
+        gap = np.zeros(int(self.sr * self.gap_ms / 1000), dtype=np.float32)
+        out = []
+        for i, s in enumerate(segs):
+            if i and gap.size:
+                out.append(gap)
+            out.append(s)
+        return np.concatenate(out) if out else np.zeros(0, dtype=np.float32)
 
     def synth(self, text, out_path=None, play=True):
-        # Non-streaming: this CLI buffers the whole clip before playback anyway,
-        # so streaming gives no latency win and its final-chunk drop (~0.3-0.5s)
-        # truncated the ending. Non-stream keeps the full tail.
-        audio = self._gen(text, stream=False, filler=self.filler or None)
+        # Whole-paragraph generation keeps prosody natural across sentences.
+        # The model RARELY stops early (mid-paragraph) via a stochastic EOS; we
+        # detect that as a low audio/text token ratio and fall back to
+        # guaranteed-complete per-sentence synthesis only then.
+        text = text.strip()
+        text_tokens = max(1, len(self.model.tokenizer.encode(text)))
+        t0 = time.time()
+
+        audio, toks = self._gen(text)
+        ratio = toks / text_tokens
+        mode = "whole"
+        sents = split_sentences(text)
+        if self.trunc_ratio > 0 and ratio < self.trunc_ratio and len(sents) > 1:
+            print(f"[truncation guard] whole output short (ratio {ratio:.2f} "
+                  f"< {self.trunc_ratio}); per-sentence fallback", flush=True)
+            audio = self._join([self._gen(s)[0] for s in sents])
+            mode = f"sentence×{len(sents)}"
+        total = time.time() - t0
+
         if self.norm:
             audio = normalize(audio, target_rms_db=self.rms_db)
         if self.tail_ms > 0 or self.fade_ms > 0:
             audio = pad_tail(audio, self.sr, pad_ms=self.tail_ms, fade_ms=self.fade_ms)
+
+        dur = len(audio) / self.sr
+        rtf = total / dur if dur else 0
+        print(f"[{self.quant} ref={os.path.basename(self.ref_audio)} temp={self.temperature}] "
+              f"{mode} total={total:.2f}s audio={dur:.2f}s RTF={rtf:.2f}x", flush=True)
+
         path = out_path or os.path.join(tempfile.gettempdir(), "clone_repl.wav")
         to_wav(audio, self.sr, path)
         if out_path:
@@ -255,7 +270,7 @@ def repl(eng: Engine, save: bool):
             elif cmd == ":help":
                 print(":ref PATH | :model 4bit|5bit|6bit|8bit|bf16 | :temp 0.x | "
                       ":speed 1.0 | :norm on|off | :rms -20 | :tail 250 | :fade 25 | "
-                      ":filler ' 네.'|off | :save on|off | :q", flush=True)
+                      ":marker '…'|off | :gap 180 | :trunc 2.0 | :save on|off | :q", flush=True)
             elif cmd.startswith(":ref "):
                 p = os.path.expanduser(cmd[5:].strip())
                 if os.path.exists(p):
@@ -280,10 +295,14 @@ def repl(eng: Engine, save: bool):
                 eng.tail_ms = float(cmd[6:]); print(f"[tail] {eng.tail_ms} ms", flush=True)
             elif cmd.startswith(":fade "):
                 eng.fade_ms = float(cmd[6:]); print(f"[fade] {eng.fade_ms} ms", flush=True)
-            elif cmd.startswith(":filler"):
-                v = cmd[len(":filler"):].strip()
-                eng.filler = "" if v in ("off", "''", '""') else (v or eng.filler)
-                print(f"[filler] {eng.filler!r}", flush=True)
+            elif cmd.startswith(":marker"):
+                v = cmd[len(":marker"):].strip()
+                eng.end_marker = "" if v in ("off", "''", '""') else (v or eng.end_marker)
+                print(f"[marker] {eng.end_marker!r}", flush=True)
+            elif cmd.startswith(":gap "):
+                eng.gap_ms = float(cmd[5:]); print(f"[gap] {eng.gap_ms} ms", flush=True)
+            elif cmd.startswith(":trunc "):
+                eng.trunc_ratio = float(cmd[7:]); print(f"[trunc] ratio {eng.trunc_ratio}", flush=True)
             else:
                 print(f"[?] unknown command: {cmd}  (try :help)", flush=True)
             continue
@@ -319,15 +338,21 @@ def main():
                     help="trailing silence appended after speech (default 250; 0=off)")
     ap.add_argument("--fade-ms", type=float, default=25.0,
                     help="fade-out over the speech end, click safety (default 25; 0=off)")
-    ap.add_argument("--filler", default=" 네.",
-                    help="filler appended then trimmed so the real ending isn't truncated "
-                         "(default ' 네.'; empty string disables)")
+    ap.add_argument("--end-marker", default="…",
+                    help="non-vocalized marker appended so the last syllable isn't clipped "
+                         "(default '…'; ' ^' also works; empty string disables)")
+    ap.add_argument("--gap-ms", type=float, default=180.0,
+                    help="silence between sentences in per-sentence fallback (default 180)")
+    ap.add_argument("--trunc-ratio", type=float, default=2.0,
+                    help="audio/text token ratio below which whole output is treated as "
+                         "truncated, triggering per-sentence fallback (default 2.0; 0=off)")
     ap.add_argument("--save", action="store_true", help="REPL: keep each wav in ./out/")
     args = ap.parse_args()
 
     eng = Engine(args.model, args.ref_audio, args.ref_text, args.temp, args.speed,
                  norm=not args.no_normalize, rms_db=args.rms_db,
-                 tail_ms=args.tail_ms, fade_ms=args.fade_ms, filler=args.filler)
+                 tail_ms=args.tail_ms, fade_ms=args.fade_ms, end_marker=args.end_marker,
+                 gap_ms=args.gap_ms, trunc_ratio=args.trunc_ratio)
 
     if args.text:  # one-shot
         eng.warmup()  # so the single run isn't the 30s cold path

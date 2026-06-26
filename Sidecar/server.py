@@ -20,6 +20,7 @@ Endpoints:
 """
 import io
 import os
+import re
 import time
 import wave
 
@@ -82,21 +83,19 @@ def _normalize(audio: np.ndarray, target_rms_db: float = -20.0, peak_limit: floa
     return audio
 
 
-FILLER = " 네."   # appended then trimmed so the real ending isn't truncated by early EOS
+END_MARKER = "…"    # non-vocalized marker appended so the last syllable isn't clipped
+GAP_MS = 180.0      # silence inserted between sentences (per-sentence fallback)
+TRUNC_RATIO = 2.0   # audio/text token ratio below which whole output is treated as truncated
 
 
-def _trim_after_filler(audio: np.ndarray, sr: int, min_gap_ms: float = 120.0, thr_ratio: float = 0.02) -> np.ndarray:
-    """Cut at the last silence gap, dropping the appended filler word + its
-    leading pause and keeping the now-complete real ending."""
-    a = audio.reshape(-1)
-    pk = float(np.max(np.abs(a))) or 1e-9
-    idx = np.where(np.abs(a) > thr_ratio * pk)[0]
-    if idx.size == 0:
-        return a
-    big = np.where(np.diff(idx) > int(min_gap_ms * sr / 1000))[0]
-    if big.size == 0:
-        return a
-    return a[:idx[big[-1]] + 1]
+def _split_sentences(text: str):
+    """Synthesize one sentence at a time: long multi-sentence input makes the
+    model stop early (mid-paragraph)."""
+    text = text.strip()
+    if not text:
+        return []
+    parts = re.split(r"(?<=[.!?。！？…])\s+", text)
+    return [p.strip() for p in parts if p.strip()] or [text]
 
 
 def _pad_tail(audio: np.ndarray, sr: int, pad_ms: float = 250.0, fade_ms: float = 25.0) -> np.ndarray:
@@ -145,20 +144,39 @@ def tts(req: TTSRequest):
     if not text:
         raise HTTPException(400, "empty text")
 
+    sr = _state["sample_rate"]
     t0 = time.time()
-    results = list(model.generate(
-        text=text + FILLER,
-        ref_audio=REF_AUDIO,
-        ref_text=_state["ref_text"],
-        temperature=req.temperature,
-        speed=req.speed,
-        verbose=False,
-    ))
-    sr = int(getattr(results[0], "sample_rate", 0) or _state["sample_rate"])
-    audio = np.concatenate([np.array(r.audio).reshape(-1) for r in results]).astype(np.float32)
-    audio = _trim_after_filler(audio, sr)   # drop the filler + its leading pause
+
+    def gen(t):
+        results = list(model.generate(
+            text=t + END_MARKER, ref_audio=REF_AUDIO, ref_text=_state["ref_text"],
+            temperature=req.temperature, speed=req.speed, verbose=False))
+        nonlocal sr
+        sr = int(getattr(results[0], "sample_rate", 0) or sr)
+        a = np.concatenate([np.array(r.audio).reshape(-1) for r in results]).astype(np.float32)
+        toks = sum(int(getattr(r, "token_count", 0)) for r in results)
+        return a, toks
+
+    # Whole-paragraph for natural prosody; fall back to per-sentence only if the
+    # model stopped early (low audio/text token ratio).
+    text_tokens = max(1, len(model.tokenizer.encode(text)))
+    audio, toks = gen(text)
+    ratio = toks / text_tokens
+    mode = "whole"
+    sents = _split_sentences(text)
+    if TRUNC_RATIO > 0 and ratio < TRUNC_RATIO and len(sents) > 1:
+        gap = np.zeros(int(sr * GAP_MS / 1000), dtype=np.float32)
+        segs = [gen(s)[0] for s in sents]
+        joined = []
+        for i, s in enumerate(segs):
+            if i and gap.size:
+                joined.append(gap)
+            joined.append(s)
+        audio = np.concatenate(joined)
+        mode = f"sentence×{len(sents)}"
+
     wav = _pcm_wav_bytes(audio, sr)
-    print(f"[sidecar] tts {len(text)} chars -> {len(audio)/sr:.2f}s audio "
+    print(f"[sidecar] tts {len(text)} chars [{mode}] -> {len(audio)/sr:.2f}s audio "
           f"in {time.time()-t0:.1f}s", flush=True)
     return Response(content=wav, media_type="audio/wav")
 
