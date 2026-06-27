@@ -13,7 +13,7 @@ final class MainWindow: NSObject, NSWindowDelegate {
     func show() {
         if window == nil {
             let w = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 580, height: 540),
+                contentRect: NSRect(x: 0, y: 0, width: 880, height: 560),
                 styleMask: [.titled, .closable, .miniaturizable, .resizable],
                 backing: .buffered, defer: false)
             w.title = "Codebasic TTS"

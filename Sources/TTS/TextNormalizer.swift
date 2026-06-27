@@ -141,8 +141,10 @@ struct TextNormalizer: Normalizing {
     - 머리말 없이 변환된 텍스트만 출력합니다.
     """
 
+    var temperature: Double = 0.2
     func normalizeStream(_ text: String) -> AsyncThrowingStream<String, Error> {
-        LLM.ollamaStream(baseURL: baseURL, model: model, prompt: normalizationPrompt(instruction, text))
+        LLM.ollamaStream(baseURL: baseURL, model: model,
+                         prompt: normalizationPrompt(instruction, text), temperature: temperature)
     }
 }
 
@@ -156,9 +158,10 @@ struct GeminiNormalizer: Normalizing {
     static let models = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-flash"]
     static let defaultBaseURL = "https://generativelanguage.googleapis.com/v1beta"
 
+    var temperature: Double = 0.2
     func normalizeStream(_ text: String) -> AsyncThrowingStream<String, Error> {
         LLM.geminiStream(baseURL: baseURL, apiKey: apiKey, model: model,
-                         prompt: normalizationPrompt(instruction, text))
+                         prompt: normalizationPrompt(instruction, text), temperature: temperature)
     }
 }
 
@@ -271,14 +274,15 @@ struct GeminiExplainer: Explaining {
     let apiKey: String
     let model: String
     let instruction: String
+    var temperature: Double = 0.4
     func stream(_ code: String, hint: String) -> AsyncThrowingStream<String, Error> {
         LLM.geminiStream(baseURL: baseURL, apiKey: apiKey, model: model,
-                         prompt: CodeExplanation.prompt(instruction, code, hint: hint), temperature: 0.4)
+                         prompt: CodeExplanation.prompt(instruction, code, hint: hint), temperature: temperature)
     }
     func streamContinuing(previous: String, current: String, hint: String) -> AsyncThrowingStream<String, Error> {
         LLM.geminiStream(baseURL: baseURL, apiKey: apiKey, model: model,
                          prompt: CodeExplanation.continuePrompt(previous: previous, current: current, hint: hint),
-                         temperature: 0.4)
+                         temperature: temperature)
     }
 }
 
@@ -287,14 +291,15 @@ struct OllamaExplainer: Explaining {
     let baseURL: URL
     let model: String
     let instruction: String
+    var temperature: Double = 0.4
     func stream(_ code: String, hint: String) -> AsyncThrowingStream<String, Error> {
         LLM.ollamaStream(baseURL: baseURL, model: model,
-                         prompt: CodeExplanation.prompt(instruction, code, hint: hint), temperature: 0.4)
+                         prompt: CodeExplanation.prompt(instruction, code, hint: hint), temperature: temperature)
     }
     func streamContinuing(previous: String, current: String, hint: String) -> AsyncThrowingStream<String, Error> {
         LLM.ollamaStream(baseURL: baseURL, model: model,
                          prompt: CodeExplanation.continuePrompt(previous: previous, current: current, hint: hint),
-                         temperature: 0.4)
+                         temperature: temperature)
     }
 }
 

@@ -16,6 +16,20 @@ struct GenerateView: View {
     }
 
     var body: some View {
+        HSplitView {
+            main
+            if showPrompt {
+                StageInspector(title: "대본 설정",
+                               temperature: $app.scriptTemperature,
+                               prompt: $app.normalizePrompt,
+                               promptCaption: "정규화 지시문 — 대본을 어떻게 다듬을지 LLM에게 주는 규칙",
+                               restore: { app.normalizePrompt = TextNormalizer.defaultInstruction },
+                               onChange: { app.saveSettings() })
+            }
+        }
+    }
+
+    private var main: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("원본 텍스트").font(.headline)
@@ -27,6 +41,9 @@ struct GenerateView: View {
                 }
                 .controlSize(.small)
                 .help("클립보드의 웹 서식(HTML)을 읽어 수식·마크다운 잔재를 정리해 붙여넣습니다")
+                Button { showPrompt.toggle() } label: { Image(systemName: "sidebar.right") }
+                    .controlSize(.small)
+                    .help("프롬프트·생성 매개변수 패널 열기/닫기")
             }
             TextEditor(text: $app.inputText)
                 .font(.body).frame(minHeight: 110)
@@ -100,28 +117,11 @@ struct GenerateView: View {
                 Spacer()
             }
 
-            DisclosureGroup("프롬프트 관리", isExpanded: $showPrompt) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("정규화 지시문 — LLM에게 주는 규칙").font(.caption).foregroundStyle(.secondary)
-                    TextEditor(text: $app.normalizePrompt)
-                        .font(.callout.monospaced()).frame(minHeight: 110)
-                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
-                    HStack {
-                        Button("기본값 복원") {
-                            app.normalizePrompt = TextNormalizer.defaultInstruction
-                            app.saveSettings()
-                        }
-                        Spacer()
-                    }
-                }
-                .padding(.top, 4)
-                .onChange(of: app.normalizePrompt) { _, _ in app.saveSettings() }
-            }
-
             Text("보이스: \(app.voiceName) · 모델: \(app.modelId)")
                 .font(.caption).foregroundStyle(.secondary)
         }
         .padding()
+        .frame(minWidth: 420, maxWidth: .infinity)
     }
 
     private var statusLine: String {

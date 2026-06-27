@@ -18,6 +18,20 @@ struct CommentaryView: View {
     private var border: some View { RoundedRectangle(cornerRadius: 6).stroke(.quaternary) }
 
     var body: some View {
+        HSplitView {
+            main
+            if showPrompt {
+                StageInspector(title: "해설 설정",
+                               temperature: $app.explainTemperature,
+                               prompt: $app.explainPrompt,
+                               promptCaption: "해설 지시문 — 코드를 어떻게 해설할지 LLM에게 주는 규칙",
+                               restore: { app.explainPrompt = CodeExplanation.defaultInstruction },
+                               onChange: { app.saveSettings() })
+            }
+        }
+    }
+
+    private var main: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("코드").font(.headline)
@@ -29,6 +43,9 @@ struct CommentaryView: View {
                 }
                 .controlSize(.small)
                 .help("클립보드의 코드를 그대로 붙여넣습니다")
+                Button { showPrompt.toggle() } label: { Image(systemName: "sidebar.right") }
+                    .controlSize(.small)
+                    .help("프롬프트·생성 매개변수 패널 열기/닫기")
             }
             TextEditor(text: $app.codeText)
                 .font(.body.monospaced()).frame(minHeight: 150)
@@ -113,33 +130,10 @@ struct CommentaryView: View {
                 Spacer()
             }
 
-            DisclosureGroup("해설 프롬프트", isExpanded: $showPrompt) {
-                promptEditor(caption: "해설 지시문 — 코드를 어떻게 해설할지 LLM에게 주는 규칙",
-                             text: $app.explainPrompt,
-                             restore: { app.explainPrompt = CodeExplanation.defaultInstruction })
-            }
-
             Text("제공자: \(app.normalizeProvider.label) (설정 탭) · 해설 모델은 위에서 선택")
                 .font(.caption).foregroundStyle(.secondary)
         }
         .padding()
-    }
-
-    /// One prompt editor (caption + monospace editor + 기본값 복원), saving on edit.
-    @ViewBuilder
-    private func promptEditor(caption: String, text: Binding<String>,
-                              restore: @escaping () -> Void) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(caption).font(.caption).foregroundStyle(.secondary)
-            TextEditor(text: text)
-                .font(.callout.monospaced()).frame(minHeight: 110)
-                .overlay(border)
-            HStack {
-                Button("기본값 복원") { restore(); app.saveSettings() }
-                Spacer()
-            }
-        }
-        .padding(.top, 4)
-        .onChange(of: text.wrappedValue) { _, _ in app.saveSettings() }
+        .frame(minWidth: 420, maxWidth: .infinity)
     }
 }

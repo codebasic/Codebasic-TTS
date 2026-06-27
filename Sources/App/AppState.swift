@@ -64,6 +64,8 @@ final class AppState: ObservableObject {
     @Published var explainHint = ""              // 해설 단계 (코드→해설) 추가 지시
     @Published var explainGeminiModel = "gemini-2.0-flash"   // 해설용
     @Published var explainOllamaModel = "gemma4:31b-cloud"   // 해설용
+    @Published var explainTemperature: Double = 0.4          // 해설 LLM 생성 매개변수
+    @Published var scriptTemperature: Double = 0.2           // 대본 LLM 생성 매개변수
     @Published var lastExplainedCode = ""        // baseline snapshot for "이어서 해설" (incremental)
     @Published var lastSegment = ""              // the most recently produced commentary (full or appended delta)
     var canContinueExplain: Bool {
@@ -272,11 +274,11 @@ final class AppState: ObservableObject {
         case .gemini:
             guard let key = Secrets.geminiKey else { return nil }
             return GeminiNormalizer(baseURL: geminiBaseURL, apiKey: key, model: geminiModel,
-                                    instruction: instruction)
+                                    instruction: instruction, temperature: scriptTemperature)
         case .ollama:
             return TextNormalizer(
                 baseURL: URL(string: ollamaURL) ?? URL(string: "http://localhost:11434")!,
-                model: ollamaModel, instruction: instruction)
+                model: ollamaModel, instruction: instruction, temperature: scriptTemperature)
         }
     }
 
@@ -303,11 +305,11 @@ final class AppState: ObservableObject {
         case .gemini:
             guard let key = Secrets.geminiKey else { return nil }
             return GeminiExplainer(baseURL: geminiBaseURL, apiKey: key, model: explainGeminiModel,
-                                   instruction: explainPrompt)
+                                   instruction: explainPrompt, temperature: explainTemperature)
         case .ollama:
             return OllamaExplainer(
                 baseURL: URL(string: ollamaURL) ?? URL(string: "http://localhost:11434")!,
-                model: explainOllamaModel, instruction: explainPrompt)
+                model: explainOllamaModel, instruction: explainPrompt, temperature: explainTemperature)
         }
     }
 
@@ -748,6 +750,7 @@ final class AppState: ObservableObject {
             "normalizeProvider": normalizeProvider.rawValue, "geminiModel": geminiModel,
             "geminiBaseURL": geminiBaseURL,
             "explainGeminiModel": explainGeminiModel, "explainOllamaModel": explainOllamaModel,
+            "explainTemperature": explainTemperature, "scriptTemperature": scriptTemperature,
             "stability": voiceSettings.stability, "similarity": voiceSettings.similarityBoost,
             "style": voiceSettings.style, "speakerBoost": voiceSettings.useSpeakerBoost,
         ]
@@ -784,6 +787,8 @@ final class AppState: ObservableObject {
         geminiBaseURL = o["geminiBaseURL"] as? String ?? geminiBaseURL
         explainGeminiModel = o["explainGeminiModel"] as? String ?? explainGeminiModel
         explainOllamaModel = o["explainOllamaModel"] as? String ?? explainOllamaModel
+        explainTemperature = o["explainTemperature"] as? Double ?? explainTemperature
+        scriptTemperature = o["scriptTemperature"] as? Double ?? scriptTemperature
         voiceSettings.stability = o["stability"] as? Double ?? voiceSettings.stability
         voiceSettings.similarityBoost = o["similarity"] as? Double ?? voiceSettings.similarityBoost
         voiceSettings.style = o["style"] as? Double ?? voiceSettings.style
