@@ -15,11 +15,8 @@ struct SettingsView: View {
 
             Section("보이스 / 모델") {
                 if app.voices.isEmpty {
-                    LabeledContent("보이스 ID") {
-                        TextField("voice id", text: $app.voiceId).frame(width: 220)
-                    }
-                    Text("연결 탭에서 ‘보이스 새로고침’을 누르면 목록에서 고를 수 있어요.")
-                        .font(.caption).foregroundStyle(.secondary)
+                    labeledField("보이스 ID", placeholder: "voice id", text: $app.voiceId,
+                                 hint: "연결 탭에서 ‘보이스 새로고침’을 누르면 목록에서 고를 수 있어요.")
                 } else {
                     Picker("보이스", selection: $app.voiceId) {
                         ForEach(app.voices) { v in
@@ -59,29 +56,25 @@ struct SettingsView: View {
                     Picker("모델", selection: $app.geminiModel) {
                         ForEach(GeminiNormalizer.models, id: \.self) { Text($0).tag($0) }
                     }
-                    LabeledContent("API 키", value: app.geminiKeyPresent ? "설정됨" : "없음")
-                    SecureField("Gemini API 키 (AIza…)", text: $geminiKeyInput)
+                    labeledField("Gemini API 키", placeholder: "AIza…", secure: true,
+                                 text: $geminiKeyInput,
+                                 hint: app.geminiKeyPresent ? "현재: 설정됨 (App Support)" : "현재: 없음")
                     HStack {
                         Button("키 저장") { app.saveGeminiKey(geminiKeyInput); geminiKeyInput = "" }
                             .disabled(geminiKeyInput.trimmingCharacters(in: .whitespaces).isEmpty)
                         Spacer()
-                        Text("App Support에 저장됩니다").font(.caption).foregroundStyle(.secondary)
                     }
                 } else {
                     if app.ollamaModels.isEmpty {
-                        LabeledContent("모델") {
-                            TextField("qwen2.5:3b", text: $app.ollamaModel).frame(width: 180)
-                        }
+                        labeledField("모델", placeholder: "qwen2.5:3b", text: $app.ollamaModel)
                     } else {
                         Picker("모델", selection: $app.ollamaModel) {
                             ForEach(app.ollamaModels, id: \.self) { Text($0).tag($0) }
                         }
                     }
-                    LabeledContent("Ollama URL (로컬/원격)") {
-                        TextField("http://localhost:11434", text: $app.ollamaURL).frame(width: 250)
-                    }
-                    Text("원격 Ollama도 가능: 예) http://192.168.0.10:11434")
-                        .font(.caption).foregroundStyle(.secondary)
+                    labeledField("Ollama URL (로컬/원격)", placeholder: "http://localhost:11434",
+                                 text: $app.ollamaURL,
+                                 hint: "원격도 가능: 예) http://192.168.0.10:11434")
                     HStack {
                         Button("연결 확인 / 모델 목록") { app.refreshOllamaModels() }
                         Spacer()
@@ -120,6 +113,20 @@ struct SettingsView: View {
                     .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
             }
             Slider(value: value, in: 0...1)
+        }
+    }
+
+    @ViewBuilder
+    private func labeledField(_ label: String, placeholder: String, secure: Bool = false,
+                              text: Binding<String>, hint: String? = nil) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label).font(.caption).foregroundStyle(.secondary)
+            Group {
+                if secure { SecureField(placeholder, text: text) }
+                else { TextField(placeholder, text: text) }
+            }
+            .textFieldStyle(.roundedBorder)
+            if let hint { Text(hint).font(.caption2).foregroundStyle(.tertiary) }
         }
     }
 }
