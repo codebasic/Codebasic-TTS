@@ -125,6 +125,7 @@ struct SettingsView: View {
                 if secure { SecureField(placeholder, text: text) }
                 else { TextField(placeholder, text: text) }
             }
+            .labelsHidden()                       // avoid the Form auto-label duplicating our caption
             .textFieldStyle(.roundedBorder)
             if let hint { Text(hint).font(.caption2).foregroundStyle(.tertiary) }
         }
