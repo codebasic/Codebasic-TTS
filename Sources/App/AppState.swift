@@ -52,6 +52,7 @@ final class AppState: ObservableObject {
     @Published var explanationText = ""          // generated commentary (해설 panel, bottom)
     @Published var explaining = false
     @Published var explainPrompt = CodeExplanation.defaultInstruction
+    @Published var explainHint = ""              // optional per-run steering (context / regen direction)
     @Published var explainGeminiModel = "gemini-2.0-flash"   // 해설용
     @Published var explainOllamaModel = "gemma4:31b-cloud"   // 해설용
     @Published var lastExplainedCode = ""        // baseline snapshot for "이어서 해설" (incremental)
@@ -263,14 +264,15 @@ final class AppState: ObservableObject {
             return nil
         }
         let provider = "explain:" + normalizeProvider.rawValue
-        let nk = NormalizationCache.key(text: code, provider: provider, model: explainModel, prompt: explainPrompt)
+        let nk = NormalizationCache.key(text: code, provider: provider, model: explainModel,
+                                        prompt: explainPrompt + "\u{1F}" + explainHint)
         if !force, let cached = normCache.script(forKey: nk) {
             explanationText = cached; lastExplainedCode = code; lastSegment = cached; return cached
         }
         explaining = true
         defer { explaining = false }
         do {
-            let out = try await explainer.explain(code)
+            let out = CodeExplanation.stripMarkdown(try await explainer.explain(code, hint: explainHint))
             guard !out.isEmpty else { statusText = "해설 생성 실패 (빈 응답)"; return nil }
             normCache.put(key: nk, script: out)
             explanationText = out
@@ -299,14 +301,16 @@ final class AppState: ObservableObject {
         // Cache keyed on (previous ∥ current) so re-running the same step is free.
         let provider = "explain-cont:" + normalizeProvider.rawValue
         let keyText = lastExplainedCode + "\u{1F}" + current
-        let nk = NormalizationCache.key(text: keyText, provider: provider, model: explainModel, prompt: "continue")
+        let nk = NormalizationCache.key(text: keyText, provider: provider, model: explainModel,
+                                        prompt: "continue\u{1F}" + explainHint)
         if !force, let cached = normCache.script(forKey: nk) {
             applyContinuation(cached, newBaseline: current); return cached
         }
         explaining = true
         defer { explaining = false }
         do {
-            let out = try await explainer.explainContinuing(previous: lastExplainedCode, current: current)
+            let out = CodeExplanation.stripMarkdown(
+                try await explainer.explainContinuing(previous: lastExplainedCode, current: current, hint: explainHint))
             guard !out.isEmpty else { statusText = "이어서 해설 실패 (빈 응답)"; return nil }
             normCache.put(key: nk, script: out)
             applyContinuation(out, newBaseline: current)

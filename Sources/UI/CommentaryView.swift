@@ -34,6 +34,20 @@ struct CommentaryView: View {
                 .font(.body.monospaced()).frame(minHeight: 150)
                 .overlay(border)
 
+            HStack(spacing: 6) {
+                Image(systemName: "text.bubble").foregroundStyle(.secondary).font(.caption)
+                TextField("추가 지시 (선택) — 맥락이나 재생성 방향. 예: 더 간결하게, 초보자 기준으로",
+                          text: $app.explainHint, axis: .vertical)
+                    .textFieldStyle(.roundedBorder)
+                    .lineLimit(1...3)
+                if !app.explainHint.isEmpty {
+                    Button { app.explainHint = "" } label: { Image(systemName: "xmark.circle.fill") }
+                        .buttonStyle(.plain).foregroundStyle(.secondary)
+                        .help("추가 지시 지우기")
+                }
+            }
+            .help("이번 해설 생성/재생성에만 적용되는 일회성 지시입니다 (프롬프트에는 저장 안 됨)")
+
             HStack(spacing: 8) {
                 Button {
                     Task { await app.explainCode() }

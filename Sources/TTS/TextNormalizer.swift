@@ -127,10 +127,11 @@ struct GeminiNormalizer: Normalizing {
 /// `Normalizing`: the prompt frames the task as *explanation*, not 원문→변환,
 /// and the caller surfaces failures instead of falling back to the raw code.
 protocol Explaining {
-    func explain(_ code: String) async throws -> String
+    /// `hint` is optional per-run steering (context or a regeneration direction).
+    func explain(_ code: String, hint: String) async throws -> String
     /// Incremental: given the previously-explained code and the current code,
     /// explain ONLY what was added/changed, in a continuing narration tone.
-    func explainContinuing(previous: String, current: String) async throws -> String
+    func explainContinuing(previous: String, current: String, hint: String) async throws -> String
 }
 
 /// Shared default instruction + prompt scaffold for the explainers.
@@ -148,9 +149,40 @@ enum CodeExplanation {
     - 장황하지 않게, 핵심 위주로 설명합니다.
     """
 
-    static func prompt(_ instruction: String, _ code: String) -> String {
+    /// Optional per-run steering (context the model needs, or a direction for
+    /// regeneration) — applied to THIS generation only, not saved to the prompt.
+    /// Re-asserts the output style AFTER the hint so steering the *content* can't
+    /// drag the *format* into markdown / a separate "review" section.
+    static func hintBlock(_ hint: String) -> String {
+        let h = hint.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !h.isEmpty else { return "" }
+        return "\n\n[추가 지시 — 이번 생성의 내용·방향에만 반영]\n\(h)\n"
+            + "(단, 출력 형식은 위 규칙을 그대로 따릅니다: 마크다운·제목·머리말·강조 기호(**, `, #, ---) 없이, "
+            + "전체 해설과 같은 구어체 음성 해설 문장으로만 작성하고, 별도 제목이나 '리뷰' 같은 섹션을 만들지 마세요.)"
+    }
+
+    /// Strip markdown artifacts the explainer sometimes emits despite the rules
+    /// (bold/code markers, headings, horizontal rules, list bullets) — they read
+    /// as noise in speech. Conservative: only removes well-known markers, keeps
+    /// all word content.
+    static func stripMarkdown(_ s: String) -> String {
+        let kept = s.components(separatedBy: .newlines).compactMap { line -> String? in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed == "---" || trimmed == "***" || trimmed == "___" { return nil }  // hrule → drop
+            var l = line.replacingOccurrences(of: #"^\s*#{1,6}\s+"#, with: "", options: .regularExpression)
+            l = l.replacingOccurrences(of: #"^\s*[-*+]\s+"#, with: "", options: .regularExpression)  // bullet
+            return l
+        }
+        return kept.joined(separator: "\n")
+            .replacingOccurrences(of: "**", with: "")
+            .replacingOccurrences(of: "__", with: "")
+            .replacingOccurrences(of: "`", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func prompt(_ instruction: String, _ code: String, hint: String = "") -> String {
         let instr = instruction.isEmpty ? defaultInstruction : instruction
-        return "\(instr)\n\n코드:\n\(code)\n\n해설:"
+        return "\(instr)\(hintBlock(hint))\n\n코드:\n\(code)\n\n해설:"
     }
 
     /// Sentinel the model returns when the current code has no meaningful change
@@ -170,9 +202,9 @@ enum CodeExplanation {
     - 의미 있는 변경이 없으면 다른 말 없이 정확히 '변경 없음'만 출력하세요.
     """
 
-    static func continuePrompt(previous: String, current: String) -> String {
+    static func continuePrompt(previous: String, current: String, hint: String = "") -> String {
         """
-        \(continueInstruction)
+        \(continueInstruction)\(hintBlock(hint))
 
         [이전 코드 — 이미 해설함]
         \(previous)
@@ -191,13 +223,13 @@ struct GeminiExplainer: Explaining {
     let apiKey: String
     let model: String
     let instruction: String
-    func explain(_ code: String) async throws -> String {
+    func explain(_ code: String, hint: String) async throws -> String {
         try await LLM.gemini(baseURL: baseURL, apiKey: apiKey, model: model,
-                             prompt: CodeExplanation.prompt(instruction, code), temperature: 0.4)
+                             prompt: CodeExplanation.prompt(instruction, code, hint: hint), temperature: 0.4)
     }
-    func explainContinuing(previous: String, current: String) async throws -> String {
+    func explainContinuing(previous: String, current: String, hint: String) async throws -> String {
         try await LLM.gemini(baseURL: baseURL, apiKey: apiKey, model: model,
-                             prompt: CodeExplanation.continuePrompt(previous: previous, current: current),
+                             prompt: CodeExplanation.continuePrompt(previous: previous, current: current, hint: hint),
                              temperature: 0.4)
     }
 }
@@ -207,13 +239,13 @@ struct OllamaExplainer: Explaining {
     let baseURL: URL
     let model: String
     let instruction: String
-    func explain(_ code: String) async throws -> String {
+    func explain(_ code: String, hint: String) async throws -> String {
         try await LLM.ollama(baseURL: baseURL, model: model,
-                             prompt: CodeExplanation.prompt(instruction, code), temperature: 0.4)
+                             prompt: CodeExplanation.prompt(instruction, code, hint: hint), temperature: 0.4)
     }
-    func explainContinuing(previous: String, current: String) async throws -> String {
+    func explainContinuing(previous: String, current: String, hint: String) async throws -> String {
         try await LLM.ollama(baseURL: baseURL, model: model,
-                             prompt: CodeExplanation.continuePrompt(previous: previous, current: current),
+                             prompt: CodeExplanation.continuePrompt(previous: previous, current: current, hint: hint),
                              temperature: 0.4)
     }
 }
