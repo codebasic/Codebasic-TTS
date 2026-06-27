@@ -17,7 +17,17 @@ struct GenerateView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("원본 텍스트").font(.headline)
+            HStack {
+                Text("원본 텍스트").font(.headline)
+                Spacer()
+                Button {
+                    if let t = RichPaste.cleanText() { app.inputText = t }
+                } label: {
+                    Label("웹에서 붙여넣기 (정리)", systemImage: "doc.on.clipboard")
+                }
+                .controlSize(.small)
+                .help("클립보드의 웹 서식(HTML)을 읽어 수식·마크다운 잔재를 정리해 붙여넣습니다")
+            }
             TextEditor(text: $app.inputText)
                 .font(.body).frame(minHeight: 110)
                 .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
