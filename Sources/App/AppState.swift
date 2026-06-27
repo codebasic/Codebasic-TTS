@@ -209,7 +209,8 @@ final class AppState: ObservableObject {
     /// fills `scriptText` (the bottom panel).
     @discardableResult
     func prepareScript(force: Bool = false) async -> String {
-        let src = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        inputText = TextSplitter.cleanInput(inputText)   // tidy pasted markdown/math in the source panel
+        let src = inputText
         guard !src.isEmpty else { scriptText = ""; return "" }
         guard normalizeEnabled, let norm = makeNormalizer() else { scriptText = src; return src }
 
@@ -241,14 +242,18 @@ final class AppState: ObservableObject {
 
     /// Generate-tab "재생": speak the script (or the original if it is empty).
     func speakScript() {
-        let s = scriptText.trimmingCharacters(in: .whitespacesAndNewlines)
-        synthesize(s.isEmpty ? inputText : scriptText)
+        if scriptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            inputText = TextSplitter.cleanInput(inputText)
+            synthesize(inputText)
+        } else {
+            synthesize(scriptText)
+        }
     }
 
     /// Services entry: set the source, build the script, then speak it.
     func speakSelected(_ text: String) {
         task?.cancel(); player.stop()
-        inputText = text
+        inputText = TextSplitter.cleanInput(text)
         scriptText = ""
         phase = .synthesizing
         statusText = normalizeEnabled ? "대본 생성 중…" : "합성 중…"

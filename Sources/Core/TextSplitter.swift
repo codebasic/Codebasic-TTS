@@ -30,6 +30,27 @@ enum TextSplitter {
         return out
     }
 
+    /// Clean pasted source text: collapse single line breaks WITHIN a paragraph
+    /// into spaces (markdown/math copied with each token on its own line), while
+    /// keeping blank lines as paragraph breaks. Run on the original-text panel so
+    /// the script-generation path downstream is unchanged.
+    static func cleanInput(_ text: String) -> String {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty else { return "" }
+        var paras: [String] = []
+        var cur: [String] = []
+        for line in t.components(separatedBy: .newlines) {
+            let l = line.trimmingCharacters(in: .whitespaces)
+            if l.isEmpty {
+                if !cur.isEmpty { paras.append(cur.joined(separator: " ")); cur = [] }
+            } else {
+                cur.append(l)
+            }
+        }
+        if !cur.isEmpty { paras.append(cur.joined(separator: " ")) }
+        return paras.joined(separator: "\n\n")
+    }
+
     /// Split a long paragraph into <= maxChars windows, cutting at the last
     /// whitespace at/before the limit (hard cut if a token is longer than the
     /// window).
