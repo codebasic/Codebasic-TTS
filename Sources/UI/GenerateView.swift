@@ -12,7 +12,7 @@ struct GenerateView: View {
     }
     private var canPlay: Bool {
         let s = app.scriptText.isEmpty ? app.inputText : app.scriptText
-        return !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !app.normalizing
     }
 
     var body: some View {
@@ -34,7 +34,7 @@ struct GenerateView: View {
 
             HStack(spacing: 8) {
                 Button {
-                    Task { await app.prepareScript() }
+                    app.generateScript()
                 } label: {
                     Label(app.normalizeEnabled ? "TTS 대본 생성" : "대본으로 복사",
                           systemImage: "wand.and.stars")
@@ -42,7 +42,7 @@ struct GenerateView: View {
                 .disabled(!canPrepare)
 
                 if app.normalizeEnabled {
-                    Button { app.regenerateScript() } label: {
+                    Button { app.generateScript(force: true) } label: {
                         Label("재생성", systemImage: "arrow.clockwise")
                     }
                     .disabled(!canPrepare)
@@ -62,6 +62,12 @@ struct GenerateView: View {
                 } else {
                     Text("정규화 꺼짐 (설정)").font(.caption).foregroundStyle(.secondary)
                 }
+            }
+
+            if app.normalizeEnabled {
+                HintField(placeholder: "추가 지시 (대본, 선택) — 발음·표기 방향. 예: 영어 약자는 한글 발음으로",
+                          text: $app.scriptHint,
+                          help: "원문→대본 생성·재생성에만 적용되는 일회성 지시 (프롬프트엔 저장 안 됨)")
             }
 
             Text("TTS 대본 — 실제 합성에 사용").font(.headline)

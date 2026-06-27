@@ -108,7 +108,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func handleCodeText(_ code: String) {
         let preview = code.replacingOccurrences(of: "\n", with: " ").prefix(60)
         Log.app.info("handleCodeText: \(code.count) chars — \"\(preview, privacy: .public)\"")
-        appState.selectedTab = 0
+        appState.selectedTab = 1        // 해설 탭 (2번째)
         appState.explainAndSpeak(code)
     }
 

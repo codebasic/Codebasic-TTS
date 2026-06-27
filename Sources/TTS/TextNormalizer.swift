@@ -4,7 +4,9 @@ import Foundation
 /// notation, subscripts, symbols). Implementations call an LLM (local or API);
 /// callers fall back to the original text on failure so synthesis never blocks.
 protocol Normalizing {
-    func normalize(_ text: String) async throws -> String
+    /// Stream the normalized text as deltas. Callers fall back to the original on
+    /// failure so synthesis never blocks.
+    func normalizeStream(_ text: String) -> AsyncThrowingStream<String, Error>
 }
 
 func normalizationPrompt(_ instruction: String, _ text: String) -> String {
@@ -16,64 +18,96 @@ func normalizationPrompt(_ instruction: String, _ text: String) -> String {
 /// (코드→해설) build their own prompt and call these — the prompt scaffold is
 /// the caller's job, NOT baked in here.
 enum LLM {
-    /// Google Gemini `generateContent`. `baseURL` is the API root (default
-    /// `https://generativelanguage.googleapis.com/v1beta`); the path
-    /// `/models/{model}:generateContent` is appended. Returns the (trimmed) text.
-    static func gemini(baseURL: String = GeminiNormalizer.defaultBaseURL,
-                       apiKey: String, model: String, prompt: String,
-                       temperature: Double = 0.2) async throws -> String {
-        var base = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        if base.isEmpty { base = GeminiNormalizer.defaultBaseURL }
-        while base.hasSuffix("/") { base.removeLast() }
-        guard let url = URL(string: "\(base)/models/\(model):generateContent") else {
-            throw NSError(domain: "Gemini", code: -1,
-                          userInfo: [NSLocalizedDescriptionKey: "잘못된 Gemini 엔드포인트 URL"])
+    /// Gemini streaming (`:streamGenerateContent?alt=sse`). Yields text deltas as
+    /// they arrive; each `data:` line is a full response whose first part's text
+    /// is the increment. Cancelling the consuming task tears down the request.
+    static func geminiStream(baseURL: String = GeminiNormalizer.defaultBaseURL,
+                             apiKey: String, model: String, prompt: String,
+                             temperature: Double = 0.2) -> AsyncThrowingStream<String, Error> {
+        AsyncThrowingStream { continuation in
+            let work = Task {
+                do {
+                    var base = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if base.isEmpty { base = GeminiNormalizer.defaultBaseURL }
+                    while base.hasSuffix("/") { base.removeLast() }
+                    guard let url = URL(string: "\(base)/models/\(model):streamGenerateContent?alt=sse") else {
+                        throw NSError(domain: "Gemini", code: -1,
+                                      userInfo: [NSLocalizedDescriptionKey: "잘못된 Gemini 엔드포인트 URL"])
+                    }
+                    var req = URLRequest(url: url)
+                    req.httpMethod = "POST"
+                    req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    req.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
+                    req.httpBody = try JSONSerialization.data(withJSONObject: [
+                        "contents": [["parts": [["text": prompt]]]],
+                        "generationConfig": ["temperature": temperature],
+                    ])
+                    let (bytes, response) = try await URLSession.shared.bytes(for: req)
+                    guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+                        throw NSError(domain: "Gemini",
+                                      code: (response as? HTTPURLResponse)?.statusCode ?? -1,
+                                      userInfo: [NSLocalizedDescriptionKey:
+                                        "Gemini 요청 실패 (\((response as? HTTPURLResponse)?.statusCode ?? -1))"])
+                    }
+                    for try await line in bytes.lines {
+                        try Task.checkCancellation()
+                        guard line.hasPrefix("data:") else { continue }
+                        let json = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+                        guard !json.isEmpty, json != "[DONE]",
+                              let d = json.data(using: .utf8),
+                              let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+                              let cands = obj["candidates"] as? [[String: Any]],
+                              let content = cands.first?["content"] as? [String: Any],
+                              let parts = content["parts"] as? [[String: Any]],
+                              let text = parts.first?["text"] as? String else { continue }
+                        continuation.yield(text)
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in work.cancel() }
         }
-        var req = URLRequest(url: url)
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
-        req.timeoutInterval = 120
-        req.httpBody = try JSONSerialization.data(withJSONObject: [
-            "contents": [["parts": [["text": prompt]]]],
-            "generationConfig": ["temperature": temperature],
-        ])
-        let (data, response) = try await URLSession.shared.data(for: req)
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            let msg = String(data: data, encoding: .utf8) ?? "request failed"
-            throw NSError(domain: "Gemini", code: (response as? HTTPURLResponse)?.statusCode ?? -1,
-                          userInfo: [NSLocalizedDescriptionKey: msg])
-        }
-        let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        let cands = obj?["candidates"] as? [[String: Any]]
-        let content = cands?.first?["content"] as? [String: Any]
-        let parts = content?["parts"] as? [[String: Any]]
-        return (parts?.first?["text"] as? String ?? "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// Local Ollama `api/generate` (non-streaming). Returns the (trimmed) text.
-    static func ollama(baseURL: URL, model: String, prompt: String,
-                       temperature: Double = 0.2) async throws -> String {
-        var req = URLRequest(url: baseURL.appendingPathComponent("api/generate"))
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.timeoutInterval = 120
-        req.httpBody = try JSONSerialization.data(withJSONObject: [
-            "model": model,
-            "prompt": prompt,
-            "stream": false,
-            "options": ["temperature": temperature],
-        ])
-        let (data, response) = try await URLSession.shared.data(for: req)
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            let msg = String(data: data, encoding: .utf8) ?? "request failed"
-            throw NSError(domain: "Ollama", code: (response as? HTTPURLResponse)?.statusCode ?? -1,
-                          userInfo: [NSLocalizedDescriptionKey: msg])
+    /// Ollama streaming (`api/generate`, stream:true → JSONL). Yields each
+    /// `response` delta; stops at the `done:true` line. Cancellation tears down.
+    static func ollamaStream(baseURL: URL, model: String, prompt: String,
+                             temperature: Double = 0.2) -> AsyncThrowingStream<String, Error> {
+        AsyncThrowingStream { continuation in
+            let work = Task {
+                do {
+                    var req = URLRequest(url: baseURL.appendingPathComponent("api/generate"))
+                    req.httpMethod = "POST"
+                    req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    req.httpBody = try JSONSerialization.data(withJSONObject: [
+                        "model": model, "prompt": prompt, "stream": true,
+                        "options": ["temperature": temperature],
+                    ])
+                    let (bytes, response) = try await URLSession.shared.bytes(for: req)
+                    guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+                        throw NSError(domain: "Ollama",
+                                      code: (response as? HTTPURLResponse)?.statusCode ?? -1,
+                                      userInfo: [NSLocalizedDescriptionKey: "Ollama 요청 실패"])
+                    }
+                    for try await line in bytes.lines {
+                        try Task.checkCancellation()
+                        guard let d = line.data(using: .utf8),
+                              let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any]
+                        else { continue }
+                        if let resp = obj["response"] as? String, !resp.isEmpty {
+                            continuation.yield(resp)
+                        }
+                        if obj["done"] as? Bool == true { break }
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in work.cancel() }
         }
-        let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        return (obj?["response"] as? String ?? "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 
@@ -97,10 +131,8 @@ struct TextNormalizer: Normalizing {
     - 설명·따옴표·머리말 없이, 변환된 텍스트만 출력합니다.
     """
 
-    func normalize(_ text: String) async throws -> String {
-        let out = try await LLM.ollama(baseURL: baseURL, model: model,
-                                       prompt: normalizationPrompt(instruction, text))
-        return out.isEmpty ? text : out
+    func normalizeStream(_ text: String) -> AsyncThrowingStream<String, Error> {
+        LLM.ollamaStream(baseURL: baseURL, model: model, prompt: normalizationPrompt(instruction, text))
     }
 }
 
@@ -114,10 +146,9 @@ struct GeminiNormalizer: Normalizing {
     static let models = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-flash"]
     static let defaultBaseURL = "https://generativelanguage.googleapis.com/v1beta"
 
-    func normalize(_ text: String) async throws -> String {
-        let out = try await LLM.gemini(baseURL: baseURL, apiKey: apiKey, model: model,
-                                       prompt: normalizationPrompt(instruction, text))
-        return out.isEmpty ? text : out
+    func normalizeStream(_ text: String) -> AsyncThrowingStream<String, Error> {
+        LLM.geminiStream(baseURL: baseURL, apiKey: apiKey, model: model,
+                         prompt: normalizationPrompt(instruction, text))
     }
 }
 
@@ -127,11 +158,11 @@ struct GeminiNormalizer: Normalizing {
 /// `Normalizing`: the prompt frames the task as *explanation*, not 원문→변환,
 /// and the caller surfaces failures instead of falling back to the raw code.
 protocol Explaining {
-    /// `hint` is optional per-run steering (context or a regeneration direction).
-    func explain(_ code: String, hint: String) async throws -> String
-    /// Incremental: given the previously-explained code and the current code,
-    /// explain ONLY what was added/changed, in a continuing narration tone.
-    func explainContinuing(previous: String, current: String, hint: String) async throws -> String
+    /// Stream the commentary as text deltas. `hint` is optional per-run steering.
+    func stream(_ code: String, hint: String) -> AsyncThrowingStream<String, Error>
+    /// Incremental stream: given the previously-explained code and the current
+    /// code, explain ONLY what was added/changed, in a continuing narration tone.
+    func streamContinuing(previous: String, current: String, hint: String) -> AsyncThrowingStream<String, Error>
 }
 
 /// Shared default instruction + prompt scaffold for the explainers.
@@ -223,14 +254,14 @@ struct GeminiExplainer: Explaining {
     let apiKey: String
     let model: String
     let instruction: String
-    func explain(_ code: String, hint: String) async throws -> String {
-        try await LLM.gemini(baseURL: baseURL, apiKey: apiKey, model: model,
-                             prompt: CodeExplanation.prompt(instruction, code, hint: hint), temperature: 0.4)
+    func stream(_ code: String, hint: String) -> AsyncThrowingStream<String, Error> {
+        LLM.geminiStream(baseURL: baseURL, apiKey: apiKey, model: model,
+                         prompt: CodeExplanation.prompt(instruction, code, hint: hint), temperature: 0.4)
     }
-    func explainContinuing(previous: String, current: String, hint: String) async throws -> String {
-        try await LLM.gemini(baseURL: baseURL, apiKey: apiKey, model: model,
-                             prompt: CodeExplanation.continuePrompt(previous: previous, current: current, hint: hint),
-                             temperature: 0.4)
+    func streamContinuing(previous: String, current: String, hint: String) -> AsyncThrowingStream<String, Error> {
+        LLM.geminiStream(baseURL: baseURL, apiKey: apiKey, model: model,
+                         prompt: CodeExplanation.continuePrompt(previous: previous, current: current, hint: hint),
+                         temperature: 0.4)
     }
 }
 
@@ -239,14 +270,14 @@ struct OllamaExplainer: Explaining {
     let baseURL: URL
     let model: String
     let instruction: String
-    func explain(_ code: String, hint: String) async throws -> String {
-        try await LLM.ollama(baseURL: baseURL, model: model,
-                             prompt: CodeExplanation.prompt(instruction, code, hint: hint), temperature: 0.4)
+    func stream(_ code: String, hint: String) -> AsyncThrowingStream<String, Error> {
+        LLM.ollamaStream(baseURL: baseURL, model: model,
+                         prompt: CodeExplanation.prompt(instruction, code, hint: hint), temperature: 0.4)
     }
-    func explainContinuing(previous: String, current: String, hint: String) async throws -> String {
-        try await LLM.ollama(baseURL: baseURL, model: model,
-                             prompt: CodeExplanation.continuePrompt(previous: previous, current: current, hint: hint),
-                             temperature: 0.4)
+    func streamContinuing(previous: String, current: String, hint: String) -> AsyncThrowingStream<String, Error> {
+        LLM.ollamaStream(baseURL: baseURL, model: model,
+                         prompt: CodeExplanation.continuePrompt(previous: previous, current: current, hint: hint),
+                         temperature: 0.4)
     }
 }
 
