@@ -30,7 +30,7 @@ final class AppState: ObservableObject {
     enum NormalizeProvider: String, CaseIterable, Identifiable {
         case gemini, ollama
         var id: String { rawValue }
-        var label: String { self == .gemini ? "Gemini (API)" : "Ollama (로컬)" }
+        var label: String { self == .gemini ? "Gemini" : "Ollama" }
     }
     @Published var normalizeEnabled = false
     @Published var normalizeProvider: NormalizeProvider = .gemini

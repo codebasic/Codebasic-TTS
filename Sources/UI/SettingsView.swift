@@ -72,9 +72,9 @@ struct SettingsView: View {
                             ForEach(app.ollamaModels, id: \.self) { Text($0).tag($0) }
                         }
                     }
-                    labeledField("Ollama URL (로컬/원격)", placeholder: "http://localhost:11434",
+                    labeledField("Ollama 엔드포인트", placeholder: "http://localhost:11434",
                                  text: $app.ollamaURL,
-                                 hint: "원격도 가능: 예) http://192.168.0.10:11434")
+                                 hint: "로컬/원격 모두 가능: 예) http://192.168.0.10:11434")
                     HStack {
                         Button("연결 확인 / 모델 목록") { app.refreshOllamaModels() }
                         Spacer()
