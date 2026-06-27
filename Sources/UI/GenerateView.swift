@@ -30,12 +30,20 @@ struct GenerateView: View {
                           systemImage: "wand.and.stars")
                 }
                 .disabled(!canPrepare)
+
+                if app.normalizeEnabled {
+                    Button { app.regenerateScript() } label: {
+                        Label("재생성", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(!canPrepare)
+                    .help("정규화 캐시를 무시하고 LLM으로 다시 생성")
+                }
+
                 if app.normalizing {
                     ProgressView().controlSize(.small)
                     Text("대본 생성 중…").font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
-                Image(systemName: "arrow.down").foregroundStyle(.secondary)
                 if !app.normalizeEnabled {
                     Text("정규화 꺼짐 (설정)").font(.caption).foregroundStyle(.secondary)
                 }

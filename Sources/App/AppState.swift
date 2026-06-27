@@ -59,6 +59,7 @@ final class AppState: ObservableObject {
     var isBusy: Bool { phase != .idle }
 
     private let cache = CacheStore()
+    private let normCache = NormalizationCache()
     private let player = QueuePlayer()
     private var task: Task<Void, Never>?
     private var timer: Timer?
@@ -208,20 +209,35 @@ final class AppState: ObservableObject {
     /// when enabled, otherwise pass the original through. Returns the script and
     /// fills `scriptText` (the bottom panel).
     @discardableResult
-    func prepareScript() async -> String {
+    func prepareScript(force: Bool = false) async -> String {
         let src = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !src.isEmpty else { scriptText = ""; return "" }
         guard normalizeEnabled, let norm = makeNormalizer() else { scriptText = src; return src }
 
         normalizing = true
+        let provider = normalizeProvider.rawValue
+        let model = normalizeProvider == .gemini ? geminiModel : ollamaModel
         var out: [String] = []
         for p in TextSplitter.paragraphs(src, maxChars: maxChunkChars) {
-            out.append((try? await norm.normalize(p)) ?? p)
+            // Normalization cache: skip the LLM for text already normalized.
+            let nk = NormalizationCache.key(text: p, provider: provider, model: model, prompt: normalizePrompt)
+            if !force, let cached = normCache.script(forKey: nk) {
+                out.append(cached)
+            } else {
+                let n = (try? await norm.normalize(p)) ?? p
+                normCache.put(key: nk, script: n)
+                out.append(n)
+            }
         }
         let script = out.joined(separator: "\n")
         scriptText = script
         normalizing = false
         return script
+    }
+
+    /// Force a fresh normalization (ignores the normalization cache).
+    func regenerateScript() {
+        Task { [weak self] in await self?.prepareScript(force: true) }
     }
 
     /// Generate-tab "재생": speak the script (or the original if it is empty).
