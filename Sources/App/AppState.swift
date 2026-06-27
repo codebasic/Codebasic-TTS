@@ -46,6 +46,14 @@ final class AppState: ObservableObject {
     @Published var normalizePrompt = TextNormalizer.defaultInstruction
     @Published var normalizing = false
     @Published var scriptHint = ""               // 대본 단계 (원문→대본) 추가 지시
+    private var scriptBuiltFrom = ""             // (원본 ∥ 지시) the 대본 was built from
+    /// True when 원본 or 추가 지시 changed after the 대본 was generated. Suppressed
+    /// while generating — scriptText fills before scriptBuiltFrom is stamped.
+    var scriptStale: Bool {
+        !normalizing
+            && !scriptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && scriptBuiltFrom != (inputText + "\u{1F}" + scriptHint)
+    }
 
     // Commentary (코드 → 해설). Shares the provider + endpoint above, but the
     // explain model is SEPARATE from the script model — they can differ.
@@ -89,11 +97,13 @@ final class AppState: ObservableObject {
     @Published var statusText = ""
     @Published var maxChunkChars = TextSplitter.defaultMaxChars
     @Published private(set) var history: [HistoryEntry] = []
+    @Published private(set) var backlog: [BacklogEntry] = []
 
     var isBusy: Bool { phase != .idle }
 
     private let cache = CacheStore()
     private let normCache = NormalizationCache()
+    private let backlogStore = BacklogStore()
     private let player = QueuePlayer()
     private var task: Task<Void, Never>?         // audio synthesis/playback
     private var explainTask: Task<Void, Never>?  // long-lived 해설 LLM stream
@@ -103,8 +113,45 @@ final class AppState: ObservableObject {
     init() {
         loadSettings()
         history = cache.entries
+        backlog = backlogStore.entries
         player.onFinish = { [weak self] in self?.finish() }
     }
+
+    // MARK: - Backlog (flag a generation case for later analysis)
+
+    enum IssueStage { case explain, script }
+
+    /// Capture the current stage's full context (input + prompt + hint + output)
+    /// into the backlog, tagged for later filtering/analysis.
+    func recordIssue(_ stage: IssueStage, note: String = "", tags: [String] = ["이슈"]) {
+        let cleanTags = tags.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        let finalTags = cleanTags.isEmpty ? ["이슈"] : cleanTags
+        let e: BacklogEntry
+        switch stage {
+        case .explain:
+            guard !explanationText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                statusText = "기록할 해설이 없습니다"; return
+            }
+            e = BacklogEntry(id: UUID().uuidString, createdAt: Date(), tags: finalTags, note: note,
+                             stage: "해설", provider: normalizeProvider.label, model: explainModel,
+                             prompt: explainPrompt, hint: explainHint, input: codeText, output: explanationText)
+        case .script:
+            guard !scriptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                statusText = "기록할 대본이 없습니다"; return
+            }
+            e = BacklogEntry(id: UUID().uuidString, createdAt: Date(), tags: finalTags, note: note,
+                             stage: "대본", provider: normalizeProvider.label, model: scriptModel,
+                             prompt: normalizePrompt, hint: scriptHint, input: inputText, output: scriptText)
+        }
+        backlogStore.add(e); backlog = backlogStore.entries
+        statusText = "백로그에 기록됨 (\(stage == .explain ? "해설" : "대본"))"
+    }
+
+    func updateBacklog(_ e: BacklogEntry) { backlogStore.update(e); backlog = backlogStore.entries }
+    func deleteBacklog(_ id: String) { backlogStore.delete(id); backlog = backlogStore.entries }
+    func clearBacklog() { backlogStore.clear(); backlog = backlogStore.entries }
+    func exportBacklog() -> URL? { backlogStore.export() }
+    var backlogTags: [String] { backlogStore.allTags }
 
     private func finish() {
         stopTimer()
@@ -462,17 +509,22 @@ final class AppState: ObservableObject {
 
     // MARK: - Script (TTS-friendly text)
 
-    /// Build the TTS 대본 from inputText: normalize per paragraph via the LLM
-    /// (streaming) when enabled, else pass the original through. Streams each
-    /// uncached paragraph straight into `scriptText` (completed paragraphs + the
-    /// current partial); cached paragraphs append instantly. Returns the script.
+    /// Snapshot what the current 대본 was built from, so the UI can flag it stale
+    /// when 원본 or 추가 지시 changes.
+    private func markScriptFresh() { scriptBuiltFrom = inputText + "\u{1F}" + scriptHint }
+
+    /// Build the TTS 대본 from inputText: normalize the WHOLE document in one
+    /// streaming LLM call when enabled, else pass the original through. Streams
+    /// straight into `scriptText`. Audio synthesis chunks by paragraph downstream.
     @discardableResult
     func prepareScript(force: Bool = false) async -> String {
         inputText = TextSplitter.cleanInput(inputText)   // tidy pasted markdown/math in the source panel
         let src = inputText
         guard !src.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { scriptText = ""; return "" }
         let instruction = scriptInstruction()
-        guard normalizeEnabled, let norm = makeNormalizer(instruction: instruction) else { scriptText = src; return src }
+        guard normalizeEnabled, let norm = makeNormalizer(instruction: instruction) else {
+            scriptText = src; markScriptFresh(); return src
+        }
 
         let provider = normalizeProvider.rawValue
         let model = scriptModel
@@ -482,7 +534,7 @@ final class AppState: ObservableObject {
         // paragraph downstream; only the text rewrite is whole-document here.
         let nk = NormalizationCache.key(text: src, provider: provider, model: model, prompt: instruction)
         if !force, let cached = normCache.script(forKey: nk) {
-            scriptText = cached; return cached
+            scriptText = cached; markScriptFresh(); return cached
         }
         normalizing = true
         defer { normalizing = false }
@@ -495,26 +547,90 @@ final class AppState: ObservableObject {
                 scriptText = acc                       // live, whole document
             }
         } catch is CancellationError {
-            return scriptText                          // keep whatever streamed
+            return scriptText                          // keep whatever streamed (stays stale)
         } catch {
-            scriptText = src                           // error → fall back to original
+            scriptText = src; markScriptFresh()        // error → fall back to original
             return src
         }
         let out = acc.trimmingCharacters(in: .whitespacesAndNewlines)
         let finalScript = out.isEmpty ? src : out
+        markScriptFresh()
         normCache.put(key: nk, script: finalScript)
         scriptText = finalScript
         return finalScript
     }
 
-    /// 대본 생성/재생성 (sync entry): manage the single `scriptTask`, serialized
-    /// so a new run waits for the previous to unwind. `force` ignores the cache.
+    /// 대본 생성 (sync entry): manage the single `scriptTask`, serialized so a new
+    /// run waits for the previous to unwind. `force` ignores the cache.
     func generateScript(force: Bool = false) {
         let prior = scriptTask
         scriptTask = Task { [weak self] in
             prior?.cancel(); await prior?.value
             _ = await self?.prepareScript(force: force)
         }
+    }
+
+    /// "재생성/다듬기" (sync entry): if a 대본 already exists, REFINE it (원본 +
+    /// 현재 대본 + 추가 지시 → 미흡한 부분만 개선); otherwise regenerate fresh from 원본.
+    func regenerateScript() {
+        let prior = scriptTask
+        scriptTask = Task { [weak self] in
+            prior?.cancel(); await prior?.value
+            guard let self else { return }
+            if self.scriptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                _ = await self.prepareScript(force: true)
+            } else {
+                _ = await self.runRefineScript()
+            }
+        }
+    }
+
+    /// Refine instruction: the FULL normalize instruction (all rules + hint at
+    /// top, via scriptInstruction) PLUS a note that the input carries 원본 + 현재
+    /// 대본. Carrying the base rules is essential — without them the refine
+    /// regressed already-normalized parts (e.g. .score() → '점 스코어 괄호').
+    private func refineInstruction() -> String {
+        scriptInstruction()
+            + "\n\n추가로, '원문' 영역에는 [원본]과 [현재 대본]이 함께 주어집니다."
+            + " [현재 대본]을 기준으로 위 규칙과 추가 지시를 빠짐없이 적용해 더 낫게 다듬어 다시 쓰세요."
+            + " 이미 규칙에 맞는 부분은 그대로 둡니다."
+    }
+
+    /// Stream a refined 대본 from 원본 + the current 대본 (no cache — it's a moving
+    /// target). On cancel/error, restores the pre-refine 대본.
+    @discardableResult
+    private func runRefineScript() async -> String? {
+        let current = scriptText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !current.isEmpty else { return nil }
+        guard let norm = makeNormalizer(instruction: refineInstruction()) else {
+            statusText = normalizeProvider == .gemini ? "Gemini 키 미설정" : "Ollama 미설정"
+            return nil
+        }
+        let combined = "[원본]\n\(inputText)\n\n[현재 대본]\n\(current)"
+        normalizing = true
+        defer { normalizing = false }
+        statusText = "대본 다듬는 중…"
+        var acc = ""
+        do {
+            for try await delta in norm.normalizeStream(combined) {
+                try Task.checkCancellation()
+                acc += delta
+                scriptText = acc
+            }
+        } catch is CancellationError {
+            scriptText = current        // restore
+            return nil
+        } catch {
+            scriptText = current
+            statusText = "다듬기 오류: \(error.localizedDescription)"
+            return nil
+        }
+        let out = acc.trimmingCharacters(in: .whitespacesAndNewlines)
+        let final = out.isEmpty ? current : out
+        scriptText = final
+        markScriptFresh()
+        statusText = ""
+        return final
     }
 
     /// Generate-tab "재생": speak the script (or the original if it is empty).

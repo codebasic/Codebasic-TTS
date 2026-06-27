@@ -9,7 +9,8 @@ struct RootView: View {
             GenerateView().tabItem { Label("TTS", systemImage: "waveform") }.tag(0)
             CommentaryView().tabItem { Label("해설", systemImage: "text.book.closed") }.tag(1)
             HistoryView().tabItem { Label("히스토리", systemImage: "clock.arrow.circlepath") }.tag(2)
-            SettingsView().tabItem { Label("설정", systemImage: "slider.horizontal.3") }.tag(3)
+            BacklogView().tabItem { Label("백로그", systemImage: "flag") }.tag(3)
+            SettingsView().tabItem { Label("설정", systemImage: "slider.horizontal.3") }.tag(4)
         }
         .frame(minWidth: 560, minHeight: 520)
     }

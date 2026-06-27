@@ -42,11 +42,14 @@ struct GenerateView: View {
                 .disabled(!canPrepare)
 
                 if app.normalizeEnabled {
-                    Button { app.generateScript(force: true) } label: {
-                        Label("재생성", systemImage: "arrow.clockwise")
+                    Button { app.regenerateScript() } label: {
+                        Label(app.scriptText.isEmpty ? "재생성" : "다듬기",
+                              systemImage: app.scriptText.isEmpty ? "arrow.clockwise" : "wand.and.stars")
                     }
                     .disabled(!canPrepare)
-                    .help("정규화 캐시를 무시하고 LLM으로 다시 생성")
+                    .help(app.scriptText.isEmpty
+                          ? "정규화 캐시를 무시하고 원본에서 새로 생성"
+                          : "원본 + 현재 대본 + 추가 지시로 미흡한 부분만 다듬기 (현재 대본을 덮어씀)")
                 }
 
                 if app.normalizing {
@@ -70,7 +73,18 @@ struct GenerateView: View {
                           help: "원문→대본 생성·재생성에만 적용되는 일회성 지시 (프롬프트엔 저장 안 됨)")
             }
 
-            Text("TTS 대본 — 실제 합성에 사용").font(.headline)
+            HStack {
+                Text("TTS 대본 — 실제 합성에 사용").font(.headline)
+                if app.scriptStale {
+                    Label("원본·지시가 바뀜 — 재생성/다듬기 필요", systemImage: "exclamationmark.triangle")
+                        .font(.caption).foregroundStyle(.orange)
+                }
+                Spacer()
+                Button { app.recordIssue(.script) } label: { Label("이슈 기록", systemImage: "flag") }
+                    .controlSize(.small)
+                    .disabled(app.scriptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .help("현재 대본 생성 컨텍스트(원본·프롬프트·추가 지시·대본)를 백로그에 기록")
+            }
             TextEditor(text: $app.scriptText)
                 .font(.body).frame(minHeight: 110)
                 .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))

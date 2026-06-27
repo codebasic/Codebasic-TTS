@@ -78,6 +78,10 @@ struct CommentaryView: View {
                     Text("· 이어쓰기 기준 설정됨").font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
+                Button { app.recordIssue(.explain) } label: { Label("이슈 기록", systemImage: "flag") }
+                    .controlSize(.small)
+                    .disabled(explanationEmpty)
+                    .help("현재 해설 생성 컨텍스트(코드·프롬프트·추가 지시·해설)를 백로그에 기록")
                 Button { app.clearCommentary() } label: { Label("비우기", systemImage: "trash") }
                     .controlSize(.small)
                     .disabled(explanationEmpty && !app.canContinueExplain)
