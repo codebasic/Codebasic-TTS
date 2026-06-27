@@ -62,22 +62,8 @@ install_and_register() {
   rm -rf "$INSTALL_DIR/$APP_NAME.app"
   cp -R "$APP_DIR" "$INSTALL_DIR/$APP_NAME.app"
 
-  echo "==> Installing ElevenLabs key into Application Support (if present)"
-  local appsup="$HOME/Library/Application Support/Codebasic TTS"
-  if [ -f "$HERE/Sidecar/.eleven_key" ]; then
-    mkdir -p "$appsup"
-    tr -d ' \n\r' < "$HERE/Sidecar/.eleven_key" > "$appsup/eleven_key"
-    chmod 600 "$appsup/eleven_key"
-    echo "    eleven key -> $appsup/eleven_key"
-  else
-    echo "    (no Sidecar/.eleven_key — speech will be disabled)"
-  fi
-  if [ -f "$HERE/Sidecar/.gemini_key" ]; then
-    mkdir -p "$appsup"
-    tr -d ' \n\r' < "$HERE/Sidecar/.gemini_key" > "$appsup/gemini_key"
-    chmod 600 "$appsup/gemini_key"
-    echo "    gemini key -> $appsup/gemini_key"
-  fi
+  echo "==> API keys are managed in-app (Settings → 음성 합성 / 텍스트 생성); none are"
+  echo "    provisioned from the repo. Keys live in Application Support, entered via the UI."
 
   echo "==> Registering with Launch Services"
   "$LSREGISTER" -f "$INSTALL_DIR/$APP_NAME.app"

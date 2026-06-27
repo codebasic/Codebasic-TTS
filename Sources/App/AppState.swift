@@ -6,10 +6,25 @@ import Combine
 @MainActor
 final class AppState: ObservableObject {
 
+    /// The TTS-engine seam: each engine declares its capabilities so the settings
+    /// UI renders the right controls without hardcoding ElevenLabs. A new engine =
+    /// a new case + these descriptors + its own settings sub-section. The engine's
+    /// concrete tuning (e.g. ElevenVoiceSettings) stays its own typed value so the
+    /// cache key / persistence are untouched.
     enum BackendKind: String, CaseIterable, Identifiable {
         case elevenlabs, local
         var id: String { rawValue }
-        var label: String { self == .elevenlabs ? "ElevenLabs (클라우드)" : "로컬 (sidecar)" }
+        var label: String { self == .elevenlabs ? "ElevenLabs (클라우드)" : "로컬 Qwen3 (sidecar)" }
+        /// Engine needs an API key + a connection step.
+        var requiresAPIKey: Bool { self == .elevenlabs }
+        /// Engine exposes a fetchable voice list (else the voice is entered/fixed).
+        var hasVoiceList: Bool { self == .elevenlabs }
+        /// Engine reaches a local sidecar at a configurable base URL.
+        var usesLocalSidecar: Bool { self == .local }
+        /// Selectable synthesis models (empty = single/fixed model).
+        var ttsModels: [(id: String, label: String)] {
+            self == .elevenlabs ? ElevenLabs.koreanModels : []
+        }
     }
 
     // Connection

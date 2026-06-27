@@ -1,132 +1,29 @@
 import SwiftUI
 
-/// Generation settings: backend, voice, model, voice tuning, cache.
+/// Settings split into two conceptual channels: ① 음성 합성 (the TTS engine) and
+/// ② 텍스트 생성 (the LLM used for 해설/대본). The TTS channel renders from the
+/// engine seam (BackendKind descriptors) so it's not hardcoded to ElevenLabs;
+/// each engine keeps its own typed tuning (ElevenVoiceSettings) untouched.
 struct SettingsView: View {
     @EnvironmentObject var app: AppState
+    @State private var channel = 0               // 0 = 음성 합성, 1 = 텍스트 생성
     @State private var geminiKeyInput = ""
     @State private var keyInput = ""             // ElevenLabs key entry
 
     var body: some View {
-        Form {
-            Section("백엔드") {
-                Picker("엔진", selection: $app.backendKind) {
-                    ForEach(AppState.BackendKind.allCases) { Text($0.label).tag($0) }
-                }
+        VStack(spacing: 0) {
+            Picker("", selection: $channel) {
+                Text("음성 합성 (TTS)").tag(0)
+                Text("텍스트 생성 (LLM)").tag(1)
             }
+            .pickerStyle(.segmented).labelsHidden()
+            .padding([.horizontal, .top])
 
-            Section("보이스 / 모델") {
-                if app.voices.isEmpty {
-                    labeledField("보이스 ID", placeholder: "voice id", text: $app.voiceId,
-                                 hint: "연결 탭에서 ‘보이스 새로고침’을 누르면 목록에서 고를 수 있어요.")
-                } else {
-                    Picker("보이스", selection: $app.voiceId) {
-                        ForEach(app.voices) { v in
-                            Text("\(v.name)\(v.category == "cloned" ? " · 클론" : "")").tag(v.id)
-                        }
-                    }
-                }
-                Picker("모델", selection: $app.modelId) {
-                    ForEach(ElevenLabs.koreanModels, id: \.id) { Text($0.label).tag($0.id) }
-                }
+            Form {
+                if channel == 0 { ttsChannel } else { llmChannel }
             }
-
-            Section("보이스 설정 (ElevenLabs)") {
-                slider("안정성 (stability)", $app.voiceSettings.stability)
-                slider("유사도 (similarity)", $app.voiceSettings.similarityBoost)
-                slider("스타일 (style)", $app.voiceSettings.style)
-                Toggle("speaker boost", isOn: $app.voiceSettings.useSpeakerBoost)
-            }
-
-            Section("캐시 / 문단 분할") {
-                Toggle("같은 텍스트는 캐시에서 재생 (API 재호출 안 함)", isOn: $app.useCache)
-                LabeledContent("문단 최대 글자수") {
-                    TextField("", value: $app.maxChunkChars, format: .number)
-                        .frame(width: 80).multilineTextAlignment(.trailing)
-                }
-                Text("긴 문단은 이 글자수 기준으로 나눠 따로 요청한 뒤 이어 재생합니다. 캐시도 이 단위.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-
-            Section("TTS 친화 정규화") {
-                Toggle("숫자·수식 표기를 발음대로 정규화", isOn: $app.normalizeEnabled)
-                Picker("제공자", selection: $app.normalizeProvider) {
-                    ForEach(AppState.NormalizeProvider.allCases) { Text($0.label).tag($0) }
-                }
-
-                if app.normalizeProvider == .gemini {
-                    labeledField("Gemini 엔드포인트", placeholder: GeminiNormalizer.defaultBaseURL,
-                                 text: $app.geminiBaseURL,
-                                 hint: "API 루트. 끝에 /models/{모델}:generateContent 가 붙습니다. 프록시·게이트웨이 사용 시 변경.")
-                    if app.geminiModels.isEmpty {
-                        Picker("대본 모델", selection: $app.geminiModel) {
-                            ForEach(GeminiNormalizer.models, id: \.self) { Text($0).tag($0) }
-                        }
-                    } else {
-                        Picker("대본 모델", selection: $app.geminiModel) {
-                            ForEach(app.geminiModels, id: \.self) { Text($0).tag($0) }
-                        }
-                    }
-                    labeledField("Gemini API 키", placeholder: "AIza…", secure: true,
-                                 text: $geminiKeyInput,
-                                 hint: app.geminiKeyPresent ? "현재: 설정됨 (App Support)" : "현재: 없음")
-                    HStack {
-                        Button("키 저장") { app.saveGeminiKey(geminiKeyInput); geminiKeyInput = "" }
-                            .disabled(geminiKeyInput.trimmingCharacters(in: .whitespaces).isEmpty)
-                        Button("연결 확인 / 모델 목록") { app.refreshGeminiModels() }
-                        Spacer()
-                        Text(app.geminiStatus).font(.caption).foregroundStyle(.secondary)
-                    }
-                } else {
-                    if app.ollamaModels.isEmpty {
-                        labeledField("모델", placeholder: "qwen2.5:3b", text: $app.ollamaModel)
-                    } else {
-                        Picker("모델", selection: $app.ollamaModel) {
-                            ForEach(app.ollamaModels, id: \.self) { Text($0).tag($0) }
-                        }
-                    }
-                    labeledField("Ollama 엔드포인트", placeholder: "http://localhost:11434",
-                                 text: $app.ollamaURL,
-                                 hint: "로컬/원격 모두 가능: 예) http://192.168.0.10:11434")
-                    HStack {
-                        Button("연결 확인 / 모델 목록") { app.refreshOllamaModels() }
-                        Spacer()
-                        Text(app.ollamaStatus).font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-                Text("0.5→영 점 오, w1→더블유 일 처럼 다듬어 합성합니다. 경량 로컬 모델은 숫자 읽기가 부정확할 수 있어 Gemini를 권장합니다.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-
-            Section("연결 상태") {
-                LabeledContent("백엔드", value: app.backendKind.label)
-                LabeledContent("ElevenLabs 키", value: app.keyPresent ? "설정됨" : "없음")
-                LabeledContent("연결", value: app.connectionStatus.isEmpty ? "—" : app.connectionStatus)
-                Button {
-                    app.refreshVoices()
-                } label: {
-                    Label("연결 테스트 / 보이스 새로고침", systemImage: "arrow.clockwise")
-                }
-            }
-
-            Section("ElevenLabs API 키") {
-                SecureField("sk_...", text: $keyInput)
-                HStack {
-                    Button("저장") { app.saveKey(keyInput); keyInput = "" }
-                        .disabled(keyInput.trimmingCharacters(in: .whitespaces).isEmpty)
-                    Spacer()
-                    Text("App Support에 저장됩니다").font(.caption).foregroundStyle(.secondary)
-                }
-            }
-
-            Section("로컬 sidecar") {
-                LabeledContent("Base URL") {
-                    TextField("http://127.0.0.1:8765", text: $app.localBaseURL).frame(width: 240)
-                }
-                Text("로컬 엔진(Qwen3-TTS)을 쓰려면 Sidecar/server.py 를 실행해 두세요.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
+            .formStyle(.grouped)
         }
-        .formStyle(.grouped)
         .onAppear {
             if app.ollamaModels.isEmpty { app.refreshOllamaModels() }
             if app.voices.isEmpty && app.keyPresent { app.refreshVoices() }
@@ -146,8 +43,138 @@ struct SettingsView: View {
         .onChange(of: app.modelId) { _, _ in app.saveSettings() }
         .onChange(of: app.backendKind) { _, _ in app.saveSettings() }
         .onChange(of: app.useCache) { _, _ in app.saveSettings() }
+        .onChange(of: app.voiceSettings) { _, _ in app.saveSettings() }
         .onDisappear { app.saveSettings() }
     }
+
+    // MARK: - ① 음성 합성 (TTS engine)
+
+    @ViewBuilder private var ttsChannel: some View {
+        Section("엔진") {
+            Picker("합성 엔진", selection: $app.backendKind) {
+                ForEach(AppState.BackendKind.allCases) { Text($0.label).tag($0) }
+            }
+            Text("음성을 만드는 백엔드입니다. 엔진을 바꾸면 아래 보이스·모델·튜닝이 그 엔진 기준으로 바뀝니다.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+
+        Section("보이스 / 모델") {
+            if app.backendKind.hasVoiceList {
+                if app.voices.isEmpty {
+                    labeledField("보이스 ID", placeholder: "voice id", text: $app.voiceId,
+                                 hint: "아래 ‘연결’에서 보이스를 새로고침하면 목록에서 고를 수 있어요.")
+                } else {
+                    Picker("보이스", selection: $app.voiceId) {
+                        ForEach(app.voices) { v in
+                            Text("\(v.name)\(v.category == "cloned" ? " · 클론" : "")").tag(v.id)
+                        }
+                    }
+                }
+            } else {
+                labeledField("보이스 ID", placeholder: "voice id", text: $app.voiceId,
+                             hint: "이 엔진은 보이스 목록을 제공하지 않습니다. 식별자를 직접 입력하세요.")
+            }
+            if !app.backendKind.ttsModels.isEmpty {
+                Picker("모델", selection: $app.modelId) {
+                    ForEach(app.backendKind.ttsModels, id: \.id) { Text($0.label).tag($0.id) }
+                }
+            }
+        }
+
+        if app.backendKind == .elevenlabs {
+            Section("보이스 튜닝 (ElevenLabs)") {
+                slider("안정성 (stability)", $app.voiceSettings.stability)
+                slider("유사도 (similarity)", $app.voiceSettings.similarityBoost)
+                slider("스타일 (style)", $app.voiceSettings.style)
+                Toggle("speaker boost", isOn: $app.voiceSettings.useSpeakerBoost)
+            }
+        }
+
+        if app.backendKind.requiresAPIKey {
+            Section("연결") {
+                LabeledContent("API 키", value: app.keyPresent ? "설정됨" : "없음")
+                LabeledContent("연결", value: app.connectionStatus.isEmpty ? "—" : app.connectionStatus)
+                labeledField("ElevenLabs API 키", placeholder: "sk_…", secure: true, text: $keyInput,
+                             hint: "App Support에 저장됩니다.")
+                HStack {
+                    Button("키 저장") { app.saveKey(keyInput); keyInput = "" }
+                        .disabled(keyInput.trimmingCharacters(in: .whitespaces).isEmpty)
+                    Button { app.refreshVoices() } label: {
+                        Label("연결 테스트 / 보이스 새로고침", systemImage: "arrow.clockwise")
+                    }
+                    Spacer()
+                }
+            }
+        }
+
+        if app.backendKind.usesLocalSidecar {
+            Section("로컬 sidecar") {
+                LabeledContent("Base URL") {
+                    TextField("http://127.0.0.1:8765", text: $app.localBaseURL).frame(width: 240)
+                }
+                Text("로컬 엔진(Qwen3-TTS)을 쓰려면 Sidecar/server.py 를 실행해 두세요.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+
+        Section("캐시 / 합성") {
+            Toggle("같은 텍스트는 캐시에서 재생 (API 재호출 안 함)", isOn: $app.useCache)
+            LabeledContent("문단 최대 글자수") {
+                TextField("", value: $app.maxChunkChars, format: .number)
+                    .frame(width: 80).multilineTextAlignment(.trailing)
+            }
+            Text("긴 대본은 이 글자수 기준으로 문단을 나눠 합성·캐시·재생합니다 (오디오 분할 단위).")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    // MARK: - ② 텍스트 생성 (LLM for 해설/대본)
+
+    @ViewBuilder private var llmChannel: some View {
+        Section("제공자") {
+            Picker("LLM 제공자", selection: $app.normalizeProvider) {
+                ForEach(AppState.NormalizeProvider.allCases) { Text($0.label).tag($0) }
+            }
+            Text("코드 해설과 음성 대본(정규화) 생성에 사용하는 텍스트 생성 모델입니다. 모델은 해설/TTS 패널에서, temperature는 각 패널의 인스펙터(⊟)에서 조절합니다.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+
+        if app.normalizeProvider == .gemini {
+            Section("Gemini") {
+                labeledField("엔드포인트", placeholder: GeminiNormalizer.defaultBaseURL,
+                             text: $app.geminiBaseURL,
+                             hint: "API 루트. 끝에 /models/{모델}:generateContent 가 붙습니다. 프록시·게이트웨이 사용 시 변경.")
+                labeledField("API 키", placeholder: "AIza…", secure: true, text: $geminiKeyInput,
+                             hint: app.geminiKeyPresent ? "현재: 설정됨 (App Support)" : "현재: 없음")
+                HStack {
+                    Button("키 저장") { app.saveGeminiKey(geminiKeyInput); geminiKeyInput = "" }
+                        .disabled(geminiKeyInput.trimmingCharacters(in: .whitespaces).isEmpty)
+                    Button("연결 확인 / 모델 목록") { app.refreshGeminiModels() }
+                    Spacer()
+                    Text(app.geminiStatus).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        } else {
+            Section("Ollama") {
+                labeledField("엔드포인트", placeholder: "http://localhost:11434",
+                             text: $app.ollamaURL,
+                             hint: "로컬/원격 모두 가능: 예) http://192.168.0.10:11434")
+                HStack {
+                    Button("연결 확인 / 모델 목록") { app.refreshOllamaModels() }
+                    Spacer()
+                    Text(app.ollamaStatus).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+
+        Section("음성 대본 정규화") {
+            Toggle("대본 생성 시 LLM으로 발음·표기 정규화", isOn: $app.normalizeEnabled)
+            Text("끄면 해설을 거의 그대로 합성합니다. 켜면 숫자·기호·코드 명칭을 발음대로 다듬습니다 (경량 로컬 모델은 부정확할 수 있어 강한 모델 권장).")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    // MARK: - Helpers
 
     @ViewBuilder
     private func slider(_ label: String, _ value: Binding<Double>) -> some View {
@@ -171,7 +198,7 @@ struct SettingsView: View {
                 if secure { SecureField(placeholder, text: text) }
                 else { TextField(placeholder, text: text) }
             }
-            .labelsHidden()                       // avoid the Form auto-label duplicating our caption
+            .labelsHidden()
             .textFieldStyle(.roundedBorder)
             if let hint { Text(hint).font(.caption2).foregroundStyle(.tertiary) }
         }
