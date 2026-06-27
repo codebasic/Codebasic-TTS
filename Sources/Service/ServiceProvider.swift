@@ -23,4 +23,23 @@ final class ServiceProvider: NSObject {
             AppDelegate.shared?.handleSelectedText(text)
         }
     }
+
+    /// Second Services entry ("코드 해설"). NSMessage = "explainSelectedText" maps
+    /// to this selector. Explains the selected code, then speaks it end-to-end.
+    @objc func explainSelectedText(
+        _ pboard: NSPasteboard,
+        userData: String?,
+        error: AutoreleasingUnsafeMutablePointer<NSString>?
+    ) {
+        guard let text = pboard.string(forType: .string), !text.isEmpty else {
+            Log.service.error("Explain service fired but pasteboard held no plain text")
+            error?.pointee = "No selectable text was provided." as NSString
+            return
+        }
+
+        Log.service.info("Explain service fired: received \(text.count) chars")
+        Task { @MainActor in
+            AppDelegate.shared?.handleCodeText(text)
+        }
+    }
 }

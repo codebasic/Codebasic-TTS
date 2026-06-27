@@ -12,6 +12,71 @@ func normalizationPrompt(_ instruction: String, _ text: String) -> String {
     return "\(instr)\n\n원문:\n\(text)\n\n변환:"
 }
 
+/// Shared LLM HTTP plumbing. Both the normalizer (원문→변환) and the explainer
+/// (코드→해설) build their own prompt and call these — the prompt scaffold is
+/// the caller's job, NOT baked in here.
+enum LLM {
+    /// Google Gemini `generateContent`. `baseURL` is the API root (default
+    /// `https://generativelanguage.googleapis.com/v1beta`); the path
+    /// `/models/{model}:generateContent` is appended. Returns the (trimmed) text.
+    static func gemini(baseURL: String = GeminiNormalizer.defaultBaseURL,
+                       apiKey: String, model: String, prompt: String,
+                       temperature: Double = 0.2) async throws -> String {
+        var base = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if base.isEmpty { base = GeminiNormalizer.defaultBaseURL }
+        while base.hasSuffix("/") { base.removeLast() }
+        guard let url = URL(string: "\(base)/models/\(model):generateContent") else {
+            throw NSError(domain: "Gemini", code: -1,
+                          userInfo: [NSLocalizedDescriptionKey: "잘못된 Gemini 엔드포인트 URL"])
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
+        req.timeoutInterval = 120
+        req.httpBody = try JSONSerialization.data(withJSONObject: [
+            "contents": [["parts": [["text": prompt]]]],
+            "generationConfig": ["temperature": temperature],
+        ])
+        let (data, response) = try await URLSession.shared.data(for: req)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            let msg = String(data: data, encoding: .utf8) ?? "request failed"
+            throw NSError(domain: "Gemini", code: (response as? HTTPURLResponse)?.statusCode ?? -1,
+                          userInfo: [NSLocalizedDescriptionKey: msg])
+        }
+        let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let cands = obj?["candidates"] as? [[String: Any]]
+        let content = cands?.first?["content"] as? [String: Any]
+        let parts = content?["parts"] as? [[String: Any]]
+        return (parts?.first?["text"] as? String ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Local Ollama `api/generate` (non-streaming). Returns the (trimmed) text.
+    static func ollama(baseURL: URL, model: String, prompt: String,
+                       temperature: Double = 0.2) async throws -> String {
+        var req = URLRequest(url: baseURL.appendingPathComponent("api/generate"))
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.timeoutInterval = 120
+        req.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": model,
+            "prompt": prompt,
+            "stream": false,
+            "options": ["temperature": temperature],
+        ])
+        let (data, response) = try await URLSession.shared.data(for: req)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            let msg = String(data: data, encoding: .utf8) ?? "request failed"
+            throw NSError(domain: "Ollama", code: (response as? HTTPURLResponse)?.statusCode ?? -1,
+                          userInfo: [NSLocalizedDescriptionKey: msg])
+        }
+        let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        return (obj?["response"] as? String ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
 /// Local LLM via Ollama.
 struct TextNormalizer: Normalizing {
     let baseURL: URL
@@ -33,62 +98,110 @@ struct TextNormalizer: Normalizing {
     """
 
     func normalize(_ text: String) async throws -> String {
-        let prompt = normalizationPrompt(instruction, text)
-        var req = URLRequest(url: baseURL.appendingPathComponent("api/generate"))
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.timeoutInterval = 60
-        req.httpBody = try JSONSerialization.data(withJSONObject: [
-            "model": model,
-            "prompt": prompt,
-            "stream": false,
-            "options": ["temperature": 0.2],
-        ])
-        let (data, response) = try await URLSession.shared.data(for: req)
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            let msg = String(data: data, encoding: .utf8) ?? "request failed"
-            throw NSError(domain: "Ollama", code: (response as? HTTPURLResponse)?.statusCode ?? -1,
-                          userInfo: [NSLocalizedDescriptionKey: msg])
-        }
-        let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        let out = (obj?["response"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let out = try await LLM.ollama(baseURL: baseURL, model: model,
+                                       prompt: normalizationPrompt(instruction, text))
         return out.isEmpty ? text : out
     }
 }
 
 /// Google Gemini API normalizer.
 struct GeminiNormalizer: Normalizing {
+    let baseURL: String
     let apiKey: String
     let model: String          // e.g. "gemini-2.0-flash"
     let instruction: String
 
     static let models = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-flash"]
+    static let defaultBaseURL = "https://generativelanguage.googleapis.com/v1beta"
 
     func normalize(_ text: String) async throws -> String {
-        let prompt = normalizationPrompt(instruction, text)
-        let url = URL(string:
-            "https://generativelanguage.googleapis.com/v1beta/models/\(model):generateContent")!
+        let out = try await LLM.gemini(baseURL: baseURL, apiKey: apiKey, model: model,
+                                       prompt: normalizationPrompt(instruction, text))
+        return out.isEmpty ? text : out
+    }
+}
+
+// MARK: - Code explanation (코드 → 해설)
+
+/// Turns source code into a spoken-style Korean commentary. Distinct from
+/// `Normalizing`: the prompt frames the task as *explanation*, not 원문→변환,
+/// and the caller surfaces failures instead of falling back to the raw code.
+protocol Explaining {
+    func explain(_ code: String) async throws -> String
+}
+
+/// Shared default instruction + prompt scaffold for the explainers.
+enum CodeExplanation {
+    static let defaultInstruction = """
+    당신은 코드를 음성으로 설명해 주는 해설자입니다.
+    주어진 코드를 듣는 사람이 머릿속으로 그릴 수 있도록 한국어 구어체로 해설하세요.
+    규칙:
+    - 코드를 한 줄씩 그대로 낭독하지 말고, 무엇을 하는 코드인지 목적과 전체 동작 흐름을 자연스럽게 설명합니다.
+    - 핵심 개념, 사용된 기법, 주의할 점이 있으면 짚어 줍니다.
+    - 음성으로 들을 것이므로 기호를 나열하지 말고 풀어서 말합니다.
+      예: i++ → 아이를 하나 증가, == → 같은지 비교, => → 화살표 함수, [] → 배열.
+    - 변수·함수 이름은 자연스럽게 읽되, 필요하면 영어 그대로 말합니다.
+    - 마크다운, 코드 블록, 머리말·맺음말 없이 해설 본문만 출력합니다.
+    - 장황하지 않게, 핵심 위주로 설명합니다.
+    """
+
+    static func prompt(_ instruction: String, _ code: String) -> String {
+        let instr = instruction.isEmpty ? defaultInstruction : instruction
+        return "\(instr)\n\n코드:\n\(code)\n\n해설:"
+    }
+}
+
+/// Code explanation via Google Gemini.
+struct GeminiExplainer: Explaining {
+    let baseURL: String
+    let apiKey: String
+    let model: String
+    let instruction: String
+    func explain(_ code: String) async throws -> String {
+        try await LLM.gemini(baseURL: baseURL, apiKey: apiKey, model: model,
+                             prompt: CodeExplanation.prompt(instruction, code), temperature: 0.4)
+    }
+}
+
+/// Code explanation via local Ollama.
+struct OllamaExplainer: Explaining {
+    let baseURL: URL
+    let model: String
+    let instruction: String
+    func explain(_ code: String) async throws -> String {
+        try await LLM.ollama(baseURL: baseURL, model: model,
+                             prompt: CodeExplanation.prompt(instruction, code), temperature: 0.4)
+    }
+}
+
+/// Gemini helpers for the UI.
+enum Gemini {
+    /// Models the endpoint exposes that support `generateContent`, as short ids
+    /// (e.g. "gemini-2.0-flash"). `baseURL` is the same API root as generation.
+    static func models(baseURL: String, apiKey: String) async throws -> [String] {
+        var base = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if base.isEmpty { base = GeminiNormalizer.defaultBaseURL }
+        while base.hasSuffix("/") { base.removeLast() }
+        guard let url = URL(string: "\(base)/models") else {
+            throw NSError(domain: "Gemini", code: -1,
+                          userInfo: [NSLocalizedDescriptionKey: "잘못된 Gemini 엔드포인트 URL"])
+        }
         var req = URLRequest(url: url)
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
-        req.timeoutInterval = 60
-        req.httpBody = try JSONSerialization.data(withJSONObject: [
-            "contents": [["parts": [["text": prompt]]]],
-            "generationConfig": ["temperature": 0.2],
-        ])
         let (data, response) = try await URLSession.shared.data(for: req)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            let msg = String(data: data, encoding: .utf8) ?? "request failed"
+            let msg = String(data: data, encoding: .utf8) ?? "Gemini에 연결할 수 없음"
             throw NSError(domain: "Gemini", code: (response as? HTTPURLResponse)?.statusCode ?? -1,
                           userInfo: [NSLocalizedDescriptionKey: msg])
         }
         let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        let cands = obj?["candidates"] as? [[String: Any]]
-        let content = cands?.first?["content"] as? [String: Any]
-        let parts = content?["parts"] as? [[String: Any]]
-        let out = (parts?.first?["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        return out.isEmpty ? text : out
+        let arr = (obj?["models"] as? [[String: Any]]) ?? []
+        return arr.compactMap { m -> String? in
+            let methods = m["supportedGenerationMethods"] as? [String]
+            guard methods?.contains("generateContent") ?? true else { return nil }
+            guard let name = m["name"] as? String else { return nil }
+            return name.hasPrefix("models/") ? String(name.dropFirst("models/".count)) : name
+        }
     }
 }
 

@@ -93,6 +93,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appState.speakSelected(text)
     }
 
+    /// Called by ServiceProvider when the user picks "코드 해설": explain the
+    /// selected code via the LLM, then speak the commentary (코드 → 해설 → 대본 →
+    /// 음성). Surfaces the 해설 tab so the result is visible.
+    func handleCodeText(_ code: String) {
+        let preview = code.replacingOccurrences(of: "\n", with: " ").prefix(60)
+        Log.app.info("handleCodeText: \(code.count) chars — \"\(preview, privacy: .public)\"")
+        appState.selectedTab = 0
+        appState.explainAndSpeak(code)
+    }
+
     // MARK: - Main menu (regular app needs one for ⌘Q and text-editing shortcuts)
 
     private func setUpMainMenu() {

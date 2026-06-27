@@ -33,15 +33,39 @@ final class AppState: ObservableObject {
         var label: String { self == .gemini ? "Gemini" : "Ollama" }
     }
     @Published var normalizeEnabled = false
-    @Published var normalizeProvider: NormalizeProvider = .gemini
-    @Published var geminiModel = "gemini-2.0-flash"
+    @Published var normalizeProvider: NormalizeProvider = .ollama
+    @Published var geminiBaseURL = GeminiNormalizer.defaultBaseURL   // endpoint root; field default, not hardcoded
+    @Published var geminiModel = "gemini-2.0-flash"   // 대본(정규화)용
+    @Published var geminiModels: [String] = []        // fetched from the endpoint (models.list)
+    @Published var geminiStatus = ""
     @Published var geminiKeyPresent = Secrets.geminiKey != nil
-    @Published var ollamaModel = "gemma4:31b-cloud"   // 3B local models garble Korean numbers; a strong model is needed
+    @Published var ollamaModel = "gemma4:31b-cloud"   // 대본(정규화)용. 3B local models garble Korean numbers; a strong model is needed
     @Published var ollamaURL = "http://localhost:11434"
     @Published var ollamaModels: [String] = []
     @Published var ollamaStatus = ""
     @Published var normalizePrompt = TextNormalizer.defaultInstruction
     @Published var normalizing = false
+
+    // Commentary (코드 → 해설). Shares the provider + endpoint above, but the
+    // explain model is SEPARATE from the script model — they can differ.
+    @Published var codeText = ""                 // source code (해설 panel, top)
+    @Published var explanationText = ""          // generated commentary (해설 panel, bottom)
+    @Published var explaining = false
+    @Published var explainPrompt = CodeExplanation.defaultInstruction
+    @Published var explainGeminiModel = "gemini-2.0-flash"   // 해설용
+    @Published var explainOllamaModel = "gemma4:31b-cloud"   // 해설용
+    @Published var selectedTab = 0               // RootView TabView selection
+
+    /// Model used for the current provider, per role.
+    var scriptModel: String { normalizeProvider == .gemini ? geminiModel : ollamaModel }
+    var explainModel: String { normalizeProvider == .gemini ? explainGeminiModel : explainOllamaModel }
+    /// Models exposed by the current provider's endpoint (Gemini falls back to the
+    /// static list until a fetch succeeds).
+    var providerModels: [String] {
+        normalizeProvider == .gemini
+            ? (geminiModels.isEmpty ? GeminiNormalizer.models : geminiModels)
+            : ollamaModels
+    }
 
     // Runtime
     enum Phase: Equatable { case idle, synthesizing, playing, paused }
@@ -188,7 +212,8 @@ final class AppState: ObservableObject {
         switch normalizeProvider {
         case .gemini:
             guard let key = Secrets.geminiKey else { return nil }
-            return GeminiNormalizer(apiKey: key, model: geminiModel, instruction: normalizePrompt)
+            return GeminiNormalizer(baseURL: geminiBaseURL, apiKey: key, model: geminiModel,
+                                    instruction: normalizePrompt)
         case .ollama:
             return TextNormalizer(
                 baseURL: URL(string: ollamaURL) ?? URL(string: "http://localhost:11434")!,
@@ -200,6 +225,104 @@ final class AppState: ObservableObject {
         let k = key.trimmingCharacters(in: .whitespacesAndNewlines)
         Secrets.writeKey(named: "gemini_key", k)
         geminiKeyPresent = !k.isEmpty
+    }
+
+    // MARK: - Commentary (코드 → 해설)
+
+    private func makeExplainer() -> Explaining? {
+        switch normalizeProvider {
+        case .gemini:
+            guard let key = Secrets.geminiKey else { return nil }
+            return GeminiExplainer(baseURL: geminiBaseURL, apiKey: key, model: explainGeminiModel,
+                                   instruction: explainPrompt)
+        case .ollama:
+            return OllamaExplainer(
+                baseURL: URL(string: ollamaURL) ?? URL(string: "http://localhost:11434")!,
+                model: explainOllamaModel, instruction: explainPrompt)
+        }
+    }
+
+    /// Run the explainer on `codeText` (cache-first) and fill `explanationText`.
+    /// Returns nil on failure WITHOUT touching the speak path — a failed
+    /// explanation must never fall through to reading raw code aloud. The code is
+    /// sent verbatim (no cleanInput, which would flatten line structure).
+    @discardableResult
+    func explainCode(force: Bool = false) async -> String? {
+        let code = codeText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !code.isEmpty else { explanationText = ""; return nil }
+        guard let explainer = makeExplainer() else {
+            statusText = normalizeProvider == .gemini ? "Gemini 키 미설정" : "Ollama 미설정"
+            return nil
+        }
+        let provider = "explain:" + normalizeProvider.rawValue
+        let nk = NormalizationCache.key(text: code, provider: provider, model: explainModel, prompt: explainPrompt)
+        if !force, let cached = normCache.script(forKey: nk) {
+            explanationText = cached; return cached
+        }
+        explaining = true
+        defer { explaining = false }
+        do {
+            let out = try await explainer.explain(code)
+            guard !out.isEmpty else { statusText = "해설 생성 실패 (빈 응답)"; return nil }
+            normCache.put(key: nk, script: out)
+            explanationText = out
+            return out
+        } catch {
+            statusText = "해설 오류: \(error.localizedDescription)"
+            return nil
+        }
+    }
+
+    /// 해설 탭 → 생성 탭: hand the commentary to the script pipeline as its source.
+    func sendExplanationToGenerate() {
+        let ex = explanationText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !ex.isEmpty else { return }
+        inputText = ex          // prepareScript cleans/normalizes this prose downstream
+        scriptText = ""
+        selectedTab = 1         // switch to 생성
+    }
+
+    /// 해설 탭 "바로 재생": speak the commentary (해설 → 대본 → 음성), skipping the
+    /// 대본 review step. Mirrors speakSelected but starting from prose, not code.
+    func speakExplanation() {
+        let ex = explanationText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !ex.isEmpty else { return }
+        task?.cancel(); player.stop()
+        inputText = ex
+        scriptText = ""
+        phase = .synthesizing
+        statusText = normalizeEnabled ? "대본 생성 중…" : "합성 중…"
+        Task { [weak self] in
+            guard let self else { return }
+            let script = await self.prepareScript()
+            self.synthesize(script)
+        }
+    }
+
+    /// Services entry ("코드 해설"): explain the selected code, then speak it
+    /// end-to-end (코드 → 해설 → 대본 → 음성). Two sequential LLM calls before any
+    /// audio (explain, then normalize if enabled). The code is fed RAW to the
+    /// explainer; if explanation fails we stop and never speak the source.
+    func explainAndSpeak(_ code: String) {
+        task?.cancel(); player.stop()
+        codeText = code             // raw — no cleanInput
+        explanationText = ""
+        scriptText = ""
+        phase = .synthesizing
+        statusText = "해설 생성 중…"
+        Task { [weak self] in
+            guard let self else { return }
+            guard let explanation = await self.explainCode() else {
+                self.phase = .idle
+                if self.statusText.isEmpty { self.statusText = "해설 생성 실패" }
+                return                  // do NOT speak raw code
+            }
+            self.inputText = explanation
+            self.scriptText = ""
+            self.statusText = self.normalizeEnabled ? "대본 생성 중…" : "합성 중…"
+            let script = await self.prepareScript()
+            self.synthesize(script)
+        }
     }
 
     // MARK: - Script (TTS-friendly text)
@@ -216,7 +339,7 @@ final class AppState: ObservableObject {
 
         normalizing = true
         let provider = normalizeProvider.rawValue
-        let model = normalizeProvider == .gemini ? geminiModel : ollamaModel
+        let model = scriptModel
         var out: [String] = []
         for p in TextSplitter.paragraphs(src, maxChars: maxChunkChars) {
             // Normalization cache: skip the LLM for text already normalized.
@@ -309,6 +432,22 @@ final class AppState: ObservableObject {
         }
     }
 
+    func refreshGeminiModels() {
+        guard let key = Secrets.geminiKey else { geminiStatus = "키 없음"; return }
+        geminiStatus = "확인 중…"
+        let base = geminiBaseURL
+        Task { [weak self] in
+            do {
+                let ms = try await Gemini.models(baseURL: base, apiKey: key)
+                guard let self else { return }
+                self.geminiModels = ms
+                self.geminiStatus = "연결됨 · 모델 \(ms.count)개"
+            } catch {
+                self?.geminiStatus = "연결 실패: \(error.localizedDescription)"
+            }
+        }
+    }
+
     func refreshOllamaModels() {
         let url = URL(string: ollamaURL) ?? URL(string: "http://localhost:11434")!
         ollamaStatus = "확인 중…"
@@ -337,6 +476,8 @@ final class AppState: ObservableObject {
             "maxChunkChars": maxChunkChars,
             "normalize": normalizeEnabled, "ollamaModel": ollamaModel, "ollamaURL": ollamaURL,
             "normalizeProvider": normalizeProvider.rawValue, "geminiModel": geminiModel,
+            "geminiBaseURL": geminiBaseURL,
+            "explainGeminiModel": explainGeminiModel, "explainOllamaModel": explainOllamaModel,
             "stability": voiceSettings.stability, "similarity": voiceSettings.similarityBoost,
             "style": voiceSettings.style, "speakerBoost": voiceSettings.useSpeakerBoost,
         ]
@@ -344,6 +485,9 @@ final class AppState: ObservableObject {
         // updates auto-apply for everyone who didn't.
         if normalizePrompt != TextNormalizer.defaultInstruction {
             dict["normalizePrompt"] = normalizePrompt
+        }
+        if explainPrompt != CodeExplanation.defaultInstruction {
+            dict["explainPrompt"] = explainPrompt
         }
         if let d = try? JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted]) {
             try? d.write(to: settingsURL)
@@ -364,8 +508,12 @@ final class AppState: ObservableObject {
         ollamaModel = o["ollamaModel"] as? String ?? ollamaModel
         ollamaURL = o["ollamaURL"] as? String ?? ollamaURL
         normalizePrompt = o["normalizePrompt"] as? String ?? normalizePrompt
+        explainPrompt = o["explainPrompt"] as? String ?? explainPrompt
         normalizeProvider = NormalizeProvider(rawValue: o["normalizeProvider"] as? String ?? "") ?? normalizeProvider
         geminiModel = o["geminiModel"] as? String ?? geminiModel
+        geminiBaseURL = o["geminiBaseURL"] as? String ?? geminiBaseURL
+        explainGeminiModel = o["explainGeminiModel"] as? String ?? explainGeminiModel
+        explainOllamaModel = o["explainOllamaModel"] as? String ?? explainOllamaModel
         voiceSettings.stability = o["stability"] as? Double ?? voiceSettings.stability
         voiceSettings.similarityBoost = o["similarity"] as? Double ?? voiceSettings.similarityBoost
         voiceSettings.style = o["style"] as? Double ?? voiceSettings.style

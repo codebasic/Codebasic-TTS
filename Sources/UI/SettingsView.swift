@@ -53,8 +53,17 @@ struct SettingsView: View {
                 }
 
                 if app.normalizeProvider == .gemini {
-                    Picker("모델", selection: $app.geminiModel) {
-                        ForEach(GeminiNormalizer.models, id: \.self) { Text($0).tag($0) }
+                    labeledField("Gemini 엔드포인트", placeholder: GeminiNormalizer.defaultBaseURL,
+                                 text: $app.geminiBaseURL,
+                                 hint: "API 루트. 끝에 /models/{모델}:generateContent 가 붙습니다. 프록시·게이트웨이 사용 시 변경.")
+                    if app.geminiModels.isEmpty {
+                        Picker("대본 모델", selection: $app.geminiModel) {
+                            ForEach(GeminiNormalizer.models, id: \.self) { Text($0).tag($0) }
+                        }
+                    } else {
+                        Picker("대본 모델", selection: $app.geminiModel) {
+                            ForEach(app.geminiModels, id: \.self) { Text($0).tag($0) }
+                        }
                     }
                     labeledField("Gemini API 키", placeholder: "AIza…", secure: true,
                                  text: $geminiKeyInput,
@@ -62,7 +71,9 @@ struct SettingsView: View {
                     HStack {
                         Button("키 저장") { app.saveGeminiKey(geminiKeyInput); geminiKeyInput = "" }
                             .disabled(geminiKeyInput.trimmingCharacters(in: .whitespaces).isEmpty)
+                        Button("연결 확인 / 모델 목록") { app.refreshGeminiModels() }
                         Spacer()
+                        Text(app.geminiStatus).font(.caption).foregroundStyle(.secondary)
                     }
                 } else {
                     if app.ollamaModels.isEmpty {
@@ -90,6 +101,7 @@ struct SettingsView: View {
         .onChange(of: app.normalizeEnabled) { _, _ in app.saveSettings() }
         .onChange(of: app.normalizeProvider) { _, _ in app.saveSettings() }
         .onChange(of: app.geminiModel) { _, _ in app.saveSettings() }
+        .onChange(of: app.geminiBaseURL) { _, _ in app.saveSettings() }
         .onChange(of: app.ollamaModel) { _, _ in app.saveSettings() }
         .onChange(of: app.ollamaURL) { _, _ in app.saveSettings() }
         .onChange(of: app.maxChunkChars) { _, _ in app.saveSettings() }

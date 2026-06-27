@@ -1,0 +1,107 @@
+import SwiftUI
+import AppKit
+
+/// The 해설 panel: code → commentary. Top = source code, bottom = the generated
+/// spoken-style explanation. From here you either hand the commentary to the
+/// 생성 tab (코드 → 해설 → 대본 → 음성, each stage visible/editable) or speak it
+/// directly. The actual 대본 + 음성 stages live in GenerateView.
+struct CommentaryView: View {
+    @EnvironmentObject var app: AppState
+    @State private var showPrompt = false
+
+    private var codeEmpty: Bool {
+        app.codeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+    private var explanationEmpty: Bool {
+        app.explanationText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+    private var border: some View { RoundedRectangle(cornerRadius: 6).stroke(.quaternary) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("코드").font(.headline)
+                Spacer()
+                Button {
+                    if let s = NSPasteboard.general.string(forType: .string) { app.codeText = s }
+                } label: {
+                    Label("붙여넣기", systemImage: "doc.on.clipboard")
+                }
+                .controlSize(.small)
+                .help("클립보드의 코드를 그대로 붙여넣습니다")
+            }
+            TextEditor(text: $app.codeText)
+                .font(.body.monospaced()).frame(minHeight: 150)
+                .overlay(border)
+
+            HStack(spacing: 8) {
+                Button {
+                    Task { await app.explainCode() }
+                } label: {
+                    Label("해설 생성", systemImage: "wand.and.stars")
+                }
+                .disabled(codeEmpty || app.explaining)
+
+                Button { Task { await app.explainCode(force: true) } } label: {
+                    Label("재생성", systemImage: "arrow.clockwise")
+                }
+                .disabled(codeEmpty || app.explaining)
+                .help("해설 캐시를 무시하고 LLM으로 다시 생성")
+
+                if app.explaining {
+                    ProgressView().controlSize(.small)
+                    Text("해설 생성 중…").font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                LLMModelPicker(label: "해설 모델",
+                               ollamaModel: $app.explainOllamaModel,
+                               geminiModel: $app.explainGeminiModel,
+                               onChange: { app.saveSettings() })
+            }
+
+            Text("해설").font(.headline)
+            TextEditor(text: $app.explanationText)
+                .font(.body).frame(minHeight: 150)
+                .overlay(border)
+
+            HStack(spacing: 10) {
+                Button { app.sendExplanationToGenerate() } label: {
+                    Label("생성 탭으로 보내기", systemImage: "arrow.right.circle.fill")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(explanationEmpty)
+                .help("해설을 원본 텍스트로 보내 TTS 대본을 만들고 재생합니다")
+
+                Button { app.speakExplanation() } label: { Label("바로 재생", systemImage: "play.fill") }
+                    .disabled(explanationEmpty || app.isBusy)
+                Button { app.stop() } label: { Label("중지", systemImage: "stop.fill") }
+                    .disabled(!app.isBusy)
+                if app.isBusy { ProgressView().controlSize(.small) }
+                Text(app.statusText).font(.callout).foregroundStyle(.secondary)
+                Spacer()
+            }
+
+            DisclosureGroup("해설 프롬프트", isExpanded: $showPrompt) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("해설 지시문 — LLM에게 주는 규칙").font(.caption).foregroundStyle(.secondary)
+                    TextEditor(text: $app.explainPrompt)
+                        .font(.callout.monospaced()).frame(minHeight: 110)
+                        .overlay(border)
+                    HStack {
+                        Button("기본값 복원") {
+                            app.explainPrompt = CodeExplanation.defaultInstruction
+                            app.saveSettings()
+                        }
+                        Spacer()
+                    }
+                }
+                .padding(.top, 4)
+                .onChange(of: app.explainPrompt) { _, _ in app.saveSettings() }
+            }
+
+            Text("제공자: \(app.normalizeProvider.label) (설정 탭) · 해설 모델은 위에서 따로 선택")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .padding()
+    }
+}

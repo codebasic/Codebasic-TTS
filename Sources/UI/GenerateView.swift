@@ -54,7 +54,12 @@ struct GenerateView: View {
                     Text("대본 생성 중…").font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
-                if !app.normalizeEnabled {
+                if app.normalizeEnabled {
+                    LLMModelPicker(label: "대본 모델",
+                                   ollamaModel: $app.ollamaModel,
+                                   geminiModel: $app.geminiModel,
+                                   onChange: { app.saveSettings() })
+                } else {
                     Text("정규화 꺼짐 (설정)").font(.caption).foregroundStyle(.secondary)
                 }
             }
