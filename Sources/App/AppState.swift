@@ -26,8 +26,16 @@ final class AppState: ObservableObject {
     @Published var useCache = true
     @Published var localBaseURL = "http://127.0.0.1:8765"
 
-    // TTS-friendly text normalization (lightweight LLM via Ollama)
+    // TTS-friendly text normalization (LLM: Gemini API or local Ollama)
+    enum NormalizeProvider: String, CaseIterable, Identifiable {
+        case gemini, ollama
+        var id: String { rawValue }
+        var label: String { self == .gemini ? "Gemini (API)" : "Ollama (로컬)" }
+    }
     @Published var normalizeEnabled = false
+    @Published var normalizeProvider: NormalizeProvider = .gemini
+    @Published var geminiModel = "gemini-2.0-flash"
+    @Published var geminiKeyPresent = Secrets.geminiKey != nil
     @Published var ollamaModel = "gemma4:31b-cloud"   // 3B local models garble Korean numbers; a strong model is needed
     @Published var ollamaURL = "http://localhost:11434"
     @Published var ollamaModels: [String] = []
@@ -176,6 +184,24 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func makeNormalizer() -> Normalizing? {
+        switch normalizeProvider {
+        case .gemini:
+            guard let key = Secrets.geminiKey else { return nil }
+            return GeminiNormalizer(apiKey: key, model: geminiModel, instruction: normalizePrompt)
+        case .ollama:
+            return TextNormalizer(
+                baseURL: URL(string: ollamaURL) ?? URL(string: "http://localhost:11434")!,
+                model: ollamaModel, instruction: normalizePrompt)
+        }
+    }
+
+    func saveGeminiKey(_ key: String) {
+        let k = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        Secrets.writeKey(named: "gemini_key", k)
+        geminiKeyPresent = !k.isEmpty
+    }
+
     // MARK: - Script (TTS-friendly text)
 
     /// Build the TTS script from inputText: normalize per paragraph via the LLM
@@ -185,12 +211,9 @@ final class AppState: ObservableObject {
     func prepareScript() async -> String {
         let src = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !src.isEmpty else { scriptText = ""; return "" }
-        guard normalizeEnabled else { scriptText = src; return src }
+        guard normalizeEnabled, let norm = makeNormalizer() else { scriptText = src; return src }
 
         normalizing = true
-        let norm = TextNormalizer(
-            baseURL: URL(string: ollamaURL) ?? URL(string: "http://localhost:11434")!,
-            model: ollamaModel, instruction: normalizePrompt)
         var out: [String] = []
         for p in TextSplitter.paragraphs(src, maxChars: maxChunkChars) {
             out.append((try? await norm.normalize(p)) ?? p)
@@ -294,6 +317,7 @@ final class AppState: ObservableObject {
             "maxChunkChars": maxChunkChars,
             "normalize": normalizeEnabled, "ollamaModel": ollamaModel, "ollamaURL": ollamaURL,
             "normalizePrompt": normalizePrompt,
+            "normalizeProvider": normalizeProvider.rawValue, "geminiModel": geminiModel,
             "stability": voiceSettings.stability, "similarity": voiceSettings.similarityBoost,
             "style": voiceSettings.style, "speakerBoost": voiceSettings.useSpeakerBoost,
         ]
@@ -316,6 +340,8 @@ final class AppState: ObservableObject {
         ollamaModel = o["ollamaModel"] as? String ?? ollamaModel
         ollamaURL = o["ollamaURL"] as? String ?? ollamaURL
         normalizePrompt = o["normalizePrompt"] as? String ?? normalizePrompt
+        normalizeProvider = NormalizeProvider(rawValue: o["normalizeProvider"] as? String ?? "") ?? normalizeProvider
+        geminiModel = o["geminiModel"] as? String ?? geminiModel
         voiceSettings.stability = o["stability"] as? Double ?? voiceSettings.stability
         voiceSettings.similarityBoost = o["similarity"] as? Double ?? voiceSettings.similarityBoost
         voiceSettings.style = o["style"] as? Double ?? voiceSettings.style

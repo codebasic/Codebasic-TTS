@@ -67,9 +67,15 @@ install_and_register() {
     mkdir -p "$appsup"
     tr -d ' \n\r' < "$HERE/Sidecar/.eleven_key" > "$appsup/eleven_key"
     chmod 600 "$appsup/eleven_key"
-    echo "    key -> $appsup/eleven_key"
+    echo "    eleven key -> $appsup/eleven_key"
   else
     echo "    (no Sidecar/.eleven_key — speech will be disabled)"
+  fi
+  if [ -f "$HERE/Sidecar/.gemini_key" ]; then
+    mkdir -p "$appsup"
+    tr -d ' \n\r' < "$HERE/Sidecar/.gemini_key" > "$appsup/gemini_key"
+    chmod 600 "$appsup/gemini_key"
+    echo "    gemini key -> $appsup/gemini_key"
   fi
 
   echo "==> Registering with Launch Services"

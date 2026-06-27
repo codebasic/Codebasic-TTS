@@ -1,10 +1,19 @@
 import Foundation
 
 /// Rewrites text so the TTS engine pronounces it correctly (decimals, math
-/// notation, subscripts, symbols) using a lightweight local LLM via Ollama.
-/// Meaning is preserved; on any failure it returns the original text so
-/// synthesis is never blocked.
-struct TextNormalizer {
+/// notation, subscripts, symbols). Implementations call an LLM (local or API);
+/// callers fall back to the original text on failure so synthesis never blocks.
+protocol Normalizing {
+    func normalize(_ text: String) async throws -> String
+}
+
+func normalizationPrompt(_ instruction: String, _ text: String) -> String {
+    let instr = instruction.isEmpty ? TextNormalizer.defaultInstruction : instruction
+    return "\(instr)\n\n원문:\n\(text)\n\n변환:"
+}
+
+/// Local LLM via Ollama.
+struct TextNormalizer: Normalizing {
     let baseURL: URL
     let model: String
     let instruction: String
@@ -21,8 +30,7 @@ struct TextNormalizer {
     """
 
     func normalize(_ text: String) async throws -> String {
-        let instr = instruction.isEmpty ? Self.defaultInstruction : instruction
-        let prompt = "\(instr)\n\n원문:\n\(text)\n\n변환:"
+        let prompt = normalizationPrompt(instruction, text)
         var req = URLRequest(url: baseURL.appendingPathComponent("api/generate"))
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -41,6 +49,42 @@ struct TextNormalizer {
         }
         let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         let out = (obj?["response"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return out.isEmpty ? text : out
+    }
+}
+
+/// Google Gemini API normalizer.
+struct GeminiNormalizer: Normalizing {
+    let apiKey: String
+    let model: String          // e.g. "gemini-2.0-flash"
+    let instruction: String
+
+    static let models = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-flash"]
+
+    func normalize(_ text: String) async throws -> String {
+        let prompt = normalizationPrompt(instruction, text)
+        let url = URL(string:
+            "https://generativelanguage.googleapis.com/v1beta/models/\(model):generateContent")!
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
+        req.timeoutInterval = 60
+        req.httpBody = try JSONSerialization.data(withJSONObject: [
+            "contents": [["parts": [["text": prompt]]]],
+            "generationConfig": ["temperature": 0.2],
+        ])
+        let (data, response) = try await URLSession.shared.data(for: req)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            let msg = String(data: data, encoding: .utf8) ?? "request failed"
+            throw NSError(domain: "Gemini", code: (response as? HTTPURLResponse)?.statusCode ?? -1,
+                          userInfo: [NSLocalizedDescriptionKey: msg])
+        }
+        let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let cands = obj?["candidates"] as? [[String: Any]]
+        let content = cands?.first?["content"] as? [String: Any]
+        let parts = content?["parts"] as? [[String: Any]]
+        let out = (parts?.first?["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         return out.isEmpty ? text : out
     }
 }

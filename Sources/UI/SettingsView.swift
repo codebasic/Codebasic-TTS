@@ -3,6 +3,7 @@ import SwiftUI
 /// Generation settings: backend, voice, model, voice tuning, cache.
 struct SettingsView: View {
     @EnvironmentObject var app: AppState
+    @State private var geminiKeyInput = ""
 
     var body: some View {
         Form {
@@ -48,32 +49,54 @@ struct SettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
 
-            Section("TTS 친화 정규화 (Ollama)") {
+            Section("TTS 친화 정규화") {
                 Toggle("숫자·수식 표기를 발음대로 정규화", isOn: $app.normalizeEnabled)
-                if app.ollamaModels.isEmpty {
-                    LabeledContent("모델") {
-                        TextField("qwen2.5:3b", text: $app.ollamaModel).frame(width: 160)
+                Picker("제공자", selection: $app.normalizeProvider) {
+                    ForEach(AppState.NormalizeProvider.allCases) { Text($0.label).tag($0) }
+                }
+
+                if app.normalizeProvider == .gemini {
+                    Picker("모델", selection: $app.geminiModel) {
+                        ForEach(GeminiNormalizer.models, id: \.self) { Text($0).tag($0) }
+                    }
+                    LabeledContent("API 키", value: app.geminiKeyPresent ? "설정됨" : "없음")
+                    SecureField("Gemini API 키 (AIza…)", text: $geminiKeyInput)
+                    HStack {
+                        Button("키 저장") { app.saveGeminiKey(geminiKeyInput); geminiKeyInput = "" }
+                            .disabled(geminiKeyInput.trimmingCharacters(in: .whitespaces).isEmpty)
+                        Spacer()
+                        Text("App Support에 저장됩니다").font(.caption).foregroundStyle(.secondary)
                     }
                 } else {
-                    Picker("모델", selection: $app.ollamaModel) {
-                        ForEach(app.ollamaModels, id: \.self) { Text($0).tag($0) }
+                    if app.ollamaModels.isEmpty {
+                        LabeledContent("모델") {
+                            TextField("qwen2.5:3b", text: $app.ollamaModel).frame(width: 180)
+                        }
+                    } else {
+                        Picker("모델", selection: $app.ollamaModel) {
+                            ForEach(app.ollamaModels, id: \.self) { Text($0).tag($0) }
+                        }
+                    }
+                    LabeledContent("Ollama URL (로컬/원격)") {
+                        TextField("http://localhost:11434", text: $app.ollamaURL).frame(width: 250)
+                    }
+                    Text("원격 Ollama도 가능: 예) http://192.168.0.10:11434")
+                        .font(.caption).foregroundStyle(.secondary)
+                    HStack {
+                        Button("연결 확인 / 모델 목록") { app.refreshOllamaModels() }
+                        Spacer()
+                        Text(app.ollamaStatus).font(.caption).foregroundStyle(.secondary)
                     }
                 }
-                LabeledContent("Ollama URL") {
-                    TextField("http://localhost:11434", text: $app.ollamaURL).frame(width: 200)
-                }
-                HStack {
-                    Button("연결 확인 / 모델 목록") { app.refreshOllamaModels() }
-                    Spacer()
-                    Text(app.ollamaStatus).font(.caption).foregroundStyle(.secondary)
-                }
-                Text("로컬 경량 LLM이 0.5→영 점 오, w1→더블유 일 처럼 다듬은 뒤 합성합니다. 켜면 캐시도 분리됩니다.")
+                Text("0.5→영 점 오, w1→더블유 일 처럼 다듬어 합성합니다. 경량 로컬 모델은 숫자 읽기가 부정확할 수 있어 Gemini를 권장합니다.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
         .onAppear { if app.ollamaModels.isEmpty { app.refreshOllamaModels() } }
         .onChange(of: app.normalizeEnabled) { _, _ in app.saveSettings() }
+        .onChange(of: app.normalizeProvider) { _, _ in app.saveSettings() }
+        .onChange(of: app.geminiModel) { _, _ in app.saveSettings() }
         .onChange(of: app.ollamaModel) { _, _ in app.saveSettings() }
         .onChange(of: app.ollamaURL) { _, _ in app.saveSettings() }
         .onChange(of: app.maxChunkChars) { _, _ in app.saveSettings() }

@@ -13,7 +13,8 @@ __pycache__/
 # macOS
 .DS_Store
 
-# ElevenLabs API key (never commit)
+# API keys (never commit)
 .eleven_key
+.gemini_key
 *.key
 *.mp3
