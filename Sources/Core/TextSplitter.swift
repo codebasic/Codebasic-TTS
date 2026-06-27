@@ -31,24 +31,56 @@ enum TextSplitter {
     }
 
     /// Clean pasted source text: collapse single line breaks WITHIN a paragraph
-    /// into spaces (markdown/math copied with each token on its own line), while
-    /// keeping blank lines as paragraph breaks. Run on the original-text panel so
-    /// the script-generation path downstream is unchanged.
+    /// into spaces (markdown/math copied with each token on its own line), drop
+    /// math tokens a renderer (KaTeX) leaked just before the real text, and keep
+    /// blank lines as paragraph breaks. Run on the original-text panel so the
+    /// script-generation path downstream is unchanged.
     static func cleanInput(_ text: String) -> String {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !t.isEmpty else { return "" }
         var paras: [String] = []
         var cur: [String] = []
+        func flush() { if !cur.isEmpty { paras.append(dedupMathLeaks(cur)); cur = [] } }
         for line in t.components(separatedBy: .newlines) {
             let l = line.trimmingCharacters(in: .whitespaces)
-            if l.isEmpty {
-                if !cur.isEmpty { paras.append(cur.joined(separator: " ")); cur = [] }
+            if l.isEmpty { flush() } else { cur.append(l) }
+        }
+        flush()
+        return paras.joined(separator: "\n\n")
+    }
+
+    /// Within one paragraph's lines, a run of math-only lines (e.g. "k" or
+    /// "k","=","1") that the following text line repeats as a prefix ("k는",
+    /// "k=1은") is a renderer leak — drop the run, keep the text. Otherwise lines
+    /// are joined with spaces.
+    private static func dedupMathLeaks(_ lines: [String]) -> String {
+        var out: [String] = []
+        var i = 0
+        while i < lines.count {
+            if isMathOnly(lines[i]) {
+                var j = i
+                var run: [String] = []
+                while j < lines.count, isMathOnly(lines[j]) { run.append(lines[j]); j += 1 }
+                let mathNoSpace = run.joined().replacingOccurrences(of: " ", with: "")
+                if j < lines.count,
+                   !mathNoSpace.isEmpty,
+                   lines[j].replacingOccurrences(of: " ", with: "").hasPrefix(mathNoSpace) {
+                    out.append(lines[j]); i = j + 1            // leaked render → drop the run
+                } else {
+                    out.append(run.joined(separator: " ")); i = j
+                }
             } else {
-                cur.append(l)
+                out.append(lines[i]); i += 1
             }
         }
-        if !cur.isEmpty { paras.append(cur.joined(separator: " ")) }
-        return paras.joined(separator: "\n\n")
+        return out.joined(separator: " ")
+    }
+
+    private static let mathChars = CharacterSet(charactersIn:
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 =+-*/^_().")
+
+    private static func isMathOnly(_ s: String) -> Bool {
+        !s.isEmpty && s.count <= 12 && s.unicodeScalars.allSatisfy { mathChars.contains($0) }
     }
 
     /// Split a long paragraph into <= maxChars windows, cutting at the last

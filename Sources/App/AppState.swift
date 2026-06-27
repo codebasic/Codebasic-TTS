@@ -331,16 +331,20 @@ final class AppState: ObservableObject {
     }
 
     func saveSettings() {
-        let dict: [String: Any] = [
+        var dict: [String: Any] = [
             "voiceId": voiceId, "voiceName": voiceName, "modelId": modelId,
             "backend": backendKind.rawValue, "useCache": useCache, "localBaseURL": localBaseURL,
             "maxChunkChars": maxChunkChars,
             "normalize": normalizeEnabled, "ollamaModel": ollamaModel, "ollamaURL": ollamaURL,
-            "normalizePrompt": normalizePrompt,
             "normalizeProvider": normalizeProvider.rawValue, "geminiModel": geminiModel,
             "stability": voiceSettings.stability, "similarity": voiceSettings.similarityBoost,
             "style": voiceSettings.style, "speakerBoost": voiceSettings.useSpeakerBoost,
         ]
+        // Only persist the prompt if the user customized it, so default-prompt
+        // updates auto-apply for everyone who didn't.
+        if normalizePrompt != TextNormalizer.defaultInstruction {
+            dict["normalizePrompt"] = normalizePrompt
+        }
         if let d = try? JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted]) {
             try? d.write(to: settingsURL)
         }
