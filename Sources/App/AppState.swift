@@ -121,8 +121,7 @@ final class AppState: ObservableObject {
         guard !chunks.isEmpty else { return }
 
         task?.cancel(); player.stop(); stopTimer()
-        inputText = t                            // mirror into the Generate tab (req: show source text)
-        currentText = t
+        currentText = t                          // overlay label (the spoken text); do NOT touch inputText
         progress = 0
         player.start(expected: chunks.count)
         chunkCount = chunks.count; chunkIndex = 0
