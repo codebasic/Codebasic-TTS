@@ -29,9 +29,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Status item (persistent, focus-safe affordance to reopen the UI)
 
+    /// Menu-bar glyph: a monochrome SF Symbol template (adapts to light/dark
+    /// menu bar), swapped per playback phase.
+    private func setStatusSymbol(_ name: String) {
+        let img = NSImage(systemSymbolName: name, accessibilityDescription: "Codebasic TTS")
+        img?.isTemplate = true
+        statusItem.button?.image = img
+        statusItem.button?.title = ""
+    }
+
     private func setUpStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.title = "🔊"
+        setStatusSymbol("waveform")
 
         let menu = NSMenu()
         menu.autoenablesItems = false
@@ -68,10 +77,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .sink { [weak self] phase in
                 guard let self else { return }
                 switch phase {
-                case .idle:         self.statusItem.button?.title = "🔊"; self.overlay.hide()
-                case .synthesizing: self.statusItem.button?.title = "⏳"; self.overlay.show()
-                case .playing:      self.statusItem.button?.title = "🔈"; self.overlay.show()
-                case .paused:       self.statusItem.button?.title = "⏸"; self.overlay.show()
+                case .idle:         self.setStatusSymbol("waveform"); self.overlay.hide()
+                case .synthesizing: self.setStatusSymbol("ellipsis"); self.overlay.show()
+                case .playing:      self.setStatusSymbol("speaker.wave.2.fill"); self.overlay.show()
+                case .paused:       self.setStatusSymbol("pause.fill"); self.overlay.show()
                 }
             }
             .store(in: &cancellables)

@@ -35,6 +35,7 @@ build() {
     -framework AppKit -framework SwiftUI -framework AVFoundation
 
   cp "$HERE/Resources/Info.plist" "$APP_DIR/Contents/Info.plist"
+  [ -f "$HERE/Resources/AppIcon.icns" ] && cp "$HERE/Resources/AppIcon.icns" "$RES_DIR/AppIcon.icns"
   printf 'APPL????' > "$APP_DIR/Contents/PkgInfo"
 
   echo "==> Ad-hoc code signing"
