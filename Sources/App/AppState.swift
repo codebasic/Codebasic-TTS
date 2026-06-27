@@ -26,6 +26,13 @@ final class AppState: ObservableObject {
     @Published var useCache = true
     @Published var localBaseURL = "http://127.0.0.1:8765"
 
+    // TTS-friendly text normalization (lightweight LLM via Ollama)
+    @Published var normalizeEnabled = false
+    @Published var ollamaModel = "gemma4:31b-cloud"   // 3B local models garble Korean numbers; a strong model is needed
+    @Published var ollamaURL = "http://localhost:11434"
+    @Published var ollamaModels: [String] = []
+    @Published var ollamaStatus = ""
+
     // Runtime
     enum Phase: Equatable { case idle, synthesizing, playing, paused }
     @Published var phase: Phase = .idle
@@ -108,9 +115,15 @@ final class AppState: ObservableObject {
         player.start(expected: chunks.count)
         chunkCount = chunks.count; chunkIndex = 0
 
-        let ident = backendIdentity, vid = voiceId, mid = modelId, sHash = settingsHash
+        let ident = backendIdentity, vid = voiceId, mid = modelId
+        // Cache namespace includes normalization so normalized/raw audio don't collide.
+        let sHash = settingsHash + (normalizeEnabled ? "|norm:\(ollamaModel)" : "")
         let vName = voiceName, ext = audioExt
         let voice = VoiceConfig(voiceId: vid, modelId: mid, settingsHash: sHash)
+        let normalizer: TextNormalizer? = normalizeEnabled
+            ? TextNormalizer(baseURL: URL(string: ollamaURL) ?? URL(string: "http://localhost:11434")!,
+                             model: ollamaModel)
+            : nil
 
         task = Task { [weak self] in
             guard let self else { return }
@@ -126,13 +139,22 @@ final class AppState: ObservableObject {
                         self.cache.touch(key); url = u   // cache hit: skip synthesizing state
                     } else {
                         // "synthesizing" only while waiting for the FIRST chunk
-                        if !startedPlaying { self.phase = .synthesizing; self.statusText = "합성 중…" }
+                        if !startedPlaying {
+                            self.phase = .synthesizing
+                            self.statusText = normalizer != nil ? "정규화·합성 중…" : "합성 중…"
+                        }
                         if backend == nil { backend = self.makeBackend() }
                         guard let b = backend else {
                             self.phase = .idle; self.statusText = "키/백엔드 미설정"; return
                         }
+                        // TTS-friendly normalization (falls back to original on failure).
+                        var ttsText = chunk
+                        if let normalizer {
+                            ttsText = (try? await normalizer.normalize(chunk)) ?? chunk
+                            try Task.checkCancellation()
+                        }
                         var data = Data()
-                        for try await c in b.stream(segment: chunk, voice: voice) {
+                        for try await c in b.stream(segment: ttsText, voice: voice) {
                             try Task.checkCancellation(); data.append(c)
                         }
                         if self.useCache {
@@ -208,6 +230,21 @@ final class AppState: ObservableObject {
         }
     }
 
+    func refreshOllamaModels() {
+        let url = URL(string: ollamaURL) ?? URL(string: "http://localhost:11434")!
+        ollamaStatus = "확인 중…"
+        Task { [weak self] in
+            do {
+                let ms = try await Ollama.models(baseURL: url)
+                guard let self else { return }
+                self.ollamaModels = ms
+                self.ollamaStatus = "연결됨 · 모델 \(ms.count)개"
+            } catch {
+                self?.ollamaStatus = "연결 실패: \(error.localizedDescription)"
+            }
+        }
+    }
+
     // MARK: - Settings persistence
 
     private var settingsURL: URL {
@@ -219,6 +256,7 @@ final class AppState: ObservableObject {
             "voiceId": voiceId, "voiceName": voiceName, "modelId": modelId,
             "backend": backendKind.rawValue, "useCache": useCache, "localBaseURL": localBaseURL,
             "maxChunkChars": maxChunkChars,
+            "normalize": normalizeEnabled, "ollamaModel": ollamaModel, "ollamaURL": ollamaURL,
             "stability": voiceSettings.stability, "similarity": voiceSettings.similarityBoost,
             "style": voiceSettings.style, "speakerBoost": voiceSettings.useSpeakerBoost,
         ]
@@ -237,6 +275,9 @@ final class AppState: ObservableObject {
         useCache = o["useCache"] as? Bool ?? useCache
         localBaseURL = o["localBaseURL"] as? String ?? localBaseURL
         maxChunkChars = o["maxChunkChars"] as? Int ?? maxChunkChars
+        normalizeEnabled = o["normalize"] as? Bool ?? normalizeEnabled
+        ollamaModel = o["ollamaModel"] as? String ?? ollamaModel
+        ollamaURL = o["ollamaURL"] as? String ?? ollamaURL
         voiceSettings.stability = o["stability"] as? Double ?? voiceSettings.stability
         voiceSettings.similarityBoost = o["similarity"] as? Double ?? voiceSettings.similarityBoost
         voiceSettings.style = o["style"] as? Double ?? voiceSettings.style

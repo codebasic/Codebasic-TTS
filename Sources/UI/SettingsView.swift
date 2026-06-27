@@ -47,8 +47,35 @@ struct SettingsView: View {
                 Text("긴 문단은 이 글자수 기준으로 나눠 따로 요청한 뒤 이어 재생합니다. 캐시도 이 단위.")
                     .font(.caption).foregroundStyle(.secondary)
             }
+
+            Section("TTS 친화 정규화 (Ollama)") {
+                Toggle("숫자·수식 표기를 발음대로 정규화", isOn: $app.normalizeEnabled)
+                if app.ollamaModels.isEmpty {
+                    LabeledContent("모델") {
+                        TextField("qwen2.5:3b", text: $app.ollamaModel).frame(width: 160)
+                    }
+                } else {
+                    Picker("모델", selection: $app.ollamaModel) {
+                        ForEach(app.ollamaModels, id: \.self) { Text($0).tag($0) }
+                    }
+                }
+                LabeledContent("Ollama URL") {
+                    TextField("http://localhost:11434", text: $app.ollamaURL).frame(width: 200)
+                }
+                HStack {
+                    Button("연결 확인 / 모델 목록") { app.refreshOllamaModels() }
+                    Spacer()
+                    Text(app.ollamaStatus).font(.caption).foregroundStyle(.secondary)
+                }
+                Text("로컬 경량 LLM이 0.5→영 점 오, w1→더블유 일 처럼 다듬은 뒤 합성합니다. 켜면 캐시도 분리됩니다.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
+        .onAppear { if app.ollamaModels.isEmpty { app.refreshOllamaModels() } }
+        .onChange(of: app.normalizeEnabled) { _, _ in app.saveSettings() }
+        .onChange(of: app.ollamaModel) { _, _ in app.saveSettings() }
+        .onChange(of: app.ollamaURL) { _, _ in app.saveSettings() }
         .onChange(of: app.maxChunkChars) { _, _ in app.saveSettings() }
         .onChange(of: app.voiceId) { _, newID in
             if let v = app.voices.first(where: { $0.id == newID }) { app.voiceName = v.name }
