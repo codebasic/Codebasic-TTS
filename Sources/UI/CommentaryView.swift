@@ -41,12 +41,21 @@ struct CommentaryView: View {
                     Label("해설 생성", systemImage: "wand.and.stars")
                 }
                 .disabled(codeEmpty || app.explaining)
+                .help("코드 전체를 처음부터 해설합니다 (기존 해설을 대체)")
+
+                Button {
+                    Task { await app.continueExplain() }
+                } label: {
+                    Label("이어서 해설", systemImage: "text.append")
+                }
+                .disabled(codeEmpty || app.explaining)
+                .help("이전 해설 이후 추가·변경된 부분만 이어서 해설에 덧붙입니다")
 
                 Button { Task { await app.explainCode(force: true) } } label: {
                     Label("재생성", systemImage: "arrow.clockwise")
                 }
                 .disabled(codeEmpty || app.explaining)
-                .help("해설 캐시를 무시하고 LLM으로 다시 생성")
+                .help("해설 캐시를 무시하고 전체를 다시 생성")
 
                 if app.explaining {
                     ProgressView().controlSize(.small)
@@ -59,7 +68,17 @@ struct CommentaryView: View {
                                onChange: { app.saveSettings() })
             }
 
-            Text("해설").font(.headline)
+            HStack {
+                Text("해설").font(.headline)
+                if app.canContinueExplain {
+                    Text("· 이어쓰기 기준 설정됨").font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button { app.clearCommentary() } label: { Label("비우기", systemImage: "trash") }
+                    .controlSize(.small)
+                    .disabled(explanationEmpty && !app.canContinueExplain)
+                    .help("해설과 이어쓰기 기준을 비우고 처음부터 시작")
+            }
             TextEditor(text: $app.explanationText)
                 .font(.body).frame(minHeight: 150)
                 .overlay(border)
@@ -72,8 +91,11 @@ struct CommentaryView: View {
                 .disabled(explanationEmpty)
                 .help("해설을 원본 텍스트로 보내 TTS 대본을 만들고 재생합니다")
 
-                Button { app.speakExplanation() } label: { Label("바로 재생", systemImage: "play.fill") }
+                Button { app.speakExplanation() } label: { Label("전체 재생", systemImage: "play.fill") }
                     .disabled(explanationEmpty || app.isBusy)
+                Button { app.speakContinue() } label: { Label("이어서 읽기", systemImage: "forward.end.fill") }
+                    .disabled(!app.hasLastSegment)
+                    .help("마지막에 추가된 해설을 이어서 읽습니다 · 재생 중이면 끊김 없이 큐에 이어붙입니다 (생성 탭은 그대로)")
                 Button { app.stop() } label: { Label("중지", systemImage: "stop.fill") }
                     .disabled(!app.isBusy)
                 if app.isBusy { ProgressView().controlSize(.small) }

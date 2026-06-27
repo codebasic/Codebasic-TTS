@@ -54,6 +54,14 @@ final class AppState: ObservableObject {
     @Published var explainPrompt = CodeExplanation.defaultInstruction
     @Published var explainGeminiModel = "gemini-2.0-flash"   // 해설용
     @Published var explainOllamaModel = "gemma4:31b-cloud"   // 해설용
+    @Published var lastExplainedCode = ""        // baseline snapshot for "이어서 해설" (incremental)
+    @Published var lastSegment = ""              // the most recently produced commentary (full or appended delta)
+    var canContinueExplain: Bool {
+        !lastExplainedCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+    var hasLastSegment: Bool {
+        !lastSegment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
     @Published var selectedTab = 0               // RootView TabView selection
 
     /// Model used for the current provider, per role.
@@ -257,7 +265,7 @@ final class AppState: ObservableObject {
         let provider = "explain:" + normalizeProvider.rawValue
         let nk = NormalizationCache.key(text: code, provider: provider, model: explainModel, prompt: explainPrompt)
         if !force, let cached = normCache.script(forKey: nk) {
-            explanationText = cached; return cached
+            explanationText = cached; lastExplainedCode = code; lastSegment = cached; return cached
         }
         explaining = true
         defer { explaining = false }
@@ -266,10 +274,89 @@ final class AppState: ObservableObject {
             guard !out.isEmpty else { statusText = "해설 생성 실패 (빈 응답)"; return nil }
             normCache.put(key: nk, script: out)
             explanationText = out
+            lastExplainedCode = code      // establish the baseline for "이어서 해설"
+            lastSegment = out             // full explanation is also the latest segment
             return out
         } catch {
             statusText = "해설 오류: \(error.localizedDescription)"
             return nil
+        }
+    }
+
+    /// "이어서 해설": explain only what changed in `codeText` since the last
+    /// explanation, and APPEND it to `explanationText` (a growing narration). The
+    /// first run (no baseline yet) falls back to a full explain. Diffing is left
+    /// to the LLM — it sees both the previous and current code.
+    @discardableResult
+    func continueExplain(force: Bool = false) async -> String? {
+        let current = codeText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !current.isEmpty else { return nil }
+        guard canContinueExplain else { return await explainCode(force: force) }   // first pass = full
+        guard let explainer = makeExplainer() else {
+            statusText = normalizeProvider == .gemini ? "Gemini 키 미설정" : "Ollama 미설정"
+            return nil
+        }
+        // Cache keyed on (previous ∥ current) so re-running the same step is free.
+        let provider = "explain-cont:" + normalizeProvider.rawValue
+        let keyText = lastExplainedCode + "\u{1F}" + current
+        let nk = NormalizationCache.key(text: keyText, provider: provider, model: explainModel, prompt: "continue")
+        if !force, let cached = normCache.script(forKey: nk) {
+            applyContinuation(cached, newBaseline: current); return cached
+        }
+        explaining = true
+        defer { explaining = false }
+        do {
+            let out = try await explainer.explainContinuing(previous: lastExplainedCode, current: current)
+            guard !out.isEmpty else { statusText = "이어서 해설 실패 (빈 응답)"; return nil }
+            normCache.put(key: nk, script: out)
+            applyContinuation(out, newBaseline: current)
+            return out
+        } catch {
+            statusText = "이어서 해설 오류: \(error.localizedDescription)"
+            return nil
+        }
+    }
+
+    /// Append a continuation to the running narration (or note "변경 없음"), then
+    /// advance the baseline so the next "이어서 해설" diffs from here.
+    private func applyContinuation(_ text: String, newBaseline: String) {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        defer { lastExplainedCode = newBaseline }
+        if t.hasPrefix(CodeExplanation.noChange) {
+            statusText = "변경 없음 — 추가할 해설 없음"
+            return
+        }
+        if explanationText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            explanationText = t
+        } else {
+            explanationText += "\n\n" + t
+        }
+        lastSegment = t          // only the newly appended part — for "새 해설만 재생"
+        statusText = "이어서 해설 추가됨"
+    }
+
+    /// Start a fresh narration: clear the commentary and the baseline.
+    func clearCommentary() {
+        explanationText = ""
+        lastExplainedCode = ""
+        lastSegment = ""
+        statusText = ""
+    }
+
+    /// 해설 탭 "이어서 읽기": read the latest segment — the delta from the last
+    /// "이어서 해설" (or the whole thing after a full explain). If audio is playing,
+    /// it stops and reads this segment from the start. Leaves the 생성 탭 panels
+    /// untouched; synthesize() owns the single playback task.
+    func speakContinue() {
+        let seg = lastSegment.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !seg.isEmpty else { return }
+        task?.cancel(); player.stop(); stopTimer()
+        phase = .synthesizing
+        statusText = normalizeEnabled ? "대본 생성 중…" : "합성 중…"
+        Task { [weak self] in
+            guard let self else { return }
+            let script = await self.buildScript(from: seg)
+            self.synthesize(script)
         }
     }
 
@@ -333,11 +420,21 @@ final class AppState: ObservableObject {
     @discardableResult
     func prepareScript(force: Bool = false) async -> String {
         inputText = TextSplitter.cleanInput(inputText)   // tidy pasted markdown/math in the source panel
-        let src = inputText
-        guard !src.isEmpty else { scriptText = ""; return "" }
-        guard normalizeEnabled, let norm = makeNormalizer() else { scriptText = src; return src }
+        let script = await buildScript(from: inputText, force: force)
+        scriptText = script
+        return script
+    }
+
+    /// Core normalization: source prose → TTS script (per-paragraph, cache-first),
+    /// WITHOUT mutating the inputText/scriptText panels. Used by prepareScript and
+    /// by segment playback (재생할 조각만 정규화).
+    private func buildScript(from source: String, force: Bool = false) async -> String {
+        let src = TextSplitter.cleanInput(source)
+        guard !src.isEmpty else { return "" }
+        guard normalizeEnabled, let norm = makeNormalizer() else { return src }
 
         normalizing = true
+        defer { normalizing = false }
         let provider = normalizeProvider.rawValue
         let model = scriptModel
         var out: [String] = []
@@ -352,10 +449,7 @@ final class AppState: ObservableObject {
                 out.append(n)
             }
         }
-        let script = out.joined(separator: "\n")
-        scriptText = script
-        normalizing = false
-        return script
+        return out.joined(separator: "\n")
     }
 
     /// Force a fresh normalization (ignores the normalization cache).

@@ -128,6 +128,9 @@ struct GeminiNormalizer: Normalizing {
 /// and the caller surfaces failures instead of falling back to the raw code.
 protocol Explaining {
     func explain(_ code: String) async throws -> String
+    /// Incremental: given the previously-explained code and the current code,
+    /// explain ONLY what was added/changed, in a continuing narration tone.
+    func explainContinuing(previous: String, current: String) async throws -> String
 }
 
 /// Shared default instruction + prompt scaffold for the explainers.
@@ -149,6 +152,37 @@ enum CodeExplanation {
         let instr = instruction.isEmpty ? defaultInstruction : instruction
         return "\(instr)\n\n코드:\n\(code)\n\n해설:"
     }
+
+    /// Sentinel the model returns when the current code has no meaningful change
+    /// over the previous version — callers skip appending it.
+    static let noChange = "변경 없음"
+
+    static let continueInstruction = """
+    당신은 코드를 음성으로 이어서 설명해 주는 해설자입니다.
+    아래 '이전 코드'는 이미 해설을 마쳤습니다. 이번에는 '현재 코드'에서 이전 대비
+    새로 추가되거나 변경된(또는 삭제된) 부분만 이어서 설명하세요.
+    규칙:
+    - 이미 설명한 부분은 다시 설명하지 마세요.
+    - "이번에는", "여기에 …를 추가했고", "앞서 만든 …를 …로 바꿨습니다"처럼 흐름을 잇는 말투로.
+    - 코드를 한 줄씩 낭독하지 말고, 변경의 의도와 동작을 풀어서 설명합니다.
+    - 음성으로 들을 것이므로 기호를 나열하지 말고 말로 풀어 씁니다.
+    - 마크다운·코드 블록·머리말·맺음말 없이 해설 본문만 출력합니다.
+    - 의미 있는 변경이 없으면 다른 말 없이 정확히 '변경 없음'만 출력하세요.
+    """
+
+    static func continuePrompt(previous: String, current: String) -> String {
+        """
+        \(continueInstruction)
+
+        [이전 코드 — 이미 해설함]
+        \(previous)
+
+        [현재 코드]
+        \(current)
+
+        [이어지는 해설]
+        """
+    }
 }
 
 /// Code explanation via Google Gemini.
@@ -161,6 +195,11 @@ struct GeminiExplainer: Explaining {
         try await LLM.gemini(baseURL: baseURL, apiKey: apiKey, model: model,
                              prompt: CodeExplanation.prompt(instruction, code), temperature: 0.4)
     }
+    func explainContinuing(previous: String, current: String) async throws -> String {
+        try await LLM.gemini(baseURL: baseURL, apiKey: apiKey, model: model,
+                             prompt: CodeExplanation.continuePrompt(previous: previous, current: current),
+                             temperature: 0.4)
+    }
 }
 
 /// Code explanation via local Ollama.
@@ -171,6 +210,11 @@ struct OllamaExplainer: Explaining {
     func explain(_ code: String) async throws -> String {
         try await LLM.ollama(baseURL: baseURL, model: model,
                              prompt: CodeExplanation.prompt(instruction, code), temperature: 0.4)
+    }
+    func explainContinuing(previous: String, current: String) async throws -> String {
+        try await LLM.ollama(baseURL: baseURL, model: model,
+                             prompt: CodeExplanation.continuePrompt(previous: previous, current: current),
+                             temperature: 0.4)
     }
 }
 
