@@ -101,10 +101,10 @@ final class AppState: ObservableObject {
         let chunks = TextSplitter.paragraphs(t, maxChars: maxChunkChars)
         guard !chunks.isEmpty else { return }
 
-        task?.cancel(); player.stop()
+        task?.cancel(); player.stop(); stopTimer()
         inputText = t                            // mirror into the Generate tab (req: show source text)
         currentText = t
-        phase = .synthesizing; statusText = "합성 중…"; progress = 0
+        progress = 0
         player.start(expected: chunks.count)
         chunkCount = chunks.count; chunkIndex = 0
 
@@ -115,6 +115,7 @@ final class AppState: ObservableObject {
         task = Task { [weak self] in
             guard let self else { return }
             var backend: TTSBackend?
+            var startedPlaying = false           // ⏳ only before the first audio plays
             do {
                 for chunk in chunks {
                     try Task.checkCancellation()
@@ -122,8 +123,10 @@ final class AppState: ObservableObject {
                                              voiceId: vid, modelId: mid, settingsHash: sHash)
                     var url: URL?
                     if self.useCache, let u = self.cache.fileURL(forKey: key) {
-                        self.cache.touch(key); url = u
+                        self.cache.touch(key); url = u   // cache hit: skip synthesizing state
                     } else {
+                        // "synthesizing" only while waiting for the FIRST chunk
+                        if !startedPlaying { self.phase = .synthesizing; self.statusText = "합성 중…" }
                         if backend == nil { backend = self.makeBackend() }
                         guard let b = backend else {
                             self.phase = .idle; self.statusText = "키/백엔드 미설정"; return
@@ -144,7 +147,8 @@ final class AppState: ObservableObject {
                     }
                     if let url {
                         self.player.enqueue(url)
-                        if self.phase == .synthesizing {
+                        if !startedPlaying {
+                            startedPlaying = true
                             self.phase = .playing; self.statusText = "재생 중…"; self.startTimer()
                         }
                     }
