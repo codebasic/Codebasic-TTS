@@ -32,13 +32,16 @@ final class AppState: ObservableObject {
     @Published var ollamaURL = "http://localhost:11434"
     @Published var ollamaModels: [String] = []
     @Published var ollamaStatus = ""
+    @Published var normalizePrompt = TextNormalizer.defaultInstruction
+    @Published var normalizing = false
 
     // Runtime
     enum Phase: Equatable { case idle, synthesizing, playing, paused }
     @Published var phase: Phase = .idle
     @Published var progress: Double = 0          // 0…1 across all chunks
     @Published var currentText = ""              // text being spoken (overlay label)
-    @Published var inputText = ""                // mirrored into the Generate tab
+    @Published var inputText = ""                // original (top panel / source text)
+    @Published var scriptText = ""               // TTS-friendly script actually sent to the engine (bottom panel)
     @Published var chunkIndex = 0                // 1-based chunk being played
     @Published var chunkCount = 0
     @Published var statusText = ""
@@ -115,15 +118,9 @@ final class AppState: ObservableObject {
         player.start(expected: chunks.count)
         chunkCount = chunks.count; chunkIndex = 0
 
-        let ident = backendIdentity, vid = voiceId, mid = modelId
-        // Cache namespace includes normalization so normalized/raw audio don't collide.
-        let sHash = settingsHash + (normalizeEnabled ? "|norm:\(ollamaModel)" : "")
+        let ident = backendIdentity, vid = voiceId, mid = modelId, sHash = settingsHash
         let vName = voiceName, ext = audioExt
         let voice = VoiceConfig(voiceId: vid, modelId: mid, settingsHash: sHash)
-        let normalizer: TextNormalizer? = normalizeEnabled
-            ? TextNormalizer(baseURL: URL(string: ollamaURL) ?? URL(string: "http://localhost:11434")!,
-                             model: ollamaModel)
-            : nil
 
         task = Task { [weak self] in
             guard let self else { return }
@@ -141,20 +138,14 @@ final class AppState: ObservableObject {
                         // "synthesizing" only while waiting for the FIRST chunk
                         if !startedPlaying {
                             self.phase = .synthesizing
-                            self.statusText = normalizer != nil ? "정규화·합성 중…" : "합성 중…"
+                            if self.statusText.isEmpty { self.statusText = "합성 중…" }
                         }
                         if backend == nil { backend = self.makeBackend() }
                         guard let b = backend else {
                             self.phase = .idle; self.statusText = "키/백엔드 미설정"; return
                         }
-                        // TTS-friendly normalization (falls back to original on failure).
-                        var ttsText = chunk
-                        if let normalizer {
-                            ttsText = (try? await normalizer.normalize(chunk)) ?? chunk
-                            try Task.checkCancellation()
-                        }
                         var data = Data()
-                        for try await c in b.stream(segment: ttsText, voice: voice) {
+                        for try await c in b.stream(segment: chunk, voice: voice) {
                             try Task.checkCancellation(); data.append(c)
                         }
                         if self.useCache {
@@ -182,6 +173,51 @@ final class AppState: ObservableObject {
                 self.phase = .idle
                 self.statusText = "오류: \(error.localizedDescription)"
             }
+        }
+    }
+
+    // MARK: - Script (TTS-friendly text)
+
+    /// Build the TTS script from inputText: normalize per paragraph via the LLM
+    /// when enabled, otherwise pass the original through. Returns the script and
+    /// fills `scriptText` (the bottom panel).
+    @discardableResult
+    func prepareScript() async -> String {
+        let src = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !src.isEmpty else { scriptText = ""; return "" }
+        guard normalizeEnabled else { scriptText = src; return src }
+
+        normalizing = true
+        let norm = TextNormalizer(
+            baseURL: URL(string: ollamaURL) ?? URL(string: "http://localhost:11434")!,
+            model: ollamaModel, instruction: normalizePrompt)
+        var out: [String] = []
+        for p in TextSplitter.paragraphs(src, maxChars: maxChunkChars) {
+            out.append((try? await norm.normalize(p)) ?? p)
+        }
+        let script = out.joined(separator: "\n")
+        scriptText = script
+        normalizing = false
+        return script
+    }
+
+    /// Generate-tab "재생": speak the script (or the original if it is empty).
+    func speakScript() {
+        let s = scriptText.trimmingCharacters(in: .whitespacesAndNewlines)
+        synthesize(s.isEmpty ? inputText : scriptText)
+    }
+
+    /// Services entry: set the source, build the script, then speak it.
+    func speakSelected(_ text: String) {
+        task?.cancel(); player.stop()
+        inputText = text
+        scriptText = ""
+        phase = .synthesizing
+        statusText = normalizeEnabled ? "대본 생성 중…" : "합성 중…"
+        Task { [weak self] in
+            guard let self else { return }
+            let script = await self.prepareScript()
+            self.synthesize(script)
         }
     }
 
@@ -257,6 +293,7 @@ final class AppState: ObservableObject {
             "backend": backendKind.rawValue, "useCache": useCache, "localBaseURL": localBaseURL,
             "maxChunkChars": maxChunkChars,
             "normalize": normalizeEnabled, "ollamaModel": ollamaModel, "ollamaURL": ollamaURL,
+            "normalizePrompt": normalizePrompt,
             "stability": voiceSettings.stability, "similarity": voiceSettings.similarityBoost,
             "style": voiceSettings.style, "speakerBoost": voiceSettings.useSpeakerBoost,
         ]
@@ -278,6 +315,7 @@ final class AppState: ObservableObject {
         normalizeEnabled = o["normalize"] as? Bool ?? normalizeEnabled
         ollamaModel = o["ollamaModel"] as? String ?? ollamaModel
         ollamaURL = o["ollamaURL"] as? String ?? ollamaURL
+        normalizePrompt = o["normalizePrompt"] as? String ?? normalizePrompt
         voiceSettings.stability = o["stability"] as? Double ?? voiceSettings.stability
         voiceSettings.similarityBoost = o["similarity"] as? Double ?? voiceSettings.similarityBoost
         voiceSettings.style = o["style"] as? Double ?? voiceSettings.style

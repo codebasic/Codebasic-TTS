@@ -90,7 +90,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func handleSelectedText(_ text: String) {
         let preview = text.replacingOccurrences(of: "\n", with: " ").prefix(60)
         Log.app.info("handleSelectedText: \(text.count) chars — \"\(preview, privacy: .public)\"")
-        appState.synthesize(text)
+        appState.speakSelected(text)
     }
 
     // MARK: - Main menu (regular app needs one for ⌘Q and text-editing shortcuts)

@@ -7,8 +7,9 @@ import Foundation
 struct TextNormalizer {
     let baseURL: URL
     let model: String
+    let instruction: String
 
-    private static let instruction = """
+    static let defaultInstruction = """
     당신은 TTS(음성 합성)가 정확히 읽도록 텍스트를 다듬는 전처리기입니다.
     의미와 문장 구조는 그대로 두고, 잘못 읽힐 수 있는 표기만 한국어 발음대로 풀어 씁니다.
     규칙:
@@ -20,7 +21,8 @@ struct TextNormalizer {
     """
 
     func normalize(_ text: String) async throws -> String {
-        let prompt = "\(Self.instruction)\n\n원문:\n\(text)\n\n변환:"
+        let instr = instruction.isEmpty ? Self.defaultInstruction : instruction
+        let prompt = "\(instr)\n\n원문:\n\(text)\n\n변환:"
         var req = URLRequest(url: baseURL.appendingPathComponent("api/generate"))
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
