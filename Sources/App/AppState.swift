@@ -52,7 +52,8 @@ final class AppState: ObservableObject {
     @Published var explanationText = ""          // generated commentary (해설 panel, bottom)
     @Published var explaining = false
     @Published var explainPrompt = CodeExplanation.defaultInstruction
-    @Published var explainHint = ""              // optional per-run steering (context / regen direction)
+    @Published var explainHint = ""              // 해설 단계 (코드→해설) 추가 지시
+    @Published var scriptHint = ""               // 음성 대본 단계 (해설→대본) 추가 지시
     @Published var explainGeminiModel = "gemini-2.0-flash"   // 해설용
     @Published var explainOllamaModel = "gemma4:31b-cloud"   // 해설용
     @Published var lastExplainedCode = ""        // baseline snapshot for "이어서 해설" (incremental)
@@ -62,6 +63,21 @@ final class AppState: ObservableObject {
     }
     var hasLastSegment: Bool {
         !lastSegment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    // 해설 패널의 하단 토글: 해설(원문 산문) ⇄ 음성 대본(실제 합성에 쓰이는 정규화 결과).
+    enum CommentaryPane: String, CaseIterable, Identifiable {
+        case explanation = "해설", script = "음성 대본"
+        var id: String { rawValue }
+    }
+    @Published var commentaryPane: CommentaryPane = .explanation
+    @Published var commentaryScript = ""         // editable TTS script derived from the 해설
+    @Published var commentaryScriptSource = ""   // the explanation the script was built from (staleness)
+    @Published var buildingScript = false
+    /// True when the 해설 changed after the 음성 대본 was generated.
+    var commentaryScriptStale: Bool {
+        !commentaryScript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && commentaryScriptSource != explanationText
     }
     @Published var selectedTab = 0               // RootView TabView selection
 
@@ -217,17 +233,24 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func makeNormalizer() -> Normalizing? {
+    private func makeNormalizer(instruction: String) -> Normalizing? {
         switch normalizeProvider {
         case .gemini:
             guard let key = Secrets.geminiKey else { return nil }
             return GeminiNormalizer(baseURL: geminiBaseURL, apiKey: key, model: geminiModel,
-                                    instruction: normalizePrompt)
+                                    instruction: instruction)
         case .ollama:
             return TextNormalizer(
                 baseURL: URL(string: ollamaURL) ?? URL(string: "http://localhost:11434")!,
-                model: ollamaModel, instruction: normalizePrompt)
+                model: ollamaModel, instruction: instruction)
         }
+    }
+
+    /// Normalize instruction with an optional per-run 음성 대본 hint folded in.
+    private func scriptInstruction(_ hint: String) -> String {
+        let h = hint.trimmingCharacters(in: .whitespacesAndNewlines)
+        return h.isEmpty ? normalizePrompt
+            : normalizePrompt + "\n\n[추가 지시 — 이번 변환에만 적용]\n\(h)"
     }
 
     func saveGeminiKey(_ key: String) {
@@ -339,12 +362,32 @@ final class AppState: ObservableObject {
         statusText = "이어서 해설 추가됨"
     }
 
-    /// Start a fresh narration: clear the commentary and the baseline.
+    /// Start a fresh narration: clear the commentary, baseline, and 음성 대본.
     func clearCommentary() {
         explanationText = ""
         lastExplainedCode = ""
         lastSegment = ""
+        commentaryScript = ""
+        commentaryScriptSource = ""
+        commentaryPane = .explanation
         statusText = ""
+    }
+
+    /// Build the 음성 대본 from the current 해설 (normalize per paragraph when
+    /// enabled), filling `commentaryScript` so the user can see/edit exactly what
+    /// the engine will receive. Records the source for staleness tracking.
+    @discardableResult
+    func buildCommentaryScript() async -> String {
+        let src = explanationText
+        guard !src.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            commentaryScript = ""; commentaryScriptSource = src; return ""
+        }
+        buildingScript = true
+        defer { buildingScript = false }
+        let script = await buildScript(from: src, hint: scriptHint)
+        commentaryScript = script
+        commentaryScriptSource = src
+        return script
     }
 
     /// 해설 탭 "이어서 읽기": read the latest segment — the delta from the last
@@ -354,14 +397,7 @@ final class AppState: ObservableObject {
     func speakContinue() {
         let seg = lastSegment.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !seg.isEmpty else { return }
-        task?.cancel(); player.stop(); stopTimer()
-        phase = .synthesizing
-        statusText = normalizeEnabled ? "대본 생성 중…" : "합성 중…"
-        Task { [weak self] in
-            guard let self else { return }
-            let script = await self.buildScript(from: seg)
-            self.synthesize(script)
-        }
+        synthesize(TextSplitter.cleanInput(seg))   // read the latest 해설 segment directly
     }
 
     /// 해설 탭 → 생성 탭: hand the commentary to the script pipeline as its source.
@@ -373,21 +409,14 @@ final class AppState: ObservableObject {
         selectedTab = 1         // switch to 생성
     }
 
-    /// 해설 탭 "바로 재생": speak the commentary (해설 → 대본 → 음성), skipping the
-    /// 대본 review step. Mirrors speakSelected but starting from prose, not code.
+    /// 해설 탭 "전체 재생": if a 음성 대본 was explicitly generated, speak exactly
+    /// that (incl. manual edits); otherwise read the 해설 directly — no extra
+    /// normalize pass. 음성 대본 생성은 선택 사항. Does not touch 생성 탭 panels.
     func speakExplanation() {
-        let ex = explanationText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !ex.isEmpty else { return }
-        task?.cancel(); player.stop()
-        inputText = ex
-        scriptText = ""
-        phase = .synthesizing
-        statusText = normalizeEnabled ? "대본 생성 중…" : "합성 중…"
-        Task { [weak self] in
-            guard let self else { return }
-            let script = await self.prepareScript()
-            self.synthesize(script)
-        }
+        let script = commentaryScript.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = script.isEmpty ? TextSplitter.cleanInput(explanationText) : commentaryScript
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        synthesize(text)
     }
 
     /// Services entry ("코드 해설"): explain the selected code, then speak it
@@ -432,10 +461,11 @@ final class AppState: ObservableObject {
     /// Core normalization: source prose → TTS script (per-paragraph, cache-first),
     /// WITHOUT mutating the inputText/scriptText panels. Used by prepareScript and
     /// by segment playback (재생할 조각만 정규화).
-    private func buildScript(from source: String, force: Bool = false) async -> String {
+    private func buildScript(from source: String, hint: String = "", force: Bool = false) async -> String {
         let src = TextSplitter.cleanInput(source)
         guard !src.isEmpty else { return "" }
-        guard normalizeEnabled, let norm = makeNormalizer() else { return src }
+        let instruction = scriptInstruction(hint)
+        guard normalizeEnabled, let norm = makeNormalizer(instruction: instruction) else { return src }
 
         normalizing = true
         defer { normalizing = false }
@@ -444,7 +474,8 @@ final class AppState: ObservableObject {
         var out: [String] = []
         for p in TextSplitter.paragraphs(src, maxChars: maxChunkChars) {
             // Normalization cache: skip the LLM for text already normalized.
-            let nk = NormalizationCache.key(text: p, provider: provider, model: model, prompt: normalizePrompt)
+            // The 음성 대본 hint is part of `instruction`, so it's in the key too.
+            let nk = NormalizationCache.key(text: p, provider: provider, model: model, prompt: instruction)
             if !force, let cached = normCache.script(forKey: nk) {
                 out.append(cached)
             } else {
