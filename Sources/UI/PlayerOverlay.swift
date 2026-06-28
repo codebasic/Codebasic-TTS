@@ -6,34 +6,33 @@ import SwiftUI
 struct PlayerOverlay: View {
     @ObservedObject var app: AppState
 
-    /// Measured natural height of the full subtitle text (for the crawl mapping).
+    /// Measured natural height of the full subtitle column (for the crawl mapping).
     @State private var contentHeight: CGFloat = 0
 
     private var tint: Color { app.playbackMode == .tts ? .blue : .purple }
 
-    /// Viewport height — a few lines tall so text visibly rises (Star Wars crawl).
+    /// Viewport height — a few lines tall so context shows above/below the
+    /// current sentence.
     private var subtitleViewportHeight: CGFloat { max(160, app.subtitleFontSize * 6.5) }
 
-    /// Teleprompter crawl with the reading line near the TOP: at progress 0 the
-    /// first line sits just below the top (a small pad leaves a band for read
-    /// text to fade through); as playback advances the text rises and earlier
-    /// sentences scroll up and off the top. Clamped at the END so the last
-    /// sentences settle at the bottom and stay on screen (don't scroll off/fade).
+    /// Where the currently-read position sits in the viewport (0.5 = center).
+    private let readingAnchor: CGFloat = 0.5
+
+    /// Continuous crawl: keep the point at `progress` through the script at the
+    /// reading line, so the text rises smoothly in step with playback and the
+    /// current sentence stays centered.
     private func crawlOffset(progress: Double, contentH: CGFloat, viewportH: CGFloat) -> CGFloat {
-        let topPad = app.subtitleFontSize * 1.5
-        let raw = topPad - CGFloat(progress) * contentH
-        let minOffset = min(topPad, viewportH - contentH)   // most-negative: end-of-content rests at the viewport bottom
-        return max(minOffset, raw)
+        readingAnchor * viewportH - CGFloat(progress) * contentH
     }
 
-    /// Pinned to the viewport's top edge: read text fades out gradually as it
-    /// rises through the band. No bottom fade — so the last sentences, which
-    /// settle at the bottom, stay fully legible.
+    /// Centered reading line → fade both ends: upcoming text fades in at the
+    /// bottom, read text fades out at the top; the middle (current sentence) is sharp.
     private var crawlFadeMask: LinearGradient {
         LinearGradient(stops: [
             .init(color: .clear, location: 0.0),
             .init(color: .black, location: 0.30),
-            .init(color: .black, location: 1.0),
+            .init(color: .black, location: 0.70),
+            .init(color: .clear, location: 1.0),
         ], startPoint: .top, endPoint: .bottom)
     }
 
@@ -86,8 +85,9 @@ struct PlayerOverlay: View {
             }
 
             if app.showSubtitle, !app.crawlLines.isEmpty {
-                // The WHOLE script is one column; it scrolls continuously so
-                // paragraphs flow into each other (no per-paragraph reset).
+                // The WHOLE script is one column that scrolls continuously in step
+                // with playback (paragraphs flow into each other), keeping the
+                // current sentence centered.
                 VStack(alignment: .leading, spacing: 4) {
                     ForEach(app.crawlLines) { line in
                         let cur = app.isCurrentLine(line)
@@ -103,17 +103,17 @@ struct PlayerOverlay: View {
                             .animation(.easeInOut(duration: 0.5), value: cur)   // gently fade the emphasis in/out
                     }
                 }
-                .fixedSize(horizontal: false, vertical: true)   // take full natural height (don't compress to the viewport)
-                .background(GeometryReader { g in                // measure that natural height for the crawl mapping
+                .fixedSize(horizontal: false, vertical: true)   // full natural height (don't compress to the viewport)
+                .background(GeometryReader { g in                // measure that height for the crawl mapping
                     Color.clear
                         .onAppear { contentHeight = g.size.height }
                         .onChange(of: g.size.height) { _, h in contentHeight = h }
                 })
                 .offset(y: crawlOffset(progress: app.crawlFraction, contentH: contentHeight, viewportH: subtitleViewportHeight))
                 .animation(.linear(duration: 0.12), value: app.crawlFraction)   // smooth between 0.1s ticks
-                .frame(height: subtitleViewportHeight, alignment: .top)         // viewport: fixed window the text scrolls through
+                .frame(height: subtitleViewportHeight, alignment: .top)         // fixed viewport the text scrolls through
                 .clipped()
-                .mask(crawlFadeMask)   // top-edge fade band (pinned to the viewport, not the moving text)
+                .mask(crawlFadeMask)
             }
 
             // Transport + progress are one fixed-size, centered cluster, so the
