@@ -27,6 +27,8 @@ struct SettingsView: View {
         .onAppear {
             if app.ollamaModels.isEmpty { app.refreshOllamaModels() }
             if app.voices.isEmpty && app.keyPresent { app.refreshVoices() }
+            keyInput = Secrets.elevenLabsKey ?? ""        // pre-fill so the current key is visible/editable
+            geminiKeyInput = Secrets.geminiKey ?? ""
         }
         .onChange(of: app.localBaseURL) { _, _ in app.saveSettings() }
         .onChange(of: app.normalizeEnabled) { _, _ in app.saveSettings() }
@@ -94,10 +96,9 @@ struct SettingsView: View {
             Section("연결") {
                 LabeledContent("API 키", value: app.keyPresent ? "설정됨" : "없음")
                 LabeledContent("연결", value: app.connectionStatus.isEmpty ? "—" : app.connectionStatus)
-                labeledField("ElevenLabs API 키", placeholder: "sk_…", secure: true, text: $keyInput,
-                             hint: "App Support에 저장됩니다.")
+                KeyField(label: "ElevenLabs API 키", text: $keyInput, hint: "App Support에 저장됩니다.")
                 HStack {
-                    Button("키 저장") { app.saveKey(keyInput); keyInput = "" }
+                    Button("키 저장") { app.saveKey(keyInput) }
                         .disabled(keyInput.trimmingCharacters(in: .whitespaces).isEmpty)
                     Button { app.refreshVoices() } label: {
                         Label("연결 테스트 / 보이스 새로고침", systemImage: "arrow.clockwise")
@@ -144,10 +145,10 @@ struct SettingsView: View {
                 labeledField("엔드포인트", placeholder: GeminiNormalizer.defaultBaseURL,
                              text: $app.geminiBaseURL,
                              hint: "API 루트. 끝에 /models/{모델}:generateContent 가 붙습니다. 프록시·게이트웨이 사용 시 변경.")
-                labeledField("API 키", placeholder: "AIza…", secure: true, text: $geminiKeyInput,
-                             hint: app.geminiKeyPresent ? "현재: 설정됨 (App Support)" : "현재: 없음")
+                KeyField(label: "API 키", text: $geminiKeyInput,
+                         hint: app.geminiKeyPresent ? "현재: 설정됨 (App Support)" : "현재: 없음")
                 HStack {
-                    Button("키 저장") { app.saveGeminiKey(geminiKeyInput); geminiKeyInput = "" }
+                    Button("키 저장") { app.saveGeminiKey(geminiKeyInput) }
                         .disabled(geminiKeyInput.trimmingCharacters(in: .whitespaces).isEmpty)
                     Button("연결 확인 / 모델 목록") { app.refreshGeminiModels() }
                     Spacer()
@@ -186,6 +187,33 @@ struct SettingsView: View {
                     .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
             }
             Slider(value: value, in: 0...1)
+        }
+    }
+
+    /// API-key field: pre-filled with the current key, masked by default with an
+    /// eye toggle to reveal/verify it.
+    private struct KeyField: View {
+        let label: String
+        @Binding var text: String
+        var hint: String? = nil
+        @State private var reveal = false
+        var body: some View {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(label).font(.caption).foregroundStyle(.secondary)
+                HStack(spacing: 6) {
+                    Group {
+                        if reveal { TextField("", text: $text) }
+                        else { SecureField("", text: $text) }
+                    }
+                    .labelsHidden().textFieldStyle(.roundedBorder)
+                    Button { reveal.toggle() } label: {
+                        Image(systemName: reveal ? "eye.slash" : "eye")
+                    }
+                    .buttonStyle(.plain).foregroundStyle(.secondary)
+                    .help(reveal ? "키 숨기기" : "키 보기")
+                }
+                if let hint { Text(hint).font(.caption2).foregroundStyle(.tertiary) }
+            }
         }
     }
 
