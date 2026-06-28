@@ -199,6 +199,48 @@ final class AppState: ObservableObject {
         return s.count - 1
     }
 
+    // MARK: - Continuous crawl (teleprompter over the WHOLE script)
+
+    /// One sentence of the playback, flattened across all paragraphs, so the HUD
+    /// can render the whole script as a single continuously-scrolling column.
+    struct CrawlLine: Identifiable {
+        let id: Int        // global order (0-based)
+        let chunk: Int     // 0-based paragraph it belongs to
+        let sentence: Int  // sentence index within that paragraph
+        let text: String
+    }
+
+    /// Every paragraph split into sentences, flattened in reading order.
+    var crawlLines: [CrawlLine] {
+        var out: [CrawlLine] = []
+        var gid = 0
+        for (ci, chunk) in spokenChunks.enumerated() {
+            for (si, s) in TextSplitter.sentences(chunk).enumerated() {
+                out.append(CrawlLine(id: gid, chunk: ci, sentence: si, text: s)); gid += 1
+            }
+        }
+        return out
+    }
+
+    /// The globally-current sentence (chunk, sentence) — for highlighting.
+    func isCurrentLine(_ line: CrawlLine) -> Bool {
+        line.chunk == chunkIndex - 1 && line.sentence == currentSentenceIndex
+    }
+
+    /// How far through the WHOLE script playback is, weighted by paragraph length
+    /// (chars) so the crawl tracks the voice instead of lurching per paragraph
+    /// (QueuePlayer.progress is chunk-equal-weighted — wrong driver for this).
+    var crawlFraction: Double {
+        let lens = spokenChunks.map { Double(max(1, $0.count)) }
+        let total = lens.reduce(0, +)
+        guard total > 0 else { return 0 }
+        let cur = chunkIndex - 1
+        var read = 0.0
+        for i in 0..<lens.count where i < cur { read += lens[i] }
+        if lens.indices.contains(cur) { read += chunkProgress * lens[cur] }
+        return min(1, read / total)
+    }
+
     /// Map ElevenLabs per-character start times to one start time per sentence
     /// of `text`. Returns [] if the alignment doesn't line up (→ estimate).
     private func sentenceStartTimes(text: String, charStarts: [Double]) -> [Double] {

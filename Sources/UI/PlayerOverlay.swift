@@ -6,14 +6,43 @@ import SwiftUI
 struct PlayerOverlay: View {
     @ObservedObject var app: AppState
 
+    /// Measured natural height of the full subtitle text (for the crawl mapping).
+    @State private var contentHeight: CGFloat = 0
+
     private var tint: Color { app.playbackMode == .tts ? .blue : .purple }
+
+    /// Viewport height — a few lines tall so text visibly rises (Star Wars crawl).
+    private var subtitleViewportHeight: CGFloat { max(160, app.subtitleFontSize * 6.5) }
+
+    /// Teleprompter crawl with the reading line near the TOP: at progress 0 the
+    /// first line sits just below the top (a small pad leaves a band for read
+    /// text to fade through); as playback advances the text rises and earlier
+    /// sentences scroll up and off the top. Clamped at the END so the last
+    /// sentences settle at the bottom and stay on screen (don't scroll off/fade).
+    private func crawlOffset(progress: Double, contentH: CGFloat, viewportH: CGFloat) -> CGFloat {
+        let topPad = app.subtitleFontSize * 1.5
+        let raw = topPad - CGFloat(progress) * contentH
+        let minOffset = min(topPad, viewportH - contentH)   // most-negative: end-of-content rests at the viewport bottom
+        return max(minOffset, raw)
+    }
+
+    /// Pinned to the viewport's top edge: read text fades out gradually as it
+    /// rises through the band. No bottom fade — so the last sentences, which
+    /// settle at the bottom, stay fully legible.
+    private var crawlFadeMask: LinearGradient {
+        LinearGradient(stops: [
+            .init(color: .clear, location: 0.0),
+            .init(color: .black, location: 0.30),
+            .init(color: .black, location: 1.0),
+        ], startPoint: .top, endPoint: .bottom)
+    }
 
     /// Widen the HUD with the subtitle font so a line holds roughly the same
     /// number of characters at any size — bigger text → wider panel, fewer
     /// wraps. Stays compact (360) when no subtitle is showing; capped so it
     /// never runs off a normal screen.
     private var hudWidth: CGFloat {
-        guard app.showSubtitle, !app.currentChunkText.isEmpty else { return 360 }
+        guard app.showSubtitle, !app.spokenChunks.isEmpty else { return 360 }
         return min(max(360, app.subtitleFontSize * 24), 760)
     }
 
@@ -56,41 +85,41 @@ struct PlayerOverlay: View {
                 }
             }
 
-            if app.showSubtitle, !app.currentChunkText.isEmpty {
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 4) {
-                            ForEach(Array(app.currentSentences.enumerated()), id: \.offset) { i, s in
-                                let cur = app.currentSentenceIndex
-                                Text(s)
-                                    .font(.system(size: app.subtitleFontSize))
-                                    .fontWeight(i == cur ? .semibold : .regular)
-                                    .foregroundStyle(i == cur ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
-                                    .opacity(i == cur ? 1 : max(0.3, 1 - 0.25 * Double(abs(i - cur))))
-                                    .padding(.horizontal, i == cur ? 6 : 0)
-                                    .padding(.vertical, i == cur ? 3 : 0)
-                                    .background(i == cur ? tint.opacity(0.22) : .clear,
-                                                in: RoundedRectangle(cornerRadius: 6))
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .id(i)
-                            }
-                        }
-                    }
-                    .frame(maxHeight: max(92, app.subtitleFontSize * 5))
-                    .onChange(of: app.currentSentenceIndex) { _, idx in
-                        withAnimation(.easeInOut(duration: 0.25)) { proxy.scrollTo(idx, anchor: .center) }
-                    }
-                    .onChange(of: app.chunkIndex) { _, _ in
-                        proxy.scrollTo(0, anchor: .top)   // new paragraph → back to top
+            if app.showSubtitle, !app.crawlLines.isEmpty {
+                // The WHOLE script is one column; it scrolls continuously so
+                // paragraphs flow into each other (no per-paragraph reset).
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(app.crawlLines) { line in
+                        let cur = app.isCurrentLine(line)
+                        Text(line.text)
+                            .font(.system(size: app.subtitleFontSize))
+                            // distinguish the current line by brightness only (no weight
+                            // change — that snaps and reflows, which read as abrupt)
+                            .foregroundStyle(cur ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+                            .opacity(cur ? 1 : 0.4)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 3)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .animation(.easeInOut(duration: 0.5), value: cur)   // gently fade the emphasis in/out
                     }
                 }
+                .fixedSize(horizontal: false, vertical: true)   // take full natural height (don't compress to the viewport)
+                .background(GeometryReader { g in                // measure that natural height for the crawl mapping
+                    Color.clear
+                        .onAppear { contentHeight = g.size.height }
+                        .onChange(of: g.size.height) { _, h in contentHeight = h }
+                })
+                .offset(y: crawlOffset(progress: app.crawlFraction, contentH: contentHeight, viewportH: subtitleViewportHeight))
+                .animation(.linear(duration: 0.12), value: app.crawlFraction)   // smooth between 0.1s ticks
+                .frame(height: subtitleViewportHeight, alignment: .top)         // viewport: fixed window the text scrolls through
+                .clipped()
+                .mask(crawlFadeMask)   // top-edge fade band (pinned to the viewport, not the moving text)
             }
 
-            // Progress spans the width; transport stays a fixed-size, centered
-            // cluster so it doesn't grow or spread out as the subtitle/panel widen.
-            ProgressView(value: app.progress).progressViewStyle(.linear)
-
-            HStack(spacing: 22) {
+            // Transport + progress are one fixed-size, centered cluster, so the
+            // progress bar keeps a fixed width and nothing stretches as the
+            // subtitle/panel widen.
+            HStack(spacing: 16) {
                 Button { app.skipPrev() } label: { Image(systemName: "backward.fill") }
                     .disabled(!app.canSkipPrev)
                 Button { app.togglePause() } label: {
@@ -101,6 +130,10 @@ struct PlayerOverlay: View {
                 .help(app.phase == .paused ? "재개" : "일시정지")
                 Button { app.skipNext() } label: { Image(systemName: "forward.fill") }
                     .disabled(!app.canSkipNext)
+
+                ProgressView(value: app.progress).progressViewStyle(.linear)
+                    .frame(width: 140)
+
                 Button { app.stop() } label: { Image(systemName: "stop.fill") }
                     .foregroundStyle(.secondary).help("중지")
             }
