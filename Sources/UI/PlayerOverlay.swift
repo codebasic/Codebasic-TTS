@@ -8,6 +8,15 @@ struct PlayerOverlay: View {
 
     private var tint: Color { app.playbackMode == .tts ? .blue : .purple }
 
+    /// Widen the HUD with the subtitle font so a line holds roughly the same
+    /// number of characters at any size — bigger text → wider panel, fewer
+    /// wraps. Stays compact (360) when no subtitle is showing; capped so it
+    /// never runs off a normal screen.
+    private var hudWidth: CGFloat {
+        guard app.showSubtitle, !app.currentChunkText.isEmpty else { return 360 }
+        return min(max(360, app.subtitleFontSize * 24), 760)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
@@ -90,7 +99,7 @@ struct PlayerOverlay: View {
             .font(.system(size: 14, weight: .semibold))
         }
         .padding(.horizontal, 16).padding(.vertical, 12)
-        .frame(width: 360)
+        .frame(width: hudWidth)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
         .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(.white.opacity(0.08)))
     }
