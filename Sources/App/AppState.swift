@@ -352,6 +352,7 @@ final class AppState: ObservableObject {
         let k = key.trimmingCharacters(in: .whitespacesAndNewlines)
         Secrets.writeKey(named: "gemini_key", k)
         geminiKeyPresent = !k.isEmpty
+        if !k.isEmpty { refreshGeminiModels() }   // populate the combined model list right away
     }
 
     // MARK: - Commentary (코드 → 해설)
@@ -366,6 +367,24 @@ final class AppState: ObservableObject {
             return OllamaExplainer(
                 baseURL: URL(string: ollamaURL) ?? URL(string: "http://localhost:11434")!,
                 model: explainOllamaModel, instruction: explainPrompt, temperature: explainTemperature)
+        }
+    }
+
+    /// Single-stage image explain: the 해설 model (== vision model) reads the
+    /// screenshot(s) and explains in one streamed call, using the explain prompt.
+    private func explainStreamWithImages(code: String, images: [Data]) -> AsyncThrowingStream<String, Error> {
+        let prompt = CodeExplanation.prompt(explainPrompt, code, hint: explainHint)
+        switch explainProvider {
+        case .gemini:
+            guard let key = Secrets.geminiKey else {
+                return AsyncThrowingStream { $0.finish() }
+            }
+            return LLM.geminiStream(baseURL: geminiBaseURL, apiKey: key, model: explainGeminiModel,
+                                    prompt: prompt, images: images, temperature: explainTemperature)
+        case .ollama:
+            let url = URL(string: ollamaURL) ?? URL(string: "http://localhost:11434")!
+            return LLM.ollamaChatStream(baseURL: url, model: explainOllamaModel,
+                                        prompt: prompt, images: images, temperature: explainTemperature)
         }
     }
 
@@ -468,21 +487,32 @@ final class AppState: ObservableObject {
         explaining = true
         defer { explaining = false }
 
-        // Stage 1 (if images): vision model transcribes screenshots → text.
+        // If a screenshot is attached AND the vision model is the same as the 해설
+        // model, that model can both read the image and explain in ONE call — skip
+        // the transcribe stage (less loss, faster). Otherwise: vision transcribes,
+        // then the text model explains.
+        let singleStage = !imgs.isEmpty
+            && visionProviderEff == explainProvider && visionModelEff == explainModel
+
         var code = typed
-        if !imgs.isEmpty {
+        if !imgs.isEmpty && !singleStage {
             statusText = "이미지에서 코드 추출 중…"
             guard let transcribed = await transcribeImages(imgs) else {
                 if statusText.isEmpty { statusText = "이미지 인식 실패" }
                 return nil
             }
             code = typed.isEmpty ? transcribed : typed + "\n\n" + transcribed
+        } else if singleStage {
+            code = typed.isEmpty
+                ? "(첨부된 스크린샷의 코드를 정확히 읽고, 손으로 그린 강조 표시가 있으면 그것을 해설의 중심에 두어 해설하세요.)"
+                : typed
         }
         guard !code.isEmpty else { statusText = "해설 생성 실패 (빈 입력)"; return nil }
 
-        // Stage 2: the text model explains the combined code.
+        // Cache key: single-stage feeds the raw image, so fold its digest in.
         let provider = "explain:" + explainProvider.rawValue
-        let nk = NormalizationCache.key(text: code, provider: provider, model: explainModel,
+        let keyText = singleStage ? code + imagesDigest(imgs) : code
+        let nk = NormalizationCache.key(text: keyText, provider: provider, model: explainModel,
                                         prompt: explainPrompt + "\u{1F}" + explainHint)
         if !force, let cached = normCache.script(forKey: nk) {
             explanationText = cached; lastExplainedCode = code; lastSegment = cached; return cached
@@ -491,7 +521,10 @@ final class AppState: ObservableObject {
         statusText = "해설 생성 중…"
         var acc = ""
         do {
-            for try await delta in explainer.stream(code, hint: explainHint) {
+            let stream = singleStage
+                ? explainStreamWithImages(code: code, images: imgs)
+                : explainer.stream(code, hint: explainHint)
+            for try await delta in stream {
                 try Task.checkCancellation()
                 acc += delta
                 explanationText = acc          // live (raw markdown shows until finalize)

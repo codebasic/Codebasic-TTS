@@ -142,7 +142,16 @@ struct CommentaryView: View {
                                geminiModel: visionGeminiBinding,
                                ollamaModel: visionOllamaBinding,
                                onChange: { app.saveSettings() })
-                Text("이미지→코드 추출용 (기본=해설 모델). gemma4는 비전 미동작 → gemma3 권장.")
+                if app.visionOverridden {
+                    Button {
+                        app.visionOverridden = false; app.saveSettings()
+                    } label: { Image(systemName: "arrow.uturn.backward") }
+                        .controlSize(.small)
+                        .help("비전 모델을 해설 모델로 되돌리기 (추종)")
+                }
+                Text(app.visionOverridden
+                     ? "이미지→코드 추출용 (해설 모델과 별도 지정됨)"
+                     : "이미지→코드 추출용 (해설 모델 추종)")
                     .font(.caption2).foregroundStyle(.secondary)
                 Spacer()
             }

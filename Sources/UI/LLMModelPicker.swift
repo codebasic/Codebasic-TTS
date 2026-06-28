@@ -42,9 +42,6 @@ struct LLMModelPicker: View {
                 }
                 .labelsHidden().frame(maxWidth: 260)
             }
-            Button { app.refreshAllModels() } label: { Image(systemName: "arrow.clockwise") }
-                .controlSize(.small)
-                .help("연결된 제공자(Ollama·Gemini)에서 모델 목록 새로고침")
         }
         .onAppear { app.refreshAllModelsIfNeeded() }
     }
