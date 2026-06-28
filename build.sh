@@ -33,6 +33,7 @@ build() {
     -o "$MACOS_DIR/$APP_NAME" \
     $(find "$HERE/Sources" -name '*.swift') \
     -framework AppKit -framework SwiftUI -framework AVFoundation \
+    -framework Carbon -framework ApplicationServices \
     -lsqlite3
 
   cp "$HERE/Resources/Info.plist" "$APP_DIR/Contents/Info.plist"

@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import Carbon
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -20,6 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setUpMainMenu()
         setUpStatusItem()
         registerServices()
+        registerHotKeys()
         observeState()
         if appState.keyPresent { appState.refreshVoices() }
         mainWindow.show()                       // open the management window on launch
@@ -84,6 +86,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
             .store(in: &cancellables)
+    }
+
+    // MARK: - Global hotkeys (read/explain the selection from any app)
+
+    private let hotKeys = HotKeyCenter()
+
+    /// ⌃⌥⌘E → explain the selection, ⌃⌥⌘R → read it aloud. The selection is
+    /// grabbed via a clipboard-preserving copy, so it works even where the
+    /// Services menu is hidden (VS Code). First use prompts for Accessibility.
+    private func registerHotKeys() {
+        let mods = controlKey | optionKey | cmdKey
+        hotKeys.register(id: 1, keyCode: kVK_ANSI_E, modifiers: mods) { [weak self] in
+            SelectionGrabber.grab { text in
+                guard let self, let text else { return }
+                MainActor.assumeIsolated {
+                    self.appState.selectedTab = 1
+                    self.appState.explainAndSpeak(text)
+                }
+            }
+        }
+        hotKeys.register(id: 2, keyCode: kVK_ANSI_R, modifiers: mods) { [weak self] in
+            SelectionGrabber.grab { text in
+                guard let self, let text else { return }
+                MainActor.assumeIsolated { self.appState.speakSelected(text) }
+            }
+        }
     }
 
     // MARK: - ⌘V paste (intercept to attach screenshots in the 해설 탭)

@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 /// Settings split into two conceptual channels: ① 음성 합성 (the TTS engine) and
 /// ② 텍스트 생성 (the LLM used for 해설/대본). The TTS channel renders from the
@@ -125,6 +126,22 @@ struct SettingsView: View {
                     .frame(width: 80).multilineTextAlignment(.trailing)
             }
             Text("긴 대본은 이 글자수 기준으로 문단을 나눠 합성·캐시·재생합니다 (오디오 분할 단위).")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+
+        Section("전역 단축키 (선택 → 읽기/해설)") {
+            LabeledContent("읽어주기", value: "⌃⌥⌘R")
+            LabeledContent("코드 해설", value: "⌃⌥⌘E")
+            LabeledContent("손쉬운 사용 권한", value: SelectionGrabber.hasPermission ? "허용됨" : "필요함")
+            if !SelectionGrabber.hasPermission {
+                Button("권한 요청 / 시스템 설정 열기") {
+                    SelectionGrabber.requestPermission()
+                    if let u = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+                        NSWorkspace.shared.open(u)
+                    }
+                }
+            }
+            Text("어느 앱에서든 텍스트를 선택하고 단축키를 누르면 복사 없이 읽어주거나 해설합니다 (클립보드 자동 복원). VS Code처럼 서비스 메뉴가 없는 앱에서도 동작합니다. 단축키 합성을 위해 손쉬운 사용 권한이 필요합니다.")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }
