@@ -192,14 +192,16 @@ final class AppState: ObservableObject {
             }
             e = BacklogEntry(id: UUID().uuidString, createdAt: Date(), tags: finalTags, note: note,
                              stage: "해설", provider: explainProvider.label, model: explainModel,
-                             prompt: explainPrompt, hint: explainHint, input: codeText, output: explanationText)
+                             prompt: explainPrompt, hint: explainHint, input: codeText, output: explanationText,
+                             images: codeImages.isEmpty ? nil : codeImages)
         case .script:
             guard !scriptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 statusText = "기록할 대본이 없습니다"; return
             }
             e = BacklogEntry(id: UUID().uuidString, createdAt: Date(), tags: finalTags, note: note,
                              stage: "대본", provider: scriptProvider.label, model: scriptModel,
-                             prompt: normalizePrompt, hint: scriptHint, input: inputText, output: scriptText)
+                             prompt: normalizePrompt, hint: scriptHint, input: inputText, output: scriptText,
+                             images: nil)
         }
         backlogStore.add(e); backlog = backlogStore.entries
         statusText = "백로그에 기록됨 (\(stage == .explain ? "해설" : "대본"))"
@@ -208,7 +210,7 @@ final class AppState: ObservableObject {
     func updateBacklog(_ e: BacklogEntry) { backlogStore.update(e); backlog = backlogStore.entries }
     func deleteBacklog(_ id: String) { backlogStore.delete(id); backlog = backlogStore.entries }
     func clearBacklog() { backlogStore.clear(); backlog = backlogStore.entries }
-    func exportBacklog() -> URL? { backlogStore.export() }
+    func exportBacklog(_ items: [BacklogEntry]) -> URL? { backlogStore.export(items) }
     var backlogTags: [String] { backlogStore.allTags }
 
     private func finish() {

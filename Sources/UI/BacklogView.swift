@@ -8,12 +8,16 @@ struct BacklogView: View {
     @EnvironmentObject var app: AppState
     @State private var stageFilter = "전체"
     @State private var tagFilter = "전체"
+    @State private var selection: Set<String> = []      // checked entry ids to export
 
     private var filtered: [BacklogEntry] {
         app.backlog.filter { e in
             (stageFilter == "전체" || e.stage == stageFilter)
                 && (tagFilter == "전체" || e.tags.contains(tagFilter))
         }
+    }
+    private var allSelected: Bool {
+        !filtered.isEmpty && selection.isSuperset(of: Set(filtered.map { $0.id }))
     }
 
     var body: some View {
@@ -29,10 +33,18 @@ struct BacklogView: View {
                 Spacer()
                 Text("\(filtered.count)건").font(.caption).foregroundStyle(.secondary)
                 Button {
-                    if let url = app.exportBacklog() { NSWorkspace.shared.activateFileViewerSelecting([url]) }
-                } label: { Label("내보내기", systemImage: "square.and.arrow.up") }
-                    .controlSize(.small).disabled(app.backlog.isEmpty)
-                Button { app.clearBacklog() } label: { Label("전체 삭제", systemImage: "trash") }
+                    let all = Set(filtered.map { $0.id })
+                    selection = selection.isSuperset(of: all) ? [] : all
+                } label: {
+                    Label(allSelected ? "선택 해제" : "전체 선택", systemImage: "checklist")
+                }
+                .controlSize(.small).disabled(filtered.isEmpty)
+                Button {
+                    let items = filtered.filter { selection.contains($0.id) }
+                    if let url = app.exportBacklog(items) { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+                } label: { Label("내보내기 (\(selection.count))", systemImage: "square.and.arrow.up") }
+                    .controlSize(.small).disabled(selection.isEmpty)
+                Button { app.clearBacklog(); selection = [] } label: { Label("전체 삭제", systemImage: "trash") }
                     .controlSize(.small).disabled(app.backlog.isEmpty)
             }
 
@@ -47,7 +59,7 @@ struct BacklogView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 List(filtered) { entry in
-                    BacklogRow(entry: entry)
+                    BacklogRow(entry: entry, selection: $selection)
                 }
                 .listStyle(.inset)
             }
@@ -64,6 +76,7 @@ struct BacklogView: View {
 private struct BacklogRow: View {
     @EnvironmentObject var app: AppState
     let entry: BacklogEntry
+    @Binding var selection: Set<String>
     @State private var expanded = false
     @State private var note = ""
     @State private var tagsText = ""
@@ -72,6 +85,23 @@ private struct BacklogRow: View {
         DisclosureGroup(isExpanded: $expanded) {
             VStack(alignment: .leading, spacing: 8) {
                 field("입력", entry.input)
+                if let imgs = entry.images, !imgs.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("첨부 이미지 (\(imgs.count))").font(.caption).foregroundStyle(.secondary)
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 8) {
+                                ForEach(Array(imgs.enumerated()), id: \.offset) { _, data in
+                                    if let img = NSImage(data: data) {
+                                        Image(nsImage: img).resizable().scaledToFill()
+                                            .frame(width: 120, height: 80).clipped()
+                                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 field("프롬프트", entry.prompt)
                 if !entry.hint.isEmpty { field("추가 지시", entry.hint) }
                 field("출력", entry.output)
@@ -91,6 +121,13 @@ private struct BacklogRow: View {
             .onAppear { note = entry.note; tagsText = entry.tags.joined(separator: ", ") }
         } label: {
             HStack(spacing: 6) {
+                Button {
+                    if selection.contains(entry.id) { selection.remove(entry.id) } else { selection.insert(entry.id) }
+                } label: {
+                    Image(systemName: selection.contains(entry.id) ? "checkmark.circle.fill" : "circle")
+                        .foregroundStyle(selection.contains(entry.id) ? Color.accentColor : .secondary)
+                }
+                .buttonStyle(.plain).help("내보내기 선택")
                 Text(entry.stage)
                     .font(.caption2).padding(.horizontal, 6).padding(.vertical, 2)
                     .background((entry.stage == "해설" ? Color.blue : Color.purple).opacity(0.15))
