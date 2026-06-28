@@ -147,6 +147,14 @@ final class AppState: ObservableObject {
     enum Phase: Equatable { case idle, synthesizing, playing, paused }
     @Published var phase: Phase = .idle
     @Published var progress: Double = 0          // 0…1 across all chunks
+
+    /// What the current playback is — shown in the HUD instead of the script text.
+    enum PlaybackMode { case tts, explain
+        var label: String { self == .tts ? "TTS" : "해설" }
+        var icon: String { self == .tts ? "speaker.wave.2.fill" : "text.book.closed.fill" }
+    }
+    @Published var playbackMode: PlaybackMode = .tts
+
     @Published var currentText = ""              // text being spoken (overlay label)
     @Published var inputText = ""                // original (top panel / source text)
     @Published var scriptText = ""               // TTS-friendly script actually sent to the engine (bottom panel)
@@ -657,6 +665,7 @@ final class AppState: ObservableObject {
     func speakContinue() {
         let seg = lastSegment.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !seg.isEmpty else { return }
+        playbackMode = .explain
         synthesize(TextSplitter.cleanInput(seg))   // read the latest 해설 segment directly
     }
 
@@ -675,6 +684,7 @@ final class AppState: ObservableObject {
     func speakExplanation() {
         let text = TextSplitter.cleanInput(explanationText)
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        playbackMode = .explain
         synthesize(text)
     }
 
@@ -684,6 +694,7 @@ final class AppState: ObservableObject {
     /// through to speaking the source. Runs under `explainTask` so 중지 cancels it.
     func explainAndSpeak(_ code: String) {
         task?.cancel(); player.stop()
+        playbackMode = .explain
         codeText = code             // raw — no cleanInput
         explanationText = ""
         phase = .synthesizing
@@ -829,6 +840,7 @@ final class AppState: ObservableObject {
 
     /// Generate-tab "재생": speak the script (or the original if it is empty).
     func speakScript() {
+        playbackMode = .tts
         if scriptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             inputText = TextSplitter.cleanInput(inputText)
             synthesize(inputText)
@@ -840,6 +852,7 @@ final class AppState: ObservableObject {
     /// Services entry: set the source, build the script, then speak it.
     func speakSelected(_ text: String) {
         task?.cancel(); player.stop()
+        playbackMode = .tts
         inputText = TextSplitter.cleanInput(text)
         scriptText = ""
         phase = .synthesizing
@@ -853,6 +866,7 @@ final class AppState: ObservableObject {
 
     func replay(_ e: HistoryEntry) {
         task?.cancel(); player.stop()
+        playbackMode = .tts
         guard let url = cache.fileURL(forKey: e.id) else { statusText = "오디오 파일 없음"; return }
         cache.touch(e.id); historyRevision += 1
         inputText = e.text; currentText = e.text
@@ -863,6 +877,16 @@ final class AppState: ObservableObject {
     }
 
     func stop() { explainTask?.cancel(); scriptTask?.cancel(); task?.cancel(); player.stop(); finish() }
+
+    // HUD transport: paragraph navigation.
+    var canSkipNext: Bool { isBusy && player.canNext }
+    var canSkipPrev: Bool { isBusy && player.canPrev }
+    func skipNext() { guard player.canNext else { return }; player.next(); resumeIfPaused() }
+    func skipPrev() { guard player.canPrev else { return }; player.prev(); resumeIfPaused() }
+    private func resumeIfPaused() {
+        if phase == .paused { phase = .playing; startTimer() }
+        tick()
+    }
 
     func deleteHistory(_ id: String) { cache.delete(id); historyRevision += 1 }
     func clearHistory() { cache.clear(); historyRevision += 1 }
