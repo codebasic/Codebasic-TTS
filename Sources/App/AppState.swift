@@ -406,7 +406,8 @@ final class AppState: ObservableObject {
                                           model: visionModel, prompt: "transcribe")
         if let cached = normCache.script(forKey: tkey) { return cached }
         let prompt = """
-        이미지를 텍스트로 옮기는 작업입니다. 반드시 아래 두 섹션으로 나눠 출력하세요.
+        이미지를 텍스트로 옮기는 작업입니다. 여러 장이 첨부될 수 있으며, 서로 보완하는 자료(코드 화면 + 필기
+        메모·그림 + 책/교재 페이지 등)일 수 있으니 모든 이미지를 빠짐없이 반영하세요. 반드시 아래 세 섹션으로 나눠 출력하세요.
 
         [코드]
         보이는 코드를 들여쓰기·줄바꿈 그대로 옮겨 적습니다. 코드가 아닌 화면 요소(파일명·출력·오류 등)는 짧게 덧붙입니다.
@@ -417,7 +418,11 @@ final class AppState: ObservableObject {
         설명합니다. 예: "x1, x2 컬럼을 빨간 박스로, label 컬럼을 초록 박스로 묶고 'label ∈ {0,1}', 'y ∈ float'라고 적어
         분류(라벨)와 회귀(연속값 y)의 차이를 대조함". 손으로 그린 강조가 전혀 없으면 정확히 "없음"이라고만 적습니다.
 
-        해설·설명 문장은 쓰지 말고 위 두 섹션 형식으로만 출력합니다.
+        [참고 자료]
+        코드가 아닌 설명 자료(책/교재 페이지, 개념 그림, 긴 설명 텍스트 등)가 있으면, 코드 이해에 도움이 되는 핵심
+        내용을 요약해 적습니다(관련 개념·기법·용어·정의 등). 없으면 정확히 "없음".
+
+        해설·설명 문장은 쓰지 말고 위 세 섹션 형식으로만 출력합니다.
         """
         let stream: AsyncThrowingStream<String, Error>
         switch visionProv {
@@ -504,7 +509,7 @@ final class AppState: ObservableObject {
             code = typed.isEmpty ? transcribed : typed + "\n\n" + transcribed
         } else if singleStage {
             code = typed.isEmpty
-                ? "(첨부된 스크린샷의 코드를 정확히 읽고, 손으로 그린 강조 표시가 있으면 그것을 해설의 중심에 두어 해설하세요.)"
+                ? "(첨부된 스크린샷을 모두 보고 해설하세요. 코드는 정확히 읽고, 손으로 그린 강조가 있으면 해설의 중심에 두며, 책·교재·설명 자료가 함께 있으면 그 내용을 해설의 배경·맥락으로 연결해 활용하세요. 여러 장이면 서로 보완하는 자료이니 빠짐없이 반영합니다.)"
                 : typed
         }
         guard !code.isEmpty else { statusText = "해설 생성 실패 (빈 입력)"; return nil }
