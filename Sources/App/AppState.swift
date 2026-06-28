@@ -1,5 +1,7 @@
 import Foundation
 import Combine
+import CryptoKit
+import AppKit
 
 /// Single source of truth for the UI and the speak path. Holds connection,
 /// settings, history, and runs synthesis (cache-first) + playback.
@@ -81,6 +83,11 @@ final class AppState: ObservableObject {
     @Published var explainOllamaModel = "gemma4:31b-cloud"   // 해설용
     @Published var explainTemperature: Double = 0.4          // 해설 LLM 생성 매개변수
     @Published var scriptTemperature: Double = 0.2           // 대본 LLM 생성 매개변수
+    @Published var codeImages: [Data] = []       // pasted code screenshots (PNG); needs a vision model
+    // Vision model = the explain model by default; a non-empty value is a remembered override.
+    @Published var explainVisionGeminiModel = ""
+    @Published var explainVisionOllamaModel = ""
+    var hasImages: Bool { !codeImages.isEmpty }
     @Published var lastExplainedCode = ""        // baseline snapshot for "이어서 해설" (incremental)
     @Published var lastSegment = ""              // the most recently produced commentary (full or appended delta)
     var canContinueExplain: Bool {
@@ -91,15 +98,49 @@ final class AppState: ObservableObject {
     }
     @Published var selectedTab = 0               // RootView TabView selection
 
-    /// Model used for the current provider, per role.
-    var scriptModel: String { normalizeProvider == .gemini ? geminiModel : ollamaModel }
-    var explainModel: String { normalizeProvider == .gemini ? explainGeminiModel : explainOllamaModel }
-    /// Models exposed by the current provider's endpoint (Gemini falls back to the
-    /// static list until a fetch succeeds).
-    var providerModels: [String] {
-        normalizeProvider == .gemini
-            ? (geminiModels.isEmpty ? GeminiNormalizer.models : geminiModels)
-            : ollamaModels
+    // Per-role provider (Ollama / Gemini can be configured simultaneously; a role
+    // picks any connected model, which determines its provider). Migrated from the
+    // old single normalizeProvider on load so existing setups keep working.
+    @Published var explainProvider: NormalizeProvider = .ollama
+    @Published var scriptProvider: NormalizeProvider = .ollama
+    @Published var visionProvider: NormalizeProvider = .ollama
+    @Published var visionOverridden = false       // false = vision follows the 해설 model
+
+    /// Effective model per role (provider's own model field).
+    var scriptModel: String { scriptProvider == .gemini ? geminiModel : ollamaModel }
+    var explainModel: String { explainProvider == .gemini ? explainGeminiModel : explainOllamaModel }
+    var visionProviderEff: NormalizeProvider { visionOverridden ? visionProvider : explainProvider }
+    var visionModelEff: String {
+        if !visionOverridden { return explainModel }
+        return visionProvider == .gemini ? explainVisionGeminiModel : explainVisionOllamaModel
+    }
+
+    /// A pick in a model selector: a (provider, model) pair. Identity carries the
+    /// provider so models from different providers never collide.
+    struct LLMChoice: Hashable, Identifiable {
+        let provider: NormalizeProvider
+        let model: String
+        var id: String { provider.rawValue + "\u{1F}" + model }
+        var label: String { "\(model) · \(provider == .gemini ? "Gemini" : "Ollama")" }
+    }
+
+    /// All models from connected providers (Ollama always; Gemini once a key is set).
+    var connectedModels: [LLMChoice] {
+        var out = ollamaModels.map { LLMChoice(provider: .ollama, model: $0) }
+        if geminiKeyPresent || !geminiModels.isEmpty {
+            let g = geminiModels.isEmpty ? GeminiNormalizer.models : geminiModels
+            out += g.map { LLMChoice(provider: .gemini, model: $0) }
+        }
+        return out
+    }
+
+    func refreshAllModels() {
+        refreshOllamaModels()
+        if geminiKeyPresent { refreshGeminiModels() }
+    }
+    func refreshAllModelsIfNeeded() {
+        if ollamaModels.isEmpty { refreshOllamaModels() }
+        if geminiModels.isEmpty && geminiKeyPresent { refreshGeminiModels() }
     }
 
     // Runtime
@@ -150,14 +191,14 @@ final class AppState: ObservableObject {
                 statusText = "기록할 해설이 없습니다"; return
             }
             e = BacklogEntry(id: UUID().uuidString, createdAt: Date(), tags: finalTags, note: note,
-                             stage: "해설", provider: normalizeProvider.label, model: explainModel,
+                             stage: "해설", provider: explainProvider.label, model: explainModel,
                              prompt: explainPrompt, hint: explainHint, input: codeText, output: explanationText)
         case .script:
             guard !scriptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 statusText = "기록할 대본이 없습니다"; return
             }
             e = BacklogEntry(id: UUID().uuidString, createdAt: Date(), tags: finalTags, note: note,
-                             stage: "대본", provider: normalizeProvider.label, model: scriptModel,
+                             stage: "대본", provider: scriptProvider.label, model: scriptModel,
                              prompt: normalizePrompt, hint: scriptHint, input: inputText, output: scriptText)
         }
         backlogStore.add(e); backlog = backlogStore.entries
@@ -285,7 +326,7 @@ final class AppState: ObservableObject {
     }
 
     private func makeNormalizer(instruction: String) -> Normalizing? {
-        switch normalizeProvider {
+        switch scriptProvider {
         case .gemini:
             guard let key = Secrets.geminiKey else { return nil }
             return GeminiNormalizer(baseURL: geminiBaseURL, apiKey: key, model: geminiModel,
@@ -316,7 +357,7 @@ final class AppState: ObservableObject {
     // MARK: - Commentary (코드 → 해설)
 
     private func makeExplainer() -> Explaining? {
-        switch normalizeProvider {
+        switch explainProvider {
         case .gemini:
             guard let key = Secrets.geminiKey else { return nil }
             return GeminiExplainer(baseURL: geminiBaseURL, apiKey: key, model: explainGeminiModel,
@@ -326,6 +367,65 @@ final class AppState: ObservableObject {
                 baseURL: URL(string: ollamaURL) ?? URL(string: "http://localhost:11434")!,
                 model: explainOllamaModel, instruction: explainPrompt, temperature: explainTemperature)
         }
+    }
+
+    /// Stable digest of the attached screenshots, for caching the transcription.
+    private func imagesDigest(_ imgs: [Data]) -> String {
+        var h = SHA256()
+        for d in imgs { h.update(data: d) }
+        return h.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Stage 1 of image-explain: the VISION model transcribes the screenshot(s) to
+    /// text (the code + any relevant screen content). Cached by image digest so a
+    /// re-run skips the vision call. The text then feeds the normal explain stage.
+    private func transcribeImages(_ imgs: [Data]) async -> String? {
+        let visionProv = visionProviderEff
+        let visionModel = visionModelEff
+        let tkey = NormalizationCache.key(text: imagesDigest(imgs),
+                                          provider: "vision:" + visionProv.rawValue,
+                                          model: visionModel, prompt: "transcribe")
+        if let cached = normCache.script(forKey: tkey) { return cached }
+        let prompt = """
+        이미지를 텍스트로 옮기는 작업입니다. 다음을 빠짐없이 적으세요.
+        1) 보이는 코드를 들여쓰기·줄바꿈 그대로 옮겨 적습니다.
+        2) 손으로 그린 강조 표시(박스·화살표·동그라미·밑줄·색칠·필기 메모 등)가 있으면, 그것이 어떤 코드/변수/요소를
+           가리키는지와 적힌 메모 내용을 함께 적습니다. 사용자가 일부러 강조한 부분이므로 절대 빠뜨리지 마세요.
+           예: "x1, x2 컬럼을 빨간 박스로, label 컬럼을 초록 박스로 묶고 'label ∈ {0,1}', 'y ∈ float'라고 적어 분류와 회귀의 차이를 강조함".
+        3) 코드가 아닌 화면 요소(파일명·출력·오류 등)도 짧게 적습니다.
+        해설은 하지 말고 옮긴 내용과 강조 설명만 출력합니다.
+        """
+        let stream: AsyncThrowingStream<String, Error>
+        switch visionProv {
+        case .gemini:
+            guard let key = Secrets.geminiKey else { statusText = "Gemini 키 미설정"; return nil }
+            stream = LLM.geminiStream(baseURL: geminiBaseURL, apiKey: key, model: visionModel,
+                                      prompt: prompt, images: imgs, temperature: 0)
+        case .ollama:
+            let url = URL(string: ollamaURL) ?? URL(string: "http://localhost:11434")!
+            stream = LLM.ollamaChatStream(baseURL: url, model: visionModel,
+                                          prompt: prompt, images: imgs, temperature: 0)
+        }
+        var acc = ""
+        do {
+            for try await delta in stream { try Task.checkCancellation(); acc += delta }
+        } catch is CancellationError {
+            return nil
+        } catch {
+            statusText = "이미지 인식 오류: \(error.localizedDescription)"; return nil
+        }
+        let out = acc.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !out.isEmpty else { return nil }
+        // Non-vision models (e.g. gemma4) silently reply "이미지가 없다" instead of
+        // erroring — catch that so we don't explain a refusal as if it were code.
+        let refusal = ["이미지가 첨부", "이미지를 첨부", "이미지가 없", "이미지가 보이지", "첨부되지 않",
+                       "no image", "can't see", "cannot see", "don't see"]
+        if out.count < 400, refusal.contains(where: { out.contains($0) }) {
+            statusText = "비전 모델이 이미지를 못 읽었습니다 — 비전 모델을 gemma3 등 비전 지원 모델로 바꾸세요"
+            return nil
+        }
+        normCache.put(key: tkey, script: out)
+        return out
     }
 
     // Public entry points (sync): manage the single long-lived `explainTask`,
@@ -353,20 +453,35 @@ final class AppState: ObservableObject {
     /// text, or nil on failure/cancel. Code is sent verbatim (no cleanInput).
     @discardableResult
     private func runExplain(force: Bool) async -> String? {
-        let code = codeText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !code.isEmpty else { explanationText = ""; return nil }
+        let typed = codeText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let imgs = codeImages
+        guard !typed.isEmpty || !imgs.isEmpty else { explanationText = ""; return nil }
         guard let explainer = makeExplainer() else {
-            statusText = normalizeProvider == .gemini ? "Gemini 키 미설정" : "Ollama 미설정"
+            statusText = explainProvider == .gemini ? "Gemini 키 미설정" : "Ollama 미설정"
             return nil
         }
-        let provider = "explain:" + normalizeProvider.rawValue
+        explaining = true
+        defer { explaining = false }
+
+        // Stage 1 (if images): vision model transcribes screenshots → text.
+        var code = typed
+        if !imgs.isEmpty {
+            statusText = "이미지에서 코드 추출 중…"
+            guard let transcribed = await transcribeImages(imgs) else {
+                if statusText.isEmpty { statusText = "이미지 인식 실패" }
+                return nil
+            }
+            code = typed.isEmpty ? transcribed : typed + "\n\n" + transcribed
+        }
+        guard !code.isEmpty else { statusText = "해설 생성 실패 (빈 입력)"; return nil }
+
+        // Stage 2: the text model explains the combined code.
+        let provider = "explain:" + explainProvider.rawValue
         let nk = NormalizationCache.key(text: code, provider: provider, model: explainModel,
                                         prompt: explainPrompt + "\u{1F}" + explainHint)
         if !force, let cached = normCache.script(forKey: nk) {
             explanationText = cached; lastExplainedCode = code; lastSegment = cached; return cached
         }
-        explaining = true
-        defer { explaining = false }
         explanationText = ""
         statusText = "해설 생성 중…"
         var acc = ""
@@ -401,10 +516,10 @@ final class AppState: ObservableObject {
         guard !current.isEmpty else { return nil }
         guard canContinueExplain else { return await runExplain(force: force) }
         guard let explainer = makeExplainer() else {
-            statusText = normalizeProvider == .gemini ? "Gemini 키 미설정" : "Ollama 미설정"
+            statusText = explainProvider == .gemini ? "Gemini 키 미설정" : "Ollama 미설정"
             return nil
         }
-        let provider = "explain-cont:" + normalizeProvider.rawValue
+        let provider = "explain-cont:" + explainProvider.rawValue
         let keyText = lastExplainedCode + "\u{1F}" + current
         let nk = NormalizationCache.key(text: keyText, provider: provider, model: explainModel,
                                         prompt: "continue\u{1F}" + explainHint)
@@ -471,6 +586,24 @@ final class AppState: ObservableObject {
         lastExplainedCode = ""
         lastSegment = ""
         statusText = ""
+    }
+
+    func removeImage(at index: Int) { if codeImages.indices.contains(index) { codeImages.remove(at: index) } }
+    func clearImages() { codeImages.removeAll() }
+
+    /// Attach any images on the clipboard as PNG. Returns true if any were added.
+    /// Used by the ⌘V monitor (해설 탭) and the 붙여넣기 button.
+    @discardableResult
+    func pasteImagesFromClipboard() -> Bool {
+        let objs = NSPasteboard.general.readObjects(forClasses: [NSImage.self], options: nil) as? [NSImage] ?? []
+        var added = false
+        for img in objs where !img.size.equalTo(.zero) {
+            if let tiff = img.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff),
+               let png = rep.representation(using: .png, properties: [:]) {
+                codeImages.append(png); added = true
+            }
+        }
+        return added
     }
 
     /// 해설 탭 "이어서 읽기": read the latest segment — the delta from the last
@@ -543,7 +676,7 @@ final class AppState: ObservableObject {
             scriptText = src; markScriptFresh(); return src
         }
 
-        let provider = normalizeProvider.rawValue
+        let provider = scriptProvider.rawValue
         let model = scriptModel
         // Normalize the WHOLE 대본 in one call so the model has full context —
         // per-paragraph calls applied instructions unevenly (the hint landed on
@@ -620,7 +753,7 @@ final class AppState: ObservableObject {
         let current = scriptText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !current.isEmpty else { return nil }
         guard let norm = makeNormalizer(instruction: refineInstruction()) else {
-            statusText = normalizeProvider == .gemini ? "Gemini 키 미설정" : "Ollama 미설정"
+            statusText = scriptProvider == .gemini ? "Gemini 키 미설정" : "Ollama 미설정"
             return nil
         }
         let combined = "[원본]\n\(inputText)\n\n[현재 대본]\n\(current)"
@@ -763,8 +896,12 @@ final class AppState: ObservableObject {
             "maxChunkChars": maxChunkChars,
             "normalize": normalizeEnabled, "ollamaModel": ollamaModel, "ollamaURL": ollamaURL,
             "normalizeProvider": normalizeProvider.rawValue, "geminiModel": geminiModel,
+            "explainProvider": explainProvider.rawValue, "scriptProvider": scriptProvider.rawValue,
+            "visionProvider": visionProvider.rawValue, "visionOverridden": visionOverridden,
             "geminiBaseURL": geminiBaseURL,
             "explainGeminiModel": explainGeminiModel, "explainOllamaModel": explainOllamaModel,
+            "explainVisionGeminiModel": explainVisionGeminiModel,
+            "explainVisionOllamaModel": explainVisionOllamaModel,
             "explainTemperature": explainTemperature, "scriptTemperature": scriptTemperature,
             "stability": voiceSettings.stability, "similarity": voiceSettings.similarityBoost,
             "style": voiceSettings.style, "speakerBoost": voiceSettings.useSpeakerBoost,
@@ -798,10 +935,18 @@ final class AppState: ObservableObject {
         normalizePrompt = o["normalizePrompt"] as? String ?? normalizePrompt
         explainPrompt = o["explainPrompt"] as? String ?? explainPrompt
         normalizeProvider = NormalizeProvider(rawValue: o["normalizeProvider"] as? String ?? "") ?? normalizeProvider
+        // Per-role providers default from the old single normalizeProvider (migration),
+        // so an existing Ollama/gemma4 setup keeps running with no user action.
+        explainProvider = NormalizeProvider(rawValue: o["explainProvider"] as? String ?? "") ?? normalizeProvider
+        scriptProvider = NormalizeProvider(rawValue: o["scriptProvider"] as? String ?? "") ?? normalizeProvider
+        visionProvider = NormalizeProvider(rawValue: o["visionProvider"] as? String ?? "") ?? explainProvider
+        visionOverridden = o["visionOverridden"] as? Bool ?? false
         geminiModel = o["geminiModel"] as? String ?? geminiModel
         geminiBaseURL = o["geminiBaseURL"] as? String ?? geminiBaseURL
         explainGeminiModel = o["explainGeminiModel"] as? String ?? explainGeminiModel
         explainOllamaModel = o["explainOllamaModel"] as? String ?? explainOllamaModel
+        explainVisionGeminiModel = o["explainVisionGeminiModel"] as? String ?? explainVisionGeminiModel
+        explainVisionOllamaModel = o["explainVisionOllamaModel"] as? String ?? explainVisionOllamaModel
         explainTemperature = o["explainTemperature"] as? Double ?? explainTemperature
         scriptTemperature = o["scriptTemperature"] as? Double ?? scriptTemperature
         voiceSettings.stability = o["stability"] as? Double ?? voiceSettings.stability

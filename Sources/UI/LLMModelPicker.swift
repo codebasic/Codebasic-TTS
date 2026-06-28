@@ -1,22 +1,25 @@
 import SwiftUI
 
-/// Compact, in-panel model selector for one LLM role (해설 or 대본). Lists the
-/// models the current provider's endpoint exposes — Ollama `api/tags`, Gemini
-/// `models.list` (static fallback until fetched) — so 해설 and 대본 can run on
-/// different models. The bound value is per-provider; only the active one shows.
+/// In-panel model selector for one LLM role. Lists models from ALL connected
+/// providers (Ollama + Gemini) — picking one sets both the role's provider and
+/// that provider's model field. Ollama and Gemini can be configured at once.
 struct LLMModelPicker: View {
     @EnvironmentObject var app: AppState
     let label: String
-    @Binding var ollamaModel: String
+    @Binding var provider: AppState.NormalizeProvider
     @Binding var geminiModel: String
+    @Binding var ollamaModel: String
     var onChange: () -> Void = {}
 
-    /// Endpoint models, with the current selection folded in so a saved model
-    /// that the endpoint doesn't list still shows (instead of a blank popup).
-    private var options: [String] {
-        let sel = app.normalizeProvider == .gemini ? geminiModel : ollamaModel
-        var m = app.providerModels
-        if !sel.isEmpty && !m.contains(sel) { m.insert(sel, at: 0) }
+    private var current: AppState.LLMChoice {
+        AppState.LLMChoice(provider: provider, model: provider == .gemini ? geminiModel : ollamaModel)
+    }
+
+    /// Connected models, with the current selection folded in so a saved model
+    /// from an offline/unfetched provider still shows.
+    private var options: [AppState.LLMChoice] {
+        var m = app.connectedModels
+        if !current.model.isEmpty && !m.contains(where: { $0.id == current.id }) { m.insert(current, at: 0) }
         return m
     }
 
@@ -24,27 +27,25 @@ struct LLMModelPicker: View {
         HStack(spacing: 6) {
             Text(label).font(.caption).foregroundStyle(.secondary)
             if options.isEmpty {
-                TextField(app.normalizeProvider == .gemini ? "gemini-2.0-flash" : "qwen2.5:3b",
-                          text: app.normalizeProvider == .gemini ? $geminiModel : $ollamaModel)
-                    .textFieldStyle(.roundedBorder).frame(maxWidth: 200)
+                Text("연결된 모델 없음").font(.caption).foregroundStyle(.tertiary)
             } else {
-                Picker("", selection: app.normalizeProvider == .gemini ? $geminiModel : $ollamaModel) {
-                    ForEach(options, id: \.self) { Text($0).tag($0) }
+                Picker("", selection: Binding(
+                    get: { current.id },
+                    set: { id in
+                        guard let c = options.first(where: { $0.id == id }) else { return }
+                        provider = c.provider
+                        if c.provider == .gemini { geminiModel = c.model } else { ollamaModel = c.model }
+                        onChange()
+                    }
+                )) {
+                    ForEach(options) { Text($0.label).tag($0.id) }
                 }
-                .labelsHidden().frame(maxWidth: 220)
+                .labelsHidden().frame(maxWidth: 260)
             }
-            Button {
-                if app.normalizeProvider == .gemini { app.refreshGeminiModels() }
-                else { app.refreshOllamaModels() }
-            } label: { Image(systemName: "arrow.clockwise") }
-            .controlSize(.small)
-            .help("엔드포인트(\(app.normalizeProvider.label))에서 모델 목록 새로고침")
+            Button { app.refreshAllModels() } label: { Image(systemName: "arrow.clockwise") }
+                .controlSize(.small)
+                .help("연결된 제공자(Ollama·Gemini)에서 모델 목록 새로고침")
         }
-        .onChange(of: ollamaModel) { _, _ in onChange() }
-        .onChange(of: geminiModel) { _, _ in onChange() }
-        .onAppear {
-            if app.normalizeProvider == .ollama && app.ollamaModels.isEmpty { app.refreshOllamaModels() }
-            if app.normalizeProvider == .gemini && app.geminiModels.isEmpty { app.refreshGeminiModels() }
-        }
+        .onAppear { app.refreshAllModelsIfNeeded() }
     }
 }

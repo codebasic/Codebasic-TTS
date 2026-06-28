@@ -23,7 +23,7 @@ enum LLM {
     /// is the increment. Cancelling the consuming task tears down the request.
     static func geminiStream(baseURL: String = GeminiNormalizer.defaultBaseURL,
                              apiKey: String, model: String, prompt: String,
-                             temperature: Double = 0.2) -> AsyncThrowingStream<String, Error> {
+                             images: [Data] = [], temperature: Double = 0.2) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             let work = Task {
                 do {
@@ -38,8 +38,13 @@ enum LLM {
                     req.httpMethod = "POST"
                     req.setValue("application/json", forHTTPHeaderField: "Content-Type")
                     req.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
+                    var parts: [[String: Any]] = [["text": prompt]]
+                    for img in images {
+                        parts.append(["inline_data": ["mime_type": "image/png",
+                                                      "data": img.base64EncodedString()]])
+                    }
                     req.httpBody = try JSONSerialization.data(withJSONObject: [
-                        "contents": [["parts": [["text": prompt]]]],
+                        "contents": [["parts": parts]],
                         "generationConfig": ["temperature": temperature],
                     ])
                     let (bytes, response) = try await URLSession.shared.bytes(for: req)
@@ -97,6 +102,49 @@ enum LLM {
                               let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any]
                         else { continue }
                         if let resp = obj["response"] as? String, !resp.isEmpty {
+                            continuation.yield(resp)
+                        }
+                        if obj["done"] as? Bool == true { break }
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in work.cancel() }
+        }
+    }
+
+    /// Ollama multimodal streaming (`api/chat`, stream:true → JSONL). Needed for
+    /// vision: image input is delivered via the chat message's `images` (base64),
+    /// not `api/generate`. Yields each `message.content` delta.
+    static func ollamaChatStream(baseURL: URL, model: String, prompt: String,
+                                 images: [Data], temperature: Double = 0.2) -> AsyncThrowingStream<String, Error> {
+        AsyncThrowingStream { continuation in
+            let work = Task {
+                do {
+                    var req = URLRequest(url: baseURL.appendingPathComponent("api/chat"))
+                    req.httpMethod = "POST"
+                    req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    var message: [String: Any] = ["role": "user", "content": prompt]
+                    if !images.isEmpty { message["images"] = images.map { $0.base64EncodedString() } }
+                    req.httpBody = try JSONSerialization.data(withJSONObject: [
+                        "model": model, "messages": [message], "stream": true,
+                        "options": ["temperature": temperature],
+                    ])
+                    let (bytes, response) = try await URLSession.shared.bytes(for: req)
+                    guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+                        throw NSError(domain: "Ollama",
+                                      code: (response as? HTTPURLResponse)?.statusCode ?? -1,
+                                      userInfo: [NSLocalizedDescriptionKey: "Ollama(chat) 요청 실패"])
+                    }
+                    for try await line in bytes.lines {
+                        try Task.checkCancellation()
+                        guard let d = line.data(using: .utf8),
+                              let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any]
+                        else { continue }
+                        if let msg = obj["message"] as? [String: Any],
+                           let resp = msg["content"] as? String, !resp.isEmpty {
                             continuation.yield(resp)
                         }
                         if obj["done"] as? Bool == true { break }
@@ -172,6 +220,8 @@ struct GeminiNormalizer: Normalizing {
 /// and the caller surfaces failures instead of falling back to the raw code.
 protocol Explaining {
     /// Stream the commentary as text deltas. `hint` is optional per-run steering.
+    /// (Screenshots are transcribed to text by a vision model in a prior stage, so
+    /// the explain step itself is text-only.)
     func stream(_ code: String, hint: String) -> AsyncThrowingStream<String, Error>
     /// Incremental stream: given the previously-explained code and the current
     /// code, explain ONLY what was added/changed, in a continuing narration tone.

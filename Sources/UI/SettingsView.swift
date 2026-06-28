@@ -132,39 +132,34 @@ struct SettingsView: View {
     // MARK: - ② 텍스트 생성 (LLM for 해설/대본)
 
     @ViewBuilder private var llmChannel: some View {
-        Section("제공자") {
-            Picker("LLM 제공자", selection: $app.normalizeProvider) {
-                ForEach(AppState.NormalizeProvider.allCases) { Text($0.label).tag($0) }
-            }
-            Text("코드 해설과 음성 대본(정규화) 생성에 사용하는 텍스트 생성 모델입니다. 모델은 해설/TTS 패널에서, temperature는 각 패널의 인스펙터(⊟)에서 조절합니다.")
+        Section {
+            Text("코드 해설·음성 대본 생성에 쓰는 텍스트 생성 모델입니다. Ollama와 Gemini를 동시에 연결할 수 있고, 모델은 해설/TTS 패널에서 두 제공자의 통합 목록에서 고릅니다. temperature는 각 패널 인스펙터(⊟)에서 조절합니다.")
                 .font(.caption).foregroundStyle(.secondary)
         }
 
-        if app.normalizeProvider == .gemini {
-            Section("Gemini") {
-                labeledField("엔드포인트", placeholder: GeminiNormalizer.defaultBaseURL,
-                             text: $app.geminiBaseURL,
-                             hint: "API 루트. 끝에 /models/{모델}:generateContent 가 붙습니다. 프록시·게이트웨이 사용 시 변경.")
-                KeyField(label: "API 키", text: $geminiKeyInput,
-                         hint: app.geminiKeyPresent ? "현재: 설정됨 (App Support)" : "현재: 없음")
-                HStack {
-                    Button("키 저장") { app.saveGeminiKey(geminiKeyInput) }
-                        .disabled(geminiKeyInput.trimmingCharacters(in: .whitespaces).isEmpty)
-                    Button("연결 확인 / 모델 목록") { app.refreshGeminiModels() }
-                    Spacer()
-                    Text(app.geminiStatus).font(.caption).foregroundStyle(.secondary)
-                }
+        Section("Ollama") {
+            labeledField("엔드포인트", placeholder: "http://localhost:11434",
+                         text: $app.ollamaURL,
+                         hint: "로컬/원격 모두 가능: 예) http://192.168.0.10:11434")
+            HStack {
+                Button("연결 확인 / 모델 목록") { app.refreshOllamaModels() }
+                Spacer()
+                Text(app.ollamaStatus).font(.caption).foregroundStyle(.secondary)
             }
-        } else {
-            Section("Ollama") {
-                labeledField("엔드포인트", placeholder: "http://localhost:11434",
-                             text: $app.ollamaURL,
-                             hint: "로컬/원격 모두 가능: 예) http://192.168.0.10:11434")
-                HStack {
-                    Button("연결 확인 / 모델 목록") { app.refreshOllamaModels() }
-                    Spacer()
-                    Text(app.ollamaStatus).font(.caption).foregroundStyle(.secondary)
-                }
+        }
+
+        Section("Gemini (클라우드)") {
+            labeledField("엔드포인트", placeholder: GeminiNormalizer.defaultBaseURL,
+                         text: $app.geminiBaseURL,
+                         hint: "API 루트. 끝에 /models/{모델}:generateContent 가 붙습니다. 프록시·게이트웨이 사용 시 변경.")
+            KeyField(label: "API 키", text: $geminiKeyInput,
+                     hint: app.geminiKeyPresent ? "현재: 설정됨 (App Support)" : "현재: 없음 — 키를 넣으면 모델 목록에 Gemini 모델이 함께 표시됩니다")
+            HStack {
+                Button("키 저장") { app.saveGeminiKey(geminiKeyInput) }
+                    .disabled(geminiKeyInput.trimmingCharacters(in: .whitespaces).isEmpty)
+                Button("연결 확인 / 모델 목록") { app.refreshGeminiModels() }
+                Spacer()
+                Text(app.geminiStatus).font(.caption).foregroundStyle(.secondary)
             }
         }
 

@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 /// The 해설 panel: code → commentary. Top = source code, bottom = the generated
 /// spoken-style explanation. From here you either hand the commentary to the
@@ -16,6 +17,21 @@ struct CommentaryView: View {
         app.explanationText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
     private var border: some View { RoundedRectangle(cornerRadius: 6).stroke(.quaternary) }
+
+    // Vision model bindings: show the effective model (override, else follow the
+    // 해설 model) and store a remembered override once the user picks one.
+    private var visionProviderBinding: Binding<AppState.NormalizeProvider> {
+        Binding(get: { app.visionProviderEff },
+                set: { app.visionProvider = $0; app.visionOverridden = true })
+    }
+    private var visionOllamaBinding: Binding<String> {
+        Binding(get: { app.visionOverridden ? app.explainVisionOllamaModel : app.explainOllamaModel },
+                set: { app.explainVisionOllamaModel = $0; app.visionOverridden = true })
+    }
+    private var visionGeminiBinding: Binding<String> {
+        Binding(get: { app.visionOverridden ? app.explainVisionGeminiModel : app.explainGeminiModel },
+                set: { app.explainVisionGeminiModel = $0; app.visionOverridden = true })
+    }
 
     var body: some View {
         HSplitView {
@@ -37,12 +53,15 @@ struct CommentaryView: View {
                 Text("코드").font(.headline)
                 Spacer()
                 Button {
-                    if let s = NSPasteboard.general.string(forType: .string) { app.codeText = s }
+                    let pb = NSPasteboard.general
+                    let imgs = (pb.readObjects(forClasses: [NSImage.self], options: nil) as? [NSImage]) ?? []
+                    attach(imgs)
+                    if let s = pb.string(forType: .string) { app.codeText = s }
                 } label: {
                     Label("붙여넣기", systemImage: "doc.on.clipboard")
                 }
                 .controlSize(.small)
-                .help("클립보드의 코드를 그대로 붙여넣습니다")
+                .help("클립보드의 코드/스크린샷을 붙여넣습니다 (텍스트는 코드로, 이미지는 첨부)")
                 Button { showPrompt.toggle() } label: { Image(systemName: "sidebar.right") }
                     .controlSize(.small)
                     .help("프롬프트·생성 매개변수 패널 열기/닫기")
@@ -50,6 +69,34 @@ struct CommentaryView: View {
             TextEditor(text: $app.codeText)
                 .font(.body.monospaced()).frame(minHeight: 150)
                 .overlay(border)
+                .onDrop(of: [.image, .fileURL], isTargeted: nil) { providers in dropImages(providers); return true }
+            Text("코드 입력창에 ⌘V — 텍스트는 코드로, 스크린샷은 이미지로 첨부됩니다.")
+                .font(.caption2).foregroundStyle(.tertiary)
+
+            if app.hasImages {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(Array(app.codeImages.enumerated()), id: \.offset) { idx, data in
+                            ZStack(alignment: .topTrailing) {
+                                if let img = NSImage(data: data) {
+                                    Image(nsImage: img).resizable().scaledToFill()
+                                        .frame(width: 96, height: 64).clipped()
+                                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
+                                }
+                                Button { app.removeImage(at: idx) } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .foregroundStyle(.white, .black.opacity(0.6))
+                                }
+                                .buttonStyle(.plain).padding(2)
+                            }
+                        }
+                        Button { app.clearImages() } label: { Label("모두 지우기", systemImage: "trash") }
+                            .controlSize(.small)
+                    }
+                }
+                .frame(height: 70)
+            }
 
             HintField(placeholder: "추가 지시 (해설, 선택) — 맥락이나 재생성 방향. 예: 더 간결하게, 초보자 기준으로",
                       text: $app.explainHint,
@@ -61,8 +108,8 @@ struct CommentaryView: View {
                 } label: {
                     Label("해설 생성", systemImage: "wand.and.stars")
                 }
-                .disabled(codeEmpty || app.explaining)
-                .help("코드 전체를 처음부터 해설합니다 (기존 해설을 대체)")
+                .disabled((codeEmpty && !app.hasImages) || app.explaining)
+                .help("코드(텍스트·스크린샷)를 처음부터 해설합니다 (기존 해설을 대체)")
 
                 Button {
                     app.continueExplanation()
@@ -75,7 +122,7 @@ struct CommentaryView: View {
                 Button { app.generateExplanation(force: true) } label: {
                     Label("재생성", systemImage: "arrow.clockwise")
                 }
-                .disabled(codeEmpty || app.explaining)
+                .disabled((codeEmpty && !app.hasImages) || app.explaining)
                 .help("해설 캐시를 무시하고 전체를 다시 생성")
 
                 if app.explaining {
@@ -84,9 +131,20 @@ struct CommentaryView: View {
                 }
                 Spacer()
                 LLMModelPicker(label: "해설 모델",
-                               ollamaModel: $app.explainOllamaModel,
+                               provider: $app.explainProvider,
                                geminiModel: $app.explainGeminiModel,
+                               ollamaModel: $app.explainOllamaModel,
                                onChange: { app.saveSettings() })
+            }
+            HStack(spacing: 8) {
+                LLMModelPicker(label: "비전 모델",
+                               provider: visionProviderBinding,
+                               geminiModel: visionGeminiBinding,
+                               ollamaModel: visionOllamaBinding,
+                               onChange: { app.saveSettings() })
+                Text("이미지→코드 추출용 (기본=해설 모델). gemma4는 비전 미동작 → gemma3 권장.")
+                    .font(.caption2).foregroundStyle(.secondary)
+                Spacer()
             }
 
             HStack(spacing: 8) {
@@ -130,10 +188,33 @@ struct CommentaryView: View {
                 Spacer()
             }
 
-            Text("제공자: \(app.normalizeProvider.label) (설정 탭) · 해설 모델은 위에서 선택")
+            Text("모델은 위에서 선택 (Ollama·Gemini 통합 목록) · 연결은 설정 탭")
                 .font(.caption).foregroundStyle(.secondary)
         }
         .padding()
         .frame(minWidth: 420, maxWidth: .infinity)
+    }
+
+    // MARK: - Image input (screenshots)
+
+    private func pngData(_ img: NSImage) -> Data? {
+        guard let tiff = img.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff) else { return nil }
+        return rep.representation(using: .png, properties: [:])
+    }
+
+    /// Attach pasted/dropped images as PNG (skips zero-size).
+    private func attach(_ imgs: [NSImage]) {
+        for img in imgs where !img.size.equalTo(.zero) {
+            if let d = pngData(img) { app.codeImages.append(d) }
+        }
+    }
+
+    private func dropImages(_ providers: [NSItemProvider]) {
+        for p in providers where p.canLoadObject(ofClass: NSImage.self) {
+            _ = p.loadObject(ofClass: NSImage.self) { obj, _ in
+                guard let img = obj as? NSImage else { return }
+                Task { @MainActor in attach([img]) }
+            }
+        }
     }
 }

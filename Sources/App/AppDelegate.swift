@@ -86,6 +86,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .store(in: &cancellables)
     }
 
+    // MARK: - ⌘V paste (intercept to attach screenshots in the 해설 탭)
+
+    /// The Edit-menu 붙여넣기 (⌘V) routes here. In the 해설 탭, an image on the
+    /// clipboard is attached as a screenshot; otherwise (and for text) the paste
+    /// is forwarded to the first responder for normal handling.
+    @objc func handlePaste(_ sender: Any?) {
+        if appState.selectedTab == 1 {
+            let pb = NSPasteboard.general
+            let hasImage = (pb.readObjects(forClasses: [NSImage.self], options: nil) as? [NSImage])?
+                .contains { !$0.size.equalTo(.zero) } ?? false
+            if hasImage {
+                appState.pasteImagesFromClipboard()
+                if !pb.canReadObject(forClasses: [NSString.self], options: nil) { return }  // image-only → done
+            }
+        }
+        NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: sender)   // normal text paste
+    }
+
     // MARK: - Services
 
     private func registerServices() {
@@ -137,7 +155,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         editMenu.addItem(.separator())
         editMenu.addItem(withTitle: "오려두기", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
         editMenu.addItem(withTitle: "복사", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
-        editMenu.addItem(withTitle: "붙여넣기", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        let pasteItem = NSMenuItem(title: "붙여넣기", action: #selector(handlePaste(_:)), keyEquivalent: "v")
+        pasteItem.target = self
+        editMenu.addItem(pasteItem)
         editMenu.addItem(withTitle: "전체 선택", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
 
         let windowItem = NSMenuItem()
