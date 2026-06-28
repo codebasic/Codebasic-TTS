@@ -98,6 +98,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func registerHotKeys() {
         let mods = controlKey | optionKey | cmdKey
         hotKeys.register(id: 1, keyCode: kVK_ANSI_E, modifiers: mods) { [weak self] in
+            self?.appState.captureHUDTarget()   // before the async grab: mouse is still on the target screen
             SelectionGrabber.grab { text in
                 guard let self, let text else { return }
                 MainActor.assumeIsolated {
@@ -107,6 +108,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         hotKeys.register(id: 2, keyCode: kVK_ANSI_R, modifiers: mods) { [weak self] in
+            self?.appState.captureHUDTarget()   // before the async grab: mouse is still on the target screen
             SelectionGrabber.grab { text in
                 guard let self, let text else { return }
                 MainActor.assumeIsolated { self.appState.speakSelected(text) }
@@ -145,6 +147,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func handleSelectedText(_ text: String) {
         let preview = text.replacingOccurrences(of: "\n", with: " ").prefix(60)
         Log.app.info("handleSelectedText: \(text.count) chars — \"\(preview, privacy: .public)\"")
+        appState.captureHUDTarget()
         appState.speakSelected(text)
     }
 
@@ -154,6 +157,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func handleCodeText(_ code: String) {
         let preview = code.replacingOccurrences(of: "\n", with: " ").prefix(60)
         Log.app.info("handleCodeText: \(code.count) chars — \"\(preview, privacy: .public)\"")
+        appState.captureHUDTarget()
         appState.selectedTab = 1        // 해설 탭 (2번째)
         appState.explainAndSpeak(code)
     }

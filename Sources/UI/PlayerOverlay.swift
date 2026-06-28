@@ -24,6 +24,18 @@ struct PlayerOverlay: View {
                 if app.phase == .synthesizing {
                     ProgressView().controlSize(.small)
                     Text("합성 중…").font(.caption).foregroundStyle(.secondary)
+                } else if app.showSubtitle {
+                    HStack(spacing: 2) {
+                        Button { app.adjustSubtitleFont(by: -2) } label: { Image(systemName: "minus") }
+                            .disabled(app.subtitleFontSize <= AppState.subtitleFontRange.lowerBound)
+                            .help("자막 작게")
+                        Image(systemName: "textformat.size").foregroundStyle(.secondary)
+                        Button { app.adjustSubtitleFont(by: 2) } label: { Image(systemName: "plus") }
+                            .disabled(app.subtitleFontSize >= AppState.subtitleFontRange.upperBound)
+                            .help("자막 크게")
+                    }
+                    .buttonStyle(.plain)
+                    .font(.caption.weight(.semibold))
                 }
             }
 
@@ -34,7 +46,7 @@ struct PlayerOverlay: View {
                             ForEach(Array(app.currentSentences.enumerated()), id: \.offset) { i, s in
                                 let cur = app.currentSentenceIndex
                                 Text(s)
-                                    .font(.callout)
+                                    .font(.system(size: app.subtitleFontSize))
                                     .fontWeight(i == cur ? .semibold : .regular)
                                     .foregroundStyle(i == cur ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
                                     .opacity(i == cur ? 1 : max(0.3, 1 - 0.25 * Double(abs(i - cur))))
@@ -47,7 +59,7 @@ struct PlayerOverlay: View {
                             }
                         }
                     }
-                    .frame(maxHeight: 92)
+                    .frame(maxHeight: max(92, app.subtitleFontSize * 5))
                     .onChange(of: app.currentSentenceIndex) { _, idx in
                         withAnimation(.easeInOut(duration: 0.25)) { proxy.scrollTo(idx, anchor: .center) }
                     }

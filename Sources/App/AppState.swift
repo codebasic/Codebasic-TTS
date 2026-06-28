@@ -158,6 +158,15 @@ final class AppState: ObservableObject {
     // HUD subtitles: show the paragraph being read (toggle per mode).
     @Published var subtitleTTS = true
     @Published var subtitleExplain = true
+    @Published var subtitleFontSize: Double = 17    // points; adjustable from the HUD (A-/A+)
+    static let subtitleFontRange: ClosedRange<Double> = 11...48
+
+    // HUD placement. The HUD follows the focused app per command: at trigger time
+    // we capture which screen the command happened on, and the HUD shows there
+    // (so in a lecture it lands on the screen the learners see). The user can drag
+    // it; its position is remembered per screen so each monitor keeps its own spot.
+    var hudTargetScreenID: CGDirectDisplayID?            // screen the current command targets
+    var hudPositions: [CGDirectDisplayID: CGPoint] = [:] // bottom-left offset within each screen's visibleFrame
     @Published var spokenChunks: [String] = []   // the paragraph texts of the current playback
     @Published var chunkProgress: Double = 0      // 0…1 within the current paragraph
     @Published var chunkSeconds: Double = 0       // seconds into the current paragraph
@@ -1024,6 +1033,38 @@ final class AppState: ObservableObject {
         }
     }
 
+    // MARK: - HUD placement & subtitle size
+
+    /// Display ID of the screen containing a global (Cocoa) point, if any.
+    static func screenID(containing point: CGPoint) -> CGDirectDisplayID? {
+        let screen = NSScreen.screens.first { $0.frame.contains(point) }
+        return screen.flatMap(Self.displayID(of:))
+    }
+
+    static func displayID(of screen: NSScreen) -> CGDirectDisplayID? {
+        (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
+    }
+
+    /// Capture which screen the current command targets — call at the *moment* the
+    /// command fires (before any async grab/synthesis), while the mouse is still on
+    /// the screen the user just acted on. Falls back to the previous target.
+    func captureHUDTarget() {
+        if let id = Self.screenID(containing: NSEvent.mouseLocation) { hudTargetScreenID = id }
+    }
+
+    /// Record a user-dragged HUD position (bottom-left offset within `screenID`'s
+    /// visible frame) in memory. Programmatic re-pins must NOT call this. The
+    /// caller debounces the disk write (`saveSettings`) — a drag fires many moves.
+    func setHUDPosition(_ offset: CGPoint, for screenID: CGDirectDisplayID) {
+        hudPositions[screenID] = offset
+    }
+
+    func adjustSubtitleFont(by delta: Double) {
+        let v = (subtitleFontSize + delta).rounded()
+        subtitleFontSize = min(max(v, Self.subtitleFontRange.lowerBound), Self.subtitleFontRange.upperBound)
+        saveSettings()
+    }
+
     // MARK: - Settings persistence
 
     private var settingsURL: URL {
@@ -1036,6 +1077,9 @@ final class AppState: ObservableObject {
             "backend": backendKind.rawValue, "useCache": useCache, "localBaseURL": localBaseURL,
             "maxChunkChars": maxChunkChars,
             "subtitleTTS": subtitleTTS, "subtitleExplain": subtitleExplain,
+            "subtitleFontSize": subtitleFontSize,
+            "hudPositions": Dictionary(uniqueKeysWithValues:
+                hudPositions.map { (String($0.key), [$0.value.x, $0.value.y]) }),
             "normalize": normalizeEnabled, "ollamaModel": ollamaModel, "ollamaURL": ollamaURL,
             "normalizeProvider": normalizeProvider.rawValue, "geminiModel": geminiModel,
             "explainProvider": explainProvider.rawValue, "scriptProvider": scriptProvider.rawValue,
@@ -1073,6 +1117,13 @@ final class AppState: ObservableObject {
         maxChunkChars = o["maxChunkChars"] as? Int ?? maxChunkChars
         subtitleTTS = o["subtitleTTS"] as? Bool ?? subtitleTTS
         subtitleExplain = o["subtitleExplain"] as? Bool ?? subtitleExplain
+        subtitleFontSize = o["subtitleFontSize"] as? Double ?? subtitleFontSize
+        if let raw = o["hudPositions"] as? [String: [Double]] {
+            hudPositions = Dictionary(uniqueKeysWithValues: raw.compactMap { key, xy in
+                guard let id = UInt32(key), xy.count == 2 else { return nil }
+                return (CGDirectDisplayID(id), CGPoint(x: xy[0], y: xy[1]))
+            })
+        }
         normalizeEnabled = o["normalize"] as? Bool ?? normalizeEnabled
         ollamaModel = o["ollamaModel"] as? String ?? ollamaModel
         ollamaURL = o["ollamaURL"] as? String ?? ollamaURL
