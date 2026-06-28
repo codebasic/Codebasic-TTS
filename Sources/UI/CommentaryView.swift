@@ -130,13 +130,13 @@ struct CommentaryView: View {
                     Text("해설 생성 중…").font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
+            }
+            HStack(spacing: 16) {
                 LLMModelPicker(label: "해설 모델",
                                provider: $app.explainProvider,
                                geminiModel: $app.explainGeminiModel,
                                ollamaModel: $app.explainOllamaModel,
                                onChange: { app.saveSettings() })
-            }
-            HStack(spacing: 8) {
                 LLMModelPicker(label: "비전 모델",
                                provider: visionProviderBinding,
                                geminiModel: visionGeminiBinding,
@@ -149,10 +149,6 @@ struct CommentaryView: View {
                         .controlSize(.small)
                         .help("비전 모델을 해설 모델로 되돌리기 (추종)")
                 }
-                Text(app.visionOverridden
-                     ? "이미지→코드 추출용 (해설 모델과 별도 지정됨)"
-                     : "이미지→코드 추출용 (해설 모델 추종)")
-                    .font(.caption2).foregroundStyle(.secondary)
                 Spacer()
             }
 

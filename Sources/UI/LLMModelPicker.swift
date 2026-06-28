@@ -19,8 +19,23 @@ struct LLMModelPicker: View {
     /// from an offline/unfetched provider still shows.
     private var options: [AppState.LLMChoice] {
         var m = app.connectedModels
-        if !current.model.isEmpty && !m.contains(where: { $0.id == current.id }) { m.insert(current, at: 0) }
+        if !current.model.isEmpty && !m.contains(where: { $0.id == current.id }) { m.append(current) }
         return m
+    }
+
+    private struct Group: Identifiable {
+        let provider: AppState.NormalizeProvider
+        let models: [AppState.LLMChoice]
+        var id: String { provider.rawValue }
+    }
+    /// Models grouped by provider (Ollama, then Gemini), sorted by name within each.
+    private var grouped: [Group] {
+        let providers: [AppState.NormalizeProvider] = [.ollama, .gemini]
+        return providers.compactMap { prov -> Group? in
+            let ms = options.filter { $0.provider == prov }
+                .sorted { $0.model.lowercased() < $1.model.lowercased() }
+            return ms.isEmpty ? nil : Group(provider: prov, models: ms)
+        }
     }
 
     var body: some View {
@@ -38,7 +53,11 @@ struct LLMModelPicker: View {
                         onChange()
                     }
                 )) {
-                    ForEach(options) { Text($0.label).tag($0.id) }
+                    ForEach(grouped) { group in
+                        Section(group.provider == .gemini ? "Gemini" : "Ollama") {
+                            ForEach(group.models) { Text($0.model).tag($0.id) }
+                        }
+                    }
                 }
                 .labelsHidden().frame(maxWidth: 260)
             }
