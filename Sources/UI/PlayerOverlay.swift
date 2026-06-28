@@ -28,11 +28,33 @@ struct PlayerOverlay: View {
             }
 
             if app.showSubtitle, !app.currentChunkText.isEmpty {
-                Text(app.currentChunkText)
-                    .font(.callout)
-                    .lineLimit(4)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 4) {
+                            ForEach(Array(app.currentSentences.enumerated()), id: \.offset) { i, s in
+                                let cur = app.currentSentenceIndex
+                                Text(s)
+                                    .font(.callout)
+                                    .fontWeight(i == cur ? .semibold : .regular)
+                                    .foregroundStyle(i == cur ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+                                    .opacity(i == cur ? 1 : max(0.3, 1 - 0.25 * Double(abs(i - cur))))
+                                    .padding(.horizontal, i == cur ? 6 : 0)
+                                    .padding(.vertical, i == cur ? 3 : 0)
+                                    .background(i == cur ? tint.opacity(0.22) : .clear,
+                                                in: RoundedRectangle(cornerRadius: 6))
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .id(i)
+                            }
+                        }
+                    }
+                    .frame(maxHeight: 92)
+                    .onChange(of: app.currentSentenceIndex) { _, idx in
+                        withAnimation(.easeInOut(duration: 0.25)) { proxy.scrollTo(idx, anchor: .center) }
+                    }
+                    .onChange(of: app.chunkIndex) { _, _ in
+                        proxy.scrollTo(0, anchor: .top)   // new paragraph → back to top
+                    }
+                }
             }
 
             HStack(spacing: 16) {

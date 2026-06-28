@@ -159,10 +159,51 @@ final class AppState: ObservableObject {
     @Published var subtitleTTS = true
     @Published var subtitleExplain = true
     @Published var spokenChunks: [String] = []   // the paragraph texts of the current playback
+    @Published var chunkProgress: Double = 0      // 0…1 within the current paragraph
+    @Published var chunkSeconds: Double = 0       // seconds into the current paragraph
+    @Published var chunkSentenceTimes: [[Double]] = []  // exact sentence start times per chunk (ElevenLabs); [] = estimate
     var showSubtitle: Bool { playbackMode == .tts ? subtitleTTS : subtitleExplain }
     var currentChunkText: String {
         let i = chunkIndex - 1
         return spokenChunks.indices.contains(i) ? spokenChunks[i] : ""
+    }
+    /// Current paragraph split into sentences (for the karaoke-style subtitle).
+    var currentSentences: [String] { TextSplitter.sentences(currentChunkText) }
+    /// Which sentence is being read now. Uses ElevenLabs character timestamps
+    /// (exact) when available, else estimates from intra-paragraph progress
+    /// weighted by sentence length. Audio stays paragraph-chunked either way.
+    var currentSentenceIndex: Int {
+        let s = currentSentences
+        guard s.count > 1 else { return 0 }
+        let ci = chunkIndex - 1
+        if chunkSentenceTimes.indices.contains(ci), chunkSentenceTimes[ci].count == s.count {
+            let t = chunkSeconds
+            var idx = 0
+            for (k, start) in chunkSentenceTimes[ci].enumerated() where t + 0.08 >= start { idx = k }
+            return idx
+        }
+        let lengths = s.map { Double(max(1, $0.count)) }
+        let total = lengths.reduce(0, +)
+        let target = chunkProgress * total
+        var acc = 0.0
+        for (i, len) in lengths.enumerated() { acc += len; if target <= acc { return i } }
+        return s.count - 1
+    }
+
+    /// Map ElevenLabs per-character start times to one start time per sentence
+    /// of `text`. Returns [] if the alignment doesn't line up (→ estimate).
+    private func sentenceStartTimes(text: String, charStarts: [Double]) -> [Double] {
+        let chars = Array(text)
+        guard charStarts.count == chars.count else { return [] }
+        let sentences = TextSplitter.sentences(text)
+        var times: [Double] = []
+        var offset = 0
+        for s in sentences {
+            while offset < chars.count, chars[offset].isWhitespace { offset += 1 }
+            times.append(offset < charStarts.count ? charStarts[offset] : (times.last ?? 0))
+            offset += s.count
+        }
+        return times.count == sentences.count ? times : []
     }
 
     @Published var currentText = ""              // text being spoken (overlay label)
@@ -254,6 +295,8 @@ final class AppState: ObservableObject {
     private func stopTimer() { timer?.invalidate(); timer = nil }
     private func tick() {
         progress = player.progress
+        chunkProgress = player.chunkFraction
+        chunkSeconds = player.chunkSeconds
         chunkIndex = min(max(1, player.finishedCount + 1), max(1, chunkCount))
     }
 
@@ -280,9 +323,10 @@ final class AppState: ObservableObject {
         let chunks = TextSplitter.paragraphs(t, maxChars: maxChunkChars)
         guard !chunks.isEmpty else { return }
 
-        task?.cancel(); player.stop(); stopTimer()
+        cancelActiveWork()                       // supersede any prior command (LLM/synthesis/playback)
         currentText = t                          // overlay label (the spoken text); do NOT touch inputText
         spokenChunks = chunks                    // per-paragraph subtitles
+        chunkSentenceTimes = Array(repeating: [], count: chunks.count)
         progress = 0
         player.start(expected: chunks.count)
         chunkCount = chunks.count; chunkIndex = 0
@@ -296,13 +340,14 @@ final class AppState: ObservableObject {
             var backend: TTSBackend?
             var startedPlaying = false           // ⏳ only before the first audio plays
             do {
-                for chunk in chunks {
+                for (ci, chunk) in chunks.enumerated() {
                     try Task.checkCancellation()
                     let key = CacheStore.key(text: chunk, backend: ident,
                                              voiceId: vid, modelId: mid, settingsHash: sHash)
                     var url: URL?
                     if self.useCache, let u = self.cache.fileURL(forKey: key) {
                         self.cache.touch(key); url = u   // cache hit: skip synthesizing state
+                        self.chunkSentenceTimes[ci] = self.cache.times(forKey: key) ?? []
                     } else {
                         // "synthesizing" only while waiting for the FIRST chunk
                         if !startedPlaying {
@@ -314,12 +359,21 @@ final class AppState: ObservableObject {
                             self.phase = .idle; self.statusText = "키/백엔드 미설정"; return
                         }
                         var data = Data()
-                        for try await c in b.stream(segment: chunk, voice: voice) {
-                            try Task.checkCancellation(); data.append(c)
+                        var times: [Double] = []
+                        if let timed = try await b.synthesizeTimed(segment: chunk, voice: voice) {
+                            try Task.checkCancellation()
+                            data = timed.data
+                            times = self.sentenceStartTimes(text: chunk, charStarts: timed.charStarts)
+                        } else {
+                            for try await c in b.stream(segment: chunk, voice: voice) {
+                                try Task.checkCancellation(); data.append(c)
+                            }
                         }
+                        self.chunkSentenceTimes[ci] = times
                         if self.useCache {
                             let e = self.cache.save(key: key, text: chunk, backend: ident, voiceId: vid,
                                                     voiceName: vName, modelId: mid, ext: ext, data: data)
+                            self.cache.saveTimes(key: key, times)
                             url = self.cache.audioURL(e)
                         } else {
                             let tmp = FileManager.default.temporaryDirectory
@@ -483,19 +537,13 @@ final class AppState: ObservableObject {
     // deltas straight into `explanationText` and finalize (strip + cache) at end.
 
     func generateExplanation(force: Bool = false) {
-        let prior = explainTask
-        explainTask = Task { [weak self] in
-            prior?.cancel(); await prior?.value
-            _ = await self?.runExplain(force: force)
-        }
+        cancelActiveWork()
+        explainTask = Task { [weak self] in _ = await self?.runExplain(force: force) }
     }
 
     func continueExplanation(force: Bool = false) {
-        let prior = explainTask
-        explainTask = Task { [weak self] in
-            prior?.cancel(); await prior?.value
-            _ = await self?.runContinue(force: force)
-        }
+        cancelActiveWork()
+        explainTask = Task { [weak self] in _ = await self?.runContinue(force: force) }
     }
 
     /// Stream a full 해설 (코드→해설) into `explanationText`. Returns the finalized
@@ -560,6 +608,7 @@ final class AppState: ObservableObject {
             statusText = "해설 오류: \(error.localizedDescription)"
             return nil
         }
+        guard !Task.isCancelled else { return nil }   // superseded just as the stream ended
         let out = CodeExplanation.stripMarkdown(acc)
         guard !out.isEmpty else { statusText = "해설 생성 실패 (빈 응답)"; return nil }
         normCache.put(key: nk, script: out)
@@ -704,15 +753,13 @@ final class AppState: ObservableObject {
     /// the one-shot). Code is fed RAW; a failed/cancelled explanation never falls
     /// through to speaking the source. Runs under `explainTask` so 중지 cancels it.
     func explainAndSpeak(_ code: String) {
-        task?.cancel(); player.stop()
+        cancelActiveWork()
         playbackMode = .explain
         codeText = code             // raw — no cleanInput
         explanationText = ""
         phase = .synthesizing
         statusText = "해설 생성 중…"
-        let prior = explainTask
         explainTask = Task { [weak self] in
-            prior?.cancel(); await prior?.value
             guard let self else { return }
             guard let explanation = await self.runExplain(force: false), !Task.isCancelled else {
                 self.phase = .idle
@@ -779,19 +826,15 @@ final class AppState: ObservableObject {
     /// 대본 생성 (sync entry): manage the single `scriptTask`, serialized so a new
     /// run waits for the previous to unwind. `force` ignores the cache.
     func generateScript(force: Bool = false) {
-        let prior = scriptTask
-        scriptTask = Task { [weak self] in
-            prior?.cancel(); await prior?.value
-            _ = await self?.prepareScript(force: force)
-        }
+        cancelActiveWork()
+        scriptTask = Task { [weak self] in _ = await self?.prepareScript(force: force) }
     }
 
     /// "재생성/다듬기" (sync entry): if a 대본 already exists, REFINE it (원본 +
     /// 현재 대본 + 추가 지시 → 미흡한 부분만 개선); otherwise regenerate fresh from 원본.
     func regenerateScript() {
-        let prior = scriptTask
+        cancelActiveWork()
         scriptTask = Task { [weak self] in
-            prior?.cancel(); await prior?.value
             guard let self else { return }
             if self.scriptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 _ = await self.prepareScript(force: true)
@@ -862,32 +905,45 @@ final class AppState: ObservableObject {
 
     /// Services entry: set the source, build the script, then speak it.
     func speakSelected(_ text: String) {
-        task?.cancel(); player.stop()
+        cancelActiveWork()
         playbackMode = .tts
         inputText = TextSplitter.cleanInput(text)
         scriptText = ""
         phase = .synthesizing
         statusText = normalizeEnabled ? "대본 생성 중…" : "합성 중…"
-        Task { [weak self] in
+        scriptTask = Task { [weak self] in
             guard let self else { return }
             let script = await self.prepareScript()
+            guard !Task.isCancelled else { return }
             self.synthesize(script)
         }
     }
 
     func replay(_ e: HistoryEntry) {
-        task?.cancel(); player.stop()
+        cancelActiveWork()
         playbackMode = .tts
         guard let url = cache.fileURL(forKey: e.id) else { statusText = "오디오 파일 없음"; return }
         cache.touch(e.id); historyRevision += 1
         inputText = e.text; currentText = e.text; spokenChunks = [e.text]
+        chunkSentenceTimes = [cache.times(forKey: e.id) ?? []]; chunkSeconds = 0
         chunkCount = 1; chunkIndex = 1; progress = 0
         player.start(expected: 1)
         player.enqueue(url)
         phase = .playing; statusText = "캐시에서 재생"; startTimer()
     }
 
-    func stop() { explainTask?.cancel(); scriptTask?.cancel(); task?.cancel(); player.stop(); finish() }
+    func stop() { cancelActiveWork(); finish() }
+
+    /// Cancel every in-flight command (LLM streams + synthesis + playback) so a
+    /// new command supersedes prior ones IMMEDIATELY — rapid or mis-clicked
+    /// TTS/해설 commands don't queue up and run in sequence; only the last runs.
+    private func cancelActiveWork() {
+        explainTask?.cancel(); explainTask = nil
+        scriptTask?.cancel(); scriptTask = nil
+        task?.cancel(); task = nil
+        player.stop()
+        stopTimer()
+    }
 
     // HUD transport: paragraph navigation.
     var canSkipNext: Bool { isBusy && player.canNext }

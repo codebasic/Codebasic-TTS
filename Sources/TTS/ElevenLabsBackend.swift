@@ -68,6 +68,36 @@ struct ElevenLabsBackend: TTSBackend {
             continuation.onTermination = { _ in task.cancel() }
         }
     }
+
+    /// `/with-timestamps`: returns the full MP3 plus per-character start times
+    /// (seconds) for exact subtitle sync. One JSON response (no streaming) — the
+    /// streaming path already buffers the whole chunk, so latency is unchanged.
+    func synthesizeTimed(segment: String, voice: VoiceConfig) async throws -> (data: Data, charStarts: [Double])? {
+        let url = URL(string:
+            "https://api.elevenlabs.io/v1/text-to-speech/\(voice.voiceId)/with-timestamps"
+            + "?output_format=mp3_44100_128")!
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue(apiKey, forHTTPHeaderField: "xi-api-key")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        var body: [String: Any] = ["text": segment, "model_id": voice.modelId]
+        if let s = settings { body["voice_settings"] = s.json }
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let (data, response) = try await URLSession.shared.data(for: req)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+            let msg = String(data: data, encoding: .utf8) ?? "<binary>"
+            throw NSError(domain: "ElevenLabs", code: code, userInfo: [NSLocalizedDescriptionKey: msg])
+        }
+        guard let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let b64 = obj["audio_base64"] as? String, let audio = Data(base64Encoded: b64) else {
+            return nil
+        }
+        let align = obj["alignment"] as? [String: Any]
+        let starts = align?["character_start_times_seconds"] as? [Double] ?? []
+        return (audio, starts)
+    }
 }
 
 /// Stateless ElevenLabs API helpers used by the UI.

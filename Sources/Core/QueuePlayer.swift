@@ -22,6 +22,11 @@ final class QueuePlayer {
     var expectedCount: Int { expected }
     var canNext: Bool { playIndex + 1 < urls.count }   // a synthesized next chunk exists
     var canPrev: Bool { playIndex > 0 }
+    var chunkFraction: Double { currentItemFraction }  // 0…1 within the current paragraph
+    var chunkSeconds: Double {                          // playback position within the paragraph
+        guard let t = player.currentItem?.currentTime().seconds, t.isFinite else { return 0 }
+        return t
+    }
 
     /// Begin a new sequence of `expected` chunks.
     func start(expected: Int) {

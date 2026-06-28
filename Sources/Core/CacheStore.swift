@@ -77,6 +77,19 @@ final class CacheStore {
 
     func audioURL(_ e: HistoryEntry) -> URL { Self.dir.appendingPathComponent(e.audioFile) }
 
+    // MARK: - Subtitle timing sidecar (sentence start times per cached clip)
+
+    private func timesURL(_ key: String) -> URL { Self.dir.appendingPathComponent("\(key).stimes.json") }
+
+    func saveTimes(key: String, _ times: [Double]) {
+        guard !times.isEmpty, let d = try? JSONEncoder().encode(times) else { return }
+        try? d.write(to: timesURL(key))
+    }
+    func times(forKey key: String) -> [Double]? {
+        guard let d = try? Data(contentsOf: timesURL(key)) else { return nil }
+        return try? JSONDecoder().decode([Double].self, from: d)
+    }
+
     // MARK: - Synthesis cache (hot path: indexed key lookup)
 
     func entry(forKey key: String) -> HistoryEntry? {

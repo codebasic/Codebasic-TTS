@@ -22,6 +22,15 @@ protocol TTSBackend {
     /// starts playback on the first chunk and simultaneously persists the
     /// accumulating bytes to the cache file.
     func stream(segment: String, voice: VoiceConfig) -> AsyncThrowingStream<Data, Error>
+
+    /// Synthesize a segment returning the audio plus per-character start times
+    /// (seconds), for exact subtitle sync. Returns nil if the engine doesn't
+    /// provide timing (caller falls back to `stream` + estimation).
+    func synthesizeTimed(segment: String, voice: VoiceConfig) async throws -> (data: Data, charStarts: [Double])?
+}
+
+extension TTSBackend {
+    func synthesizeTimed(segment: String, voice: VoiceConfig) async throws -> (data: Data, charStarts: [Double])? { nil }
 }
 
 /// M1 placeholder: produces no audio, just proves the protocol compiles and the
