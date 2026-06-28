@@ -39,6 +39,8 @@ struct SettingsView: View {
         .onChange(of: app.ollamaModel) { _, _ in app.saveSettings() }
         .onChange(of: app.ollamaURL) { _, _ in app.saveSettings() }
         .onChange(of: app.maxChunkChars) { _, _ in app.saveSettings() }
+        .onChange(of: app.subtitleTTS) { _, _ in app.saveSettings() }
+        .onChange(of: app.subtitleExplain) { _, _ in app.saveSettings() }
         .onChange(of: app.voiceId) { _, newID in
             if let v = app.voices.first(where: { $0.id == newID }) { app.voiceName = v.name }
             app.saveSettings()
@@ -126,6 +128,13 @@ struct SettingsView: View {
                     .frame(width: 80).multilineTextAlignment(.trailing)
             }
             Text("긴 대본은 이 글자수 기준으로 문단을 나눠 합성·캐시·재생합니다 (오디오 분할 단위).")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+
+        Section("HUD 자막") {
+            Toggle("TTS 재생 시 자막 표시", isOn: $app.subtitleTTS)
+            Toggle("해설 재생 시 자막 표시", isOn: $app.subtitleExplain)
+            Text("재생 중 떠 있는 HUD에 현재 읽는 문단을 자막으로 보여줍니다.")
                 .font(.caption).foregroundStyle(.secondary)
         }
 

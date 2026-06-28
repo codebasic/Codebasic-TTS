@@ -155,6 +155,16 @@ final class AppState: ObservableObject {
     }
     @Published var playbackMode: PlaybackMode = .tts
 
+    // HUD subtitles: show the paragraph being read (toggle per mode).
+    @Published var subtitleTTS = true
+    @Published var subtitleExplain = true
+    @Published var spokenChunks: [String] = []   // the paragraph texts of the current playback
+    var showSubtitle: Bool { playbackMode == .tts ? subtitleTTS : subtitleExplain }
+    var currentChunkText: String {
+        let i = chunkIndex - 1
+        return spokenChunks.indices.contains(i) ? spokenChunks[i] : ""
+    }
+
     @Published var currentText = ""              // text being spoken (overlay label)
     @Published var inputText = ""                // original (top panel / source text)
     @Published var scriptText = ""               // TTS-friendly script actually sent to the engine (bottom panel)
@@ -272,6 +282,7 @@ final class AppState: ObservableObject {
 
         task?.cancel(); player.stop(); stopTimer()
         currentText = t                          // overlay label (the spoken text); do NOT touch inputText
+        spokenChunks = chunks                    // per-paragraph subtitles
         progress = 0
         player.start(expected: chunks.count)
         chunkCount = chunks.count; chunkIndex = 0
@@ -869,7 +880,7 @@ final class AppState: ObservableObject {
         playbackMode = .tts
         guard let url = cache.fileURL(forKey: e.id) else { statusText = "오디오 파일 없음"; return }
         cache.touch(e.id); historyRevision += 1
-        inputText = e.text; currentText = e.text
+        inputText = e.text; currentText = e.text; spokenChunks = [e.text]
         chunkCount = 1; chunkIndex = 1; progress = 0
         player.start(expected: 1)
         player.enqueue(url)
@@ -968,6 +979,7 @@ final class AppState: ObservableObject {
             "voiceId": voiceId, "voiceName": voiceName, "modelId": modelId,
             "backend": backendKind.rawValue, "useCache": useCache, "localBaseURL": localBaseURL,
             "maxChunkChars": maxChunkChars,
+            "subtitleTTS": subtitleTTS, "subtitleExplain": subtitleExplain,
             "normalize": normalizeEnabled, "ollamaModel": ollamaModel, "ollamaURL": ollamaURL,
             "normalizeProvider": normalizeProvider.rawValue, "geminiModel": geminiModel,
             "explainProvider": explainProvider.rawValue, "scriptProvider": scriptProvider.rawValue,
@@ -1003,6 +1015,8 @@ final class AppState: ObservableObject {
         useCache = o["useCache"] as? Bool ?? useCache
         localBaseURL = o["localBaseURL"] as? String ?? localBaseURL
         maxChunkChars = o["maxChunkChars"] as? Int ?? maxChunkChars
+        subtitleTTS = o["subtitleTTS"] as? Bool ?? subtitleTTS
+        subtitleExplain = o["subtitleExplain"] as? Bool ?? subtitleExplain
         normalizeEnabled = o["normalize"] as? Bool ?? normalizeEnabled
         ollamaModel = o["ollamaModel"] as? String ?? ollamaModel
         ollamaURL = o["ollamaURL"] as? String ?? ollamaURL

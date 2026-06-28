@@ -27,6 +27,14 @@ struct PlayerOverlay: View {
                 }
             }
 
+            if app.showSubtitle, !app.currentChunkText.isEmpty {
+                Text(app.currentChunkText)
+                    .font(.callout)
+                    .lineLimit(4)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
             HStack(spacing: 16) {
                 Button { app.skipPrev() } label: { Image(systemName: "backward.fill") }
                     .disabled(!app.canSkipPrev)
