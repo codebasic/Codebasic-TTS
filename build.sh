@@ -32,7 +32,8 @@ build() {
   swiftc -O \
     -o "$MACOS_DIR/$APP_NAME" \
     $(find "$HERE/Sources" -name '*.swift') \
-    -framework AppKit -framework SwiftUI -framework AVFoundation
+    -framework AppKit -framework SwiftUI -framework AVFoundation \
+    -lsqlite3
 
   cp "$HERE/Resources/Info.plist" "$APP_DIR/Contents/Info.plist"
   [ -f "$HERE/Resources/AppIcon.icns" ] && cp "$HERE/Resources/AppIcon.icns" "$RES_DIR/AppIcon.icns"

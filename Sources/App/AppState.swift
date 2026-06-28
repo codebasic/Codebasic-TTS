@@ -154,7 +154,7 @@ final class AppState: ObservableObject {
     @Published var chunkCount = 0
     @Published var statusText = ""
     @Published var maxChunkChars = TextSplitter.defaultMaxChars
-    @Published private(set) var history: [HistoryEntry] = []
+    @Published private(set) var historyRevision = 0       // bumped on any history change → view reloads
     @Published private(set) var backlog: [BacklogEntry] = []
 
     var isBusy: Bool { phase != .idle }
@@ -170,7 +170,6 @@ final class AppState: ObservableObject {
 
     init() {
         loadSettings()
-        history = cache.entries
         backlog = backlogStore.entries
         player.onFinish = { [weak self] in self?.finish() }
     }
@@ -317,7 +316,7 @@ final class AppState: ObservableObject {
                         }
                     }
                 }
-                self.history = self.cache.entries
+                self.historyRevision += 1
             } catch is CancellationError {
                 self.finish()
             } catch {
@@ -855,7 +854,7 @@ final class AppState: ObservableObject {
     func replay(_ e: HistoryEntry) {
         task?.cancel(); player.stop()
         guard let url = cache.fileURL(forKey: e.id) else { statusText = "오디오 파일 없음"; return }
-        cache.touch(e.id); history = cache.entries
+        cache.touch(e.id); historyRevision += 1
         inputText = e.text; currentText = e.text
         chunkCount = 1; chunkIndex = 1; progress = 0
         player.start(expected: 1)
@@ -865,8 +864,14 @@ final class AppState: ObservableObject {
 
     func stop() { explainTask?.cancel(); scriptTask?.cancel(); task?.cancel(); player.stop(); finish() }
 
-    func deleteHistory(_ id: String) { cache.delete(id); history = cache.entries }
-    func clearHistory() { cache.clear(); history = cache.entries }
+    func deleteHistory(_ id: String) { cache.delete(id); historyRevision += 1 }
+    func clearHistory() { cache.clear(); historyRevision += 1 }
+
+    /// History view queries (search / sort / paginate via SQLite).
+    func historyPage(search: String, sort: HistorySort, limit: Int, offset: Int) -> [HistoryEntry] {
+        cache.page(search: search, sort: sort, limit: limit, offset: offset)
+    }
+    func historyTotal(search: String) -> Int { cache.total(search: search) }
 
     // MARK: - Connection
 
