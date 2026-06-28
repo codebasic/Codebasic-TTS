@@ -1059,6 +1059,12 @@ final class AppState: ObservableObject {
         hudPositions[screenID] = offset
     }
 
+    /// Flip the subtitle for the current playback mode (TTS vs 해설) and persist.
+    func toggleSubtitle() {
+        if playbackMode == .tts { subtitleTTS.toggle() } else { subtitleExplain.toggle() }
+        saveSettings()
+    }
+
     func adjustSubtitleFont(by delta: Double) {
         let v = (subtitleFontSize + delta).rounded()
         subtitleFontSize = min(max(v, Self.subtitleFontRange.lowerBound), Self.subtitleFontRange.upperBound)

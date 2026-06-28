@@ -33,15 +33,23 @@ struct PlayerOverlay: View {
                 if app.phase == .synthesizing {
                     ProgressView().controlSize(.small)
                     Text("합성 중…").font(.caption).foregroundStyle(.secondary)
-                } else if app.showSubtitle {
-                    HStack(spacing: 2) {
-                        Button { app.adjustSubtitleFont(by: -2) } label: { Image(systemName: "minus") }
-                            .disabled(app.subtitleFontSize <= AppState.subtitleFontRange.lowerBound)
-                            .help("자막 작게")
-                        Image(systemName: "textformat.size").foregroundStyle(.secondary)
-                        Button { app.adjustSubtitleFont(by: 2) } label: { Image(systemName: "plus") }
-                            .disabled(app.subtitleFontSize >= AppState.subtitleFontRange.upperBound)
-                            .help("자막 크게")
+                } else {
+                    HStack(spacing: 10) {
+                        Button { app.toggleSubtitle() } label: {
+                            Image(systemName: app.showSubtitle ? "captions.bubble.fill" : "captions.bubble")
+                        }
+                        .help(app.showSubtitle ? "자막 끄기" : "자막 켜기")
+                        if app.showSubtitle {
+                            HStack(spacing: 2) {
+                                Button { app.adjustSubtitleFont(by: -2) } label: { Image(systemName: "minus") }
+                                    .disabled(app.subtitleFontSize <= AppState.subtitleFontRange.lowerBound)
+                                    .help("자막 작게")
+                                Image(systemName: "textformat.size").foregroundStyle(.secondary)
+                                Button { app.adjustSubtitleFont(by: 2) } label: { Image(systemName: "plus") }
+                                    .disabled(app.subtitleFontSize >= AppState.subtitleFontRange.upperBound)
+                                    .help("자막 크게")
+                            }
+                        }
                     }
                     .buttonStyle(.plain)
                     .font(.caption.weight(.semibold))
@@ -78,7 +86,11 @@ struct PlayerOverlay: View {
                 }
             }
 
-            HStack(spacing: 16) {
+            // Progress spans the width; transport stays a fixed-size, centered
+            // cluster so it doesn't grow or spread out as the subtitle/panel widen.
+            ProgressView(value: app.progress).progressViewStyle(.linear)
+
+            HStack(spacing: 22) {
                 Button { app.skipPrev() } label: { Image(systemName: "backward.fill") }
                     .disabled(!app.canSkipPrev)
                 Button { app.togglePause() } label: {
@@ -89,12 +101,10 @@ struct PlayerOverlay: View {
                 .help(app.phase == .paused ? "재개" : "일시정지")
                 Button { app.skipNext() } label: { Image(systemName: "forward.fill") }
                     .disabled(!app.canSkipNext)
-
-                ProgressView(value: app.progress).progressViewStyle(.linear)
-
                 Button { app.stop() } label: { Image(systemName: "stop.fill") }
                     .foregroundStyle(.secondary).help("중지")
             }
+            .frame(maxWidth: .infinity)   // center the cluster in the (possibly wide) panel
             .buttonStyle(.plain)
             .font(.system(size: 14, weight: .semibold))
         }
