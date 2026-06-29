@@ -114,6 +114,12 @@ case "${1:-install}" in
   logs)
     exec log stream --predicate "subsystem == \"$BUNDLE_ID\"" --level debug
     ;;
+  test)
+    echo "==> Compiling + running unit tests"
+    mkdir -p "$BUILD_DIR"
+    swiftc -O "$HERE/Sources/Core/TextSplitter.swift" "$HERE/Sources/Core/CrawlLayout.swift" \
+      "$HERE/Tests/main.swift" -o "$BUILD_DIR/tests" && "$BUILD_DIR/tests"
+    ;;
   clean) rm -rf "$BUILD_DIR"; echo "cleaned" ;;
   install|"") build; install_and_register ;;
   *) echo "unknown command: $1"; exit 2 ;;

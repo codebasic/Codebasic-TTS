@@ -117,9 +117,7 @@ final class OverlayWindow {
 
     /// Keep the whole panel within the screen's visible frame.
     private func clamp(_ origin: CGPoint, size: NSSize, in vf: NSRect) -> CGPoint {
-        let x = min(max(origin.x, vf.minX), max(vf.minX, vf.maxX - size.width))
-        let y = min(max(origin.y, vf.minY), max(vf.minY, vf.maxY - size.height))
-        return CGPoint(x: x, y: y)
+        CrawlLayout.clampOrigin(origin, size: size, in: vf)
     }
 
     /// A genuine user drag ended — remember this spot for whichever screen the

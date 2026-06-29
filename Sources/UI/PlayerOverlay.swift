@@ -22,7 +22,8 @@ struct PlayerOverlay: View {
     /// reading line, so the text rises smoothly in step with playback and the
     /// current sentence stays centered.
     private func crawlOffset(progress: Double, contentH: CGFloat, viewportH: CGFloat) -> CGFloat {
-        readingAnchor * viewportH - CGFloat(progress) * contentH
+        CrawlLayout.crawlOffset(progress: progress, contentHeight: contentH,
+                                viewportHeight: viewportH, readingAnchor: readingAnchor)
     }
 
     /// Centered reading line → fade both ends: upcoming text fades in at the
