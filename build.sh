@@ -44,8 +44,12 @@ build() {
   # the global hotkeys) survive rebuilds. Ad-hoc signing rebinds the designated
   # requirement to the cdhash every build, which silently invalidates the grant.
   # Create the cert once (see README "Stable signing"); falls back to ad-hoc.
+  # Note: no -v — a self-signed local cert is untrusted (CSSMERR_TP_NOT_TRUSTED),
+  # so it's excluded by -v, but codesign still signs with it and the resulting
+  # designated requirement (cert-leaf hash) is stable across rebuilds, which is
+  # all TCC needs.
   SIGN_ID="${CODESIGN_IDENTITY:-Codebasic TTS Local}"
-  if security find-identity -v -p codesigning 2>/dev/null | grep -qF "$SIGN_ID"; then
+  if security find-identity -p codesigning 2>/dev/null | grep -qF "$SIGN_ID"; then
     echo "==> Code signing with stable identity: $SIGN_ID"
     codesign --force --deep --sign "$SIGN_ID" "$APP_DIR" >/dev/null 2>&1 || \
       echo "    (codesign with '$SIGN_ID' failed)"

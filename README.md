@@ -34,23 +34,48 @@ invalidates it — the toggle still shows *on* in System Settings, but pressing 
 just re-opens the permission prompt. Sign with a **stable self-signed identity** to fix this
 once and for all.
 
-One-time cert creation (Keychain Access → Certificate Assistant → **Create a Certificate…**):
-
-- **Name:** `Codebasic TTS Local`
-- **Identity Type:** Self-Signed Root
-- **Certificate Type:** Code Signing
-- Create (it lands in your *login* keychain).
-
-Then:
+One-time cert creation (scripted — creates `Codebasic TTS Local` in the login keychain):
 
 ```bash
-./build.sh                                              # now signs with the cert (see its log line)
-tccutil reset Accessibility com.seongjoo.SelectedTextTTS  # clear the stale grant once
+TMP="$(mktemp -d)"
+cat > "$TMP/ext.cnf" <<'EOF'
+[ req ]
+distinguished_name = dn
+x509_extensions = ext
+prompt = no
+[ dn ]
+CN = Codebasic TTS Local
+[ ext ]
+basicConstraints = critical,CA:false
+keyUsage = critical,digitalSignature
+extendedKeyUsage = critical,codeSigning
+EOF
+openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
+  -keyout "$TMP/key.pem" -out "$TMP/cert.pem" -config "$TMP/ext.cnf"
+# NOTE: a non-empty -passout is required, else Apple's `security import` fails MAC verification
+openssl pkcs12 -export -inkey "$TMP/key.pem" -in "$TMP/cert.pem" \
+  -out "$TMP/id.p12" -passout pass:codebasic -name "Codebasic TTS Local"
+security import "$TMP/id.p12" -k ~/Library/Keychains/login.keychain-db \
+  -P codebasic -A -T /usr/bin/codesign
+rm -rf "$TMP"
+```
+
+(Alternatively, Keychain Access → Certificate Assistant → **Create a Certificate…**,
+Name `Codebasic TTS Local`, Self-Signed Root, Code Signing.)
+
+The cert is *untrusted* (`CSSMERR_TP_NOT_TRUSTED`) — that's fine: `codesign` still signs with
+it and the designated requirement becomes a stable `certificate leaf = H"…"`, which is all TCC
+needs. `build.sh` detects it with `security find-identity -p codesigning` (no `-v`, since `-v`
+hides untrusted identities). Then grant once:
+
+```bash
+./build.sh                                                # signs with the cert (see its log line)
+tccutil reset Accessibility com.seongjoo.SelectedTextTTS  # clear the old ad-hoc grant once
 # press ⌃⌥⌘R → grant in System Settings → Privacy & Security → Accessibility
 ```
 
-After this, rebuilds keep the permission. `build.sh` auto-detects the identity by name; override
-with `CODESIGN_IDENTITY="…" ./build.sh` if you named it differently.
+After this, rebuilds keep the permission. Override the identity name with
+`CODESIGN_IDENTITY="…" ./build.sh` if you named it differently.
 
 ## Smoke test (M1)
 
