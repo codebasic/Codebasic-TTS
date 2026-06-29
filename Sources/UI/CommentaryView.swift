@@ -173,21 +173,21 @@ struct CommentaryView: View {
                 .overlay(border)
 
             HStack(spacing: 10) {
-                Button { app.sendExplanationToGenerate() } label: {
-                    Label("TTS로 보내기", systemImage: "arrow.right.circle.fill")
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(explanationEmpty)
-                .help("해설을 TTS 탭으로 보내 음성 대본(정규화)을 만들고 재생합니다")
-
                 Button { app.speakExplanation() } label: { Label("전체 재생", systemImage: "play.fill") }
+                    .buttonStyle(.borderedProminent)
                     .disabled(explanationEmpty || app.isBusy || app.explaining)
-                    .help("해설을 그대로 읽습니다 (음성 대본 정규화는 TTS 탭)")
+                    .help("해설을 재생합니다. 자막은 이 해설 그대로, 음성은 내부 대본(설정 → 음성 대본 정규화가 켜져 있으면 정규화)으로 읽습니다")
                 Button { app.speakContinue() } label: { Label("이어서 읽기", systemImage: "forward.end.fill") }
                     .disabled(!app.hasLastSegment || app.explaining)
                     .help("마지막에 추가된 해설을 이어서 읽습니다 (재생 중이면 멈추고 그 부분을 재생)")
                 Button { app.stop() } label: { Label("중지", systemImage: "stop.fill") }
                     .disabled(!app.isBusy && !app.explaining)
+
+                Button { app.sendExplanationToGenerate() } label: {
+                    Label("TTS로 보내기", systemImage: "arrow.right.circle")
+                }
+                .disabled(explanationEmpty)
+                .help("해설을 TTS 탭으로 보내 음성 대본을 직접 보고 다듬은 뒤 재생합니다 (고급)")
                 if app.isBusy { ProgressView().controlSize(.small) }
                 Text(app.statusText).font(.callout).foregroundStyle(.secondary)
                 Spacer()

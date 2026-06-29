@@ -786,8 +786,16 @@ final class AppState: ObservableObject {
     func speakContinue() {
         let seg = lastSegment.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !seg.isEmpty else { return }
+        cancelActiveWork()
         playbackMode = .explain
-        synthesize(TextSplitter.cleanInput(seg))   // read the latest 해설 segment directly
+        phase = .synthesizing
+        let reading = TextSplitter.cleanInput(seg)
+        scriptTask = Task { [weak self] in
+            guard let self else { return }
+            let tts = await self.ttsScript(for: reading)   // 음성용 대본은 내부에서만
+            guard !Task.isCancelled else { return }
+            self.synthesize(tts, displayText: reading)     // 자막은 읽기 좋은 해설
+        }
     }
 
     /// 해설 탭 → 생성 탭: hand the commentary to the script pipeline as its source.
@@ -799,20 +807,51 @@ final class AppState: ObservableObject {
         selectedTab = 0         // switch to TTS
     }
 
-    /// 해설 탭 "전체 재생": read the 해설 directly (no normalize pass). The 음성 대본
-    /// (정규화된 TTS 대본) lives in the TTS 탭 — send the 해설 there with "TTS로
-    /// 보내기" when you want that. Does not touch the TTS 탭 panels.
+    /// 해설 탭 "전체 재생": speak the 해설. The 해설 itself is reading-friendly
+    /// (shown as the subtitle); the spoken audio uses an internal TTS 대본
+    /// normalized from it (when 대본 정규화 is on). Does not touch the TTS 탭 panels.
     func speakExplanation() {
         let text = TextSplitter.cleanInput(explanationText)
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        cancelActiveWork()
         playbackMode = .explain
-        synthesize(text)
+        phase = .synthesizing
+        scriptTask = Task { [weak self] in
+            guard let self else { return }
+            let tts = await self.ttsScript(for: text)   // 음성용 대본은 내부에서만
+            guard !Task.isCancelled else { return }
+            self.synthesize(tts, displayText: text)     // 자막은 읽기 좋은 해설
+        }
     }
 
     /// Services entry ("코드 해설"): stream the explanation of the selected code,
     /// then read the 해설 directly (음성 대본 is an opt-in panel step, not used in
     /// the one-shot). Code is fed RAW; a failed/cancelled explanation never falls
     /// through to speaking the source. Runs under `explainTask` so 중지 cancels it.
+    /// Build the speech 대본 for already-readable prose (e.g. a 해설): when 대본
+    /// 정규화 is enabled, normalize it for TTS (spell numbers/symbols); else read
+    /// the prose as-is. Cached by content. On cancel/error, falls back to `text`.
+    private func ttsScript(for text: String) async -> String {
+        let src = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let instruction = scriptInstruction()
+        guard normalizeEnabled, !src.isEmpty,
+              let norm = makeNormalizer(instruction: instruction) else { return text }
+        let nk = NormalizationCache.key(text: src, provider: scriptProvider.rawValue,
+                                        model: scriptModel, prompt: instruction)
+        if let cached = normCache.script(forKey: nk) { return cached }
+        normalizing = true
+        defer { normalizing = false }
+        statusText = "음성 대본 준비 중…"
+        var acc = ""
+        do {
+            for try await delta in norm.normalizeStream(src) { try Task.checkCancellation(); acc += delta }
+        } catch { return text }   // cancel/error → read the prose as-is
+        let out = acc.trimmingCharacters(in: .whitespacesAndNewlines)
+        let final = out.isEmpty ? text : out
+        normCache.put(key: nk, script: final)
+        return final
+    }
+
     func explainAndSpeak(_ code: String) {
         cancelActiveWork()
         playbackMode = .explain
@@ -827,7 +866,10 @@ final class AppState: ObservableObject {
                 if self.statusText.isEmpty { self.statusText = "해설 생성 실패" }
                 return                  // do NOT speak raw code
             }
-            self.synthesize(TextSplitter.cleanInput(explanation))
+            let reading = TextSplitter.cleanInput(explanation)   // 자막: 읽기 좋은 해설
+            let tts = await self.ttsScript(for: reading)         // 음성: 내부 대본(정규화 토글 따름)
+            guard !Task.isCancelled else { return }
+            self.synthesize(tts, displayText: reading)
         }
     }
 
