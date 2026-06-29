@@ -11,18 +11,22 @@ enum TextSplitter {
 
     /// Split a paragraph into sentences for the karaoke-style subtitle. Breaks on
     /// sentence terminators (. ! ? … and newlines); doesn't split a "." that sits
-    /// between digits (e.g. an unspelled decimal). Used for display only — audio
-    /// stays chunked by paragraph.
+    /// inside a token (np.where, file.txt, self.x, a decimal like 0.5). Used for
+    /// display only — audio stays chunked by paragraph.
     static func sentences(_ text: String) -> [String] {
         let chars = Array(text)
         var out: [String] = []
         var cur = ""
         for (i, ch) in chars.enumerated() {
             cur.append(ch)
-            let isTerminator = ch == "." || ch == "!" || ch == "?" || ch == "…" || ch == "\n"
-            let betweenDigits = ch == "." && i > 0 && i + 1 < chars.count
-                && chars[i - 1].isNumber && chars[i + 1].isNumber
-            if isTerminator && !betweenDigits {
+            // A "." immediately followed by a letter or digit is inside a token
+            // (np.where, file.txt, 0.5), not a sentence end. Real Korean sentence
+            // periods are followed by space / newline / end / closing punctuation.
+            let dotInsideToken = ch == "." && i + 1 < chars.count
+                && (chars[i + 1].isLetter || chars[i + 1].isNumber)
+            let isTerminator = (ch == "." || ch == "!" || ch == "?" || ch == "…" || ch == "\n")
+                && !dotInsideToken
+            if isTerminator {
                 let t = cur.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !t.isEmpty { out.append(t) }
                 cur = ""
