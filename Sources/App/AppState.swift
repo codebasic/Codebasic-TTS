@@ -79,6 +79,11 @@ final class AppState: ObservableObject {
     @Published var explaining = false
     @Published var explainPrompt = CodeExplanation.defaultInstruction
     @Published var explainHint = ""              // 해설 단계 (코드→해설) 추가 지시
+    @Published var explainAutoPlay = true        // 단축키/Services 해설: 생성 직후 바로 재생(끄면 검토 후 수동 재생)
+
+    /// Set by AppDelegate: bring the management window forward so a review-only
+    /// 해설 (explainAutoPlay == false) is visible to read/check before playing.
+    var onRequestReview: (() -> Void)?
     @Published var explainGeminiModel = "gemini-2.0-flash"   // 해설용
     @Published var explainOllamaModel = "gemma4:31b-cloud"   // 해설용
     @Published var explainTemperature: Double = 0.4          // 해설 LLM 생성 매개변수
@@ -866,6 +871,12 @@ final class AppState: ObservableObject {
                 if self.statusText.isEmpty { self.statusText = "해설 생성 실패" }
                 return                  // do NOT speak raw code
             }
+            guard self.explainAutoPlay else {       // 검토 모드: 생성만 하고 창을 띄워 보여줌
+                self.phase = .idle
+                self.statusText = "해설 생성 완료 — 검토 후 ‘전체 재생’"
+                self.onRequestReview?()
+                return
+            }
             let reading = TextSplitter.cleanInput(explanation)   // 자막: 읽기 좋은 해설
             let tts = await self.ttsScript(for: reading)         // 음성: 내부 대본(정규화 토글 따름)
             guard !Task.isCancelled else { return }
@@ -1189,6 +1200,7 @@ final class AppState: ObservableObject {
             "explainVisionGeminiModel": explainVisionGeminiModel,
             "explainVisionOllamaModel": explainVisionOllamaModel,
             "explainTemperature": explainTemperature, "scriptTemperature": scriptTemperature,
+            "explainAutoPlay": explainAutoPlay,
             "stability": voiceSettings.stability, "similarity": voiceSettings.similarityBoost,
             "style": voiceSettings.style, "speakerBoost": voiceSettings.useSpeakerBoost,
         ]
@@ -1243,6 +1255,7 @@ final class AppState: ObservableObject {
         explainVisionGeminiModel = o["explainVisionGeminiModel"] as? String ?? explainVisionGeminiModel
         explainVisionOllamaModel = o["explainVisionOllamaModel"] as? String ?? explainVisionOllamaModel
         explainTemperature = o["explainTemperature"] as? Double ?? explainTemperature
+        explainAutoPlay = o["explainAutoPlay"] as? Bool ?? explainAutoPlay
         scriptTemperature = o["scriptTemperature"] as? Double ?? scriptTemperature
         voiceSettings.stability = o["stability"] as? Double ?? voiceSettings.stability
         voiceSettings.similarityBoost = o["similarity"] as? Double ?? voiceSettings.similarityBoost

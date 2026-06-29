@@ -23,6 +23,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         registerServices()
         registerHotKeys()
         observeState()
+
+        // Review-only 해설 (auto-play off): surface the window so it can be checked.
+        appState.onRequestReview = { [weak self] in
+            self?.mainWindow.show()
+            NSApp.activate(ignoringOtherApps: true)
+        }
         if appState.keyPresent { appState.refreshVoices() }
         mainWindow.show()                       // open the management window on launch
 

@@ -130,6 +130,11 @@ struct CommentaryView: View {
                     Text("해설 생성 중…").font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
+                Toggle("생성 후 바로 재생", isOn: $app.explainAutoPlay)
+                    .toggleStyle(.checkbox)
+                    .controlSize(.small)
+                    .help("단축키(⌃⌥⌘E)·Services ‘코드 해설’로 만든 해설을 바로 읽습니다. 끄면 생성만 하고 창을 띄워, 검토 후 ‘전체 재생’으로 읽습니다.")
+                    .onChange(of: app.explainAutoPlay) { _, _ in app.saveSettings() }
             }
             HStack(spacing: 16) {
                 LLMModelPicker(label: "해설 모델",
