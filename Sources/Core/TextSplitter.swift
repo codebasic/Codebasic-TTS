@@ -37,6 +37,20 @@ enum TextSplitter {
         return out.isEmpty ? [text] : out
     }
 
+    /// Index of the sentence at `fraction` (0…1) through `sentences`, weighted by
+    /// length. Used to map overall audio progress onto the subtitle text — which
+    /// is the human-readable source (원본/해설), independent of how the spoken 대본
+    /// chunked, so the subtitle never falls back to the 대본.
+    static func sentenceIndex(at fraction: Double, in sentences: [String]) -> Int {
+        guard sentences.count > 1 else { return 0 }
+        let lens = sentences.map { Double(max(1, $0.count)) }
+        let total = lens.reduce(0, +)
+        let target = Swift.max(0, Swift.min(1, fraction)) * total
+        var acc = 0.0
+        for (i, len) in lens.enumerated() { acc += len; if target <= acc { return i } }
+        return sentences.count - 1
+    }
+
     static func paragraphs(_ text: String, maxChars: Int = defaultMaxChars) -> [String] {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [] }

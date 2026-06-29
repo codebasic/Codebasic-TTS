@@ -172,7 +172,8 @@ final class AppState: ObservableObject {
     // it; its position is remembered per screen so each monitor keeps its own spot.
     var hudTargetScreenID: CGDirectDisplayID?            // screen the current command targets
     var hudPositions: [CGDirectDisplayID: CGPoint] = [:] // bottom-left offset within each screen's visibleFrame
-    @Published var spokenChunks: [String] = []   // the paragraph texts of the current playback
+    @Published var spokenChunks: [String] = []   // the spoken (대본) paragraph chunks — drives crawlFraction
+    @Published var subtitleText = ""             // the human-readable subtitle source (원본/해설), shown as the crawl
     @Published var chunkProgress: Double = 0      // 0…1 within the current paragraph
     @Published var chunkSeconds: Double = 0       // seconds into the current paragraph
     @Published var chunkSentenceTimes: [[Double]] = []  // exact sentence start times per chunk (ElevenLabs); [] = estimate
@@ -206,35 +207,29 @@ final class AppState: ObservableObject {
 
     // MARK: - Continuous crawl (teleprompter over the WHOLE script)
 
-    /// One sentence of the playback, flattened across all paragraphs, so the HUD
-    /// can render the whole script as a single continuously-scrolling column.
+    /// One subtitle sentence. The subtitle is the human-readable source
+    /// (`subtitleText`: 원본/해설), NOT the spoken 대본, so it never has to align with
+    /// the audio chunking — the crawl position is driven by overall progress.
     struct CrawlLine: Identifiable {
         let id: Int        // global order (0-based)
-        let chunk: Int     // 0-based paragraph it belongs to
-        let sentence: Int  // sentence index within that paragraph
         let text: String
     }
 
-    /// Every paragraph split into sentences, flattened in reading order.
+    /// The full subtitle text split into sentences, flattened in reading order.
     var crawlLines: [CrawlLine] {
-        var out: [CrawlLine] = []
-        var gid = 0
-        for (ci, chunk) in spokenChunks.enumerated() {
-            for (si, s) in TextSplitter.sentences(chunk).enumerated() {
-                out.append(CrawlLine(id: gid, chunk: ci, sentence: si, text: s)); gid += 1
-            }
-        }
-        return out
+        TextSplitter.sentences(subtitleText).enumerated().map { CrawlLine(id: $0.offset, text: $0.element) }
     }
 
-    /// The globally-current sentence (chunk, sentence) — for highlighting.
-    func isCurrentLine(_ line: CrawlLine) -> Bool {
-        line.chunk == chunkIndex - 1 && line.sentence == currentSentenceIndex
+    /// Which subtitle sentence is being read now — overall audio progress
+    /// (`crawlFraction`) mapped onto the subtitle text by length.
+    var currentCrawlLineID: Int {
+        TextSplitter.sentenceIndex(at: crawlFraction, in: TextSplitter.sentences(subtitleText))
     }
+    func isCurrentLine(_ line: CrawlLine) -> Bool { line.id == currentCrawlLineID }
 
-    /// How far through the WHOLE script playback is, weighted by paragraph length
-    /// (chars) so the crawl tracks the voice instead of lurching per paragraph
-    /// (QueuePlayer.progress is chunk-equal-weighted — wrong driver for this).
+    /// How far through the WHOLE playback the audio is (0…1), weighted by spoken
+    /// chunk length (chars) so it tracks the voice smoothly via chunkProgress —
+    /// QueuePlayer.progress is chunk-equal-weighted, which lurches per paragraph.
     var crawlFraction: Double {
         let lens = spokenChunks.map { Double(max(1, $0.count)) }
         let total = lens.reduce(0, +)
@@ -377,21 +372,22 @@ final class AppState: ObservableObject {
     /// TTS, 해설 prose for commentary) while `text` is what's actually synthesized
     /// (the 대본). When omitted, the subtitle is the spoken text.
     func synthesize(_ text: String, displayText: String? = nil) {
-        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        // cleanInput both sides: collapse the stray line breaks a web selection or
+        // an LLM 대본 carries (esp. math/markdown), so paragraph chunking is by
+        // blank lines — otherwise the spoken and display chunk counts diverge and
+        // the subtitle falls back to the 대본.
+        let t = TextSplitter.cleanInput(text)
         guard !t.isEmpty else { return }
         let chunks = TextSplitter.paragraphs(t, maxChars: maxChunkChars)
         guard !chunks.isEmpty else { return }
 
-        // Subtitle = the display source, but only when it splits into the SAME
-        // number of paragraphs as the spoken chunks (so paragraph/sentence
-        // highlighting stays aligned with the audio). Else fall back to spoken.
-        let display = (displayText ?? t).trimmingCharacters(in: .whitespacesAndNewlines)
-        let displayChunks = TextSplitter.paragraphs(display, maxChars: maxChunkChars)
-        let subtitleChunks = (!display.isEmpty && displayChunks.count == chunks.count) ? displayChunks : chunks
-
         cancelActiveWork()                       // supersede any prior command (LLM/synthesis/playback)
         currentText = t                          // overlay label (the spoken text); do NOT touch inputText
-        spokenChunks = subtitleChunks            // per-paragraph subtitles (display source)
+        spokenChunks = chunks                    // spoken 대본 chunks (drive crawlFraction)
+        // Subtitle is the human-readable source, decoupled from the audio chunking
+        // — so it's always the 원본/해설, never the 대본, regardless of how the LLM
+        // reformatted paragraphs (web-selected math, etc.).
+        subtitleText = TextSplitter.cleanInput(displayText ?? t)
         chunkSentenceTimes = Array(repeating: [], count: chunks.count)
         progress = 0
         player.start(expected: chunks.count)
