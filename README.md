@@ -26,6 +26,32 @@ The `TTSBackend` protocol (the pluggable engine abstraction) is defined; only a 
 > Launch Services only reliably scans `~/Applications` and `/Applications`, so `./build.sh`
 > installs there. Running the `.app` from `./build` may **not** make the Service appear.
 
+## Stable signing (keep the global-hotkey Accessibility grant across rebuilds)
+
+The global hotkeys (⌃⌥⌘R read, ⌃⌥⌘E explain) need **Accessibility** permission. With
+ad-hoc signing the grant is bound to the binary's cdhash, so every rebuild silently
+invalidates it — the toggle still shows *on* in System Settings, but pressing the hotkey
+just re-opens the permission prompt. Sign with a **stable self-signed identity** to fix this
+once and for all.
+
+One-time cert creation (Keychain Access → Certificate Assistant → **Create a Certificate…**):
+
+- **Name:** `Codebasic TTS Local`
+- **Identity Type:** Self-Signed Root
+- **Certificate Type:** Code Signing
+- Create (it lands in your *login* keychain).
+
+Then:
+
+```bash
+./build.sh                                              # now signs with the cert (see its log line)
+tccutil reset Accessibility com.seongjoo.SelectedTextTTS  # clear the stale grant once
+# press ⌃⌥⌘R → grant in System Settings → Privacy & Security → Accessibility
+```
+
+After this, rebuilds keep the permission. `build.sh` auto-detects the identity by name; override
+with `CODESIGN_IDENTITY="…" ./build.sh` if you named it differently.
+
 ## Smoke test (M1)
 
 1. `./build.sh` — installs, registers, and launches the app (🔊 appears in the menu bar).

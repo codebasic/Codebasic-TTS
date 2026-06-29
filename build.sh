@@ -40,9 +40,20 @@ build() {
   [ -f "$HERE/Resources/AppIcon.icns" ] && cp "$HERE/Resources/AppIcon.icns" "$RES_DIR/AppIcon.icns"
   printf 'APPL????' > "$APP_DIR/Contents/PkgInfo"
 
-  echo "==> Ad-hoc code signing"
-  codesign --force --sign - "$APP_DIR" >/dev/null 2>&1 || \
-    echo "    (codesign skipped/failed — fine for local runs)"
+  # Prefer a STABLE self-signed identity so TCC grants (Accessibility, needed for
+  # the global hotkeys) survive rebuilds. Ad-hoc signing rebinds the designated
+  # requirement to the cdhash every build, which silently invalidates the grant.
+  # Create the cert once (see README "Stable signing"); falls back to ad-hoc.
+  SIGN_ID="${CODESIGN_IDENTITY:-Codebasic TTS Local}"
+  if security find-identity -v -p codesigning 2>/dev/null | grep -qF "$SIGN_ID"; then
+    echo "==> Code signing with stable identity: $SIGN_ID"
+    codesign --force --deep --sign "$SIGN_ID" "$APP_DIR" >/dev/null 2>&1 || \
+      echo "    (codesign with '$SIGN_ID' failed)"
+  else
+    echo "==> Ad-hoc code signing  (no '$SIGN_ID' identity → Accessibility grant resets each rebuild)"
+    codesign --force --sign - "$APP_DIR" >/dev/null 2>&1 || \
+      echo "    (codesign skipped/failed — fine for local runs)"
+  fi
 
   echo "==> Built: $APP_DIR"
 }
