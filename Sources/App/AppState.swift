@@ -368,15 +368,25 @@ final class AppState: ObservableObject {
 
     // MARK: - Synthesize (paragraph chunks, cache-first, queued playback)
 
-    func synthesize(_ text: String) {
+    /// `displayText` is the human-readable source to show as the subtitle (원문 for
+    /// TTS, 해설 prose for commentary) while `text` is what's actually synthesized
+    /// (the 대본). When omitted, the subtitle is the spoken text.
+    func synthesize(_ text: String, displayText: String? = nil) {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !t.isEmpty else { return }
         let chunks = TextSplitter.paragraphs(t, maxChars: maxChunkChars)
         guard !chunks.isEmpty else { return }
 
+        // Subtitle = the display source, but only when it splits into the SAME
+        // number of paragraphs as the spoken chunks (so paragraph/sentence
+        // highlighting stays aligned with the audio). Else fall back to spoken.
+        let display = (displayText ?? t).trimmingCharacters(in: .whitespacesAndNewlines)
+        let displayChunks = TextSplitter.paragraphs(display, maxChars: maxChunkChars)
+        let subtitleChunks = (!display.isEmpty && displayChunks.count == chunks.count) ? displayChunks : chunks
+
         cancelActiveWork()                       // supersede any prior command (LLM/synthesis/playback)
         currentText = t                          // overlay label (the spoken text); do NOT touch inputText
-        spokenChunks = chunks                    // per-paragraph subtitles
+        spokenChunks = subtitleChunks            // per-paragraph subtitles (display source)
         chunkSentenceTimes = Array(repeating: [], count: chunks.count)
         progress = 0
         player.start(expected: chunks.count)
@@ -950,7 +960,7 @@ final class AppState: ObservableObject {
             inputText = TextSplitter.cleanInput(inputText)
             synthesize(inputText)
         } else {
-            synthesize(scriptText)
+            synthesize(scriptText, displayText: inputText)   // speak the 대본, show the 원본
         }
     }
 
@@ -966,7 +976,7 @@ final class AppState: ObservableObject {
             guard let self else { return }
             let script = await self.prepareScript()
             guard !Task.isCancelled else { return }
-            self.synthesize(script)
+            self.synthesize(script, displayText: self.inputText)   // speak the 대본, show the 원본
         }
     }
 

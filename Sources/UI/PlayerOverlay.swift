@@ -36,12 +36,19 @@ struct PlayerOverlay: View {
         ], startPoint: .top, endPoint: .bottom)
     }
 
+    /// The subtitle area shows only once playback has actually started — never
+    /// during 해설/대본 generation or synthesis — so a previous run's subtitle
+    /// can't linger and the new one appears fresh as playback begins.
+    private var showsSubtitleArea: Bool {
+        app.showSubtitle && (app.phase == .playing || app.phase == .paused) && !app.crawlLines.isEmpty
+    }
+
     /// Widen the HUD with the subtitle font so a line holds roughly the same
     /// number of characters at any size — bigger text → wider panel, fewer
     /// wraps. Stays compact (360) when no subtitle is showing; capped so it
     /// never runs off a normal screen.
     private var hudWidth: CGFloat {
-        guard app.showSubtitle, !app.spokenChunks.isEmpty else { return 360 }
+        guard showsSubtitleArea else { return 360 }
         return min(max(360, app.subtitleFontSize * 24), 760)
     }
 
@@ -84,7 +91,7 @@ struct PlayerOverlay: View {
                 }
             }
 
-            if app.showSubtitle, !app.crawlLines.isEmpty {
+            if showsSubtitleArea {
                 // The WHOLE script is one column that scrolls continuously in step
                 // with playback (paragraphs flow into each other), keeping the
                 // current sentence centered.
