@@ -12,6 +12,20 @@ enum CrawlLayout {
         readingAnchor * viewportHeight - CGFloat(progress) * contentHeight
     }
 
+    /// How far through playback (0…1), weighted by spoken-chunk length (chars) so
+    /// the crawl tracks the voice rather than lurching per paragraph. `chunkIndex`
+    /// is 1-based (0 before playback starts); `chunkProgress` is the 0…1 position
+    /// within the current chunk.
+    static func fraction(chunkLengths: [Double], chunkIndex: Int, chunkProgress: Double) -> Double {
+        let total = chunkLengths.reduce(0, +)
+        guard total > 0 else { return 0 }
+        let cur = chunkIndex - 1
+        var read = 0.0
+        for i in 0..<chunkLengths.count where i < cur { read += chunkLengths[i] }
+        if chunkLengths.indices.contains(cur) { read += chunkProgress * chunkLengths[cur] }
+        return Swift.min(1, read / total)
+    }
+
     /// Clamp a panel of `size` to stay within `visible`, returning the adjusted
     /// bottom-left origin (Cocoa coords). Used so the HUD never drifts off-screen.
     static func clampOrigin(_ origin: CGPoint, size: CGSize, in visible: CGRect) -> CGPoint {

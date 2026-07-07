@@ -178,32 +178,6 @@ final class AppState: ObservableObject {
     @Published var chunkSeconds: Double = 0       // seconds into the current paragraph
     @Published var chunkSentenceTimes: [[Double]] = []  // exact sentence start times per chunk (ElevenLabs); [] = estimate
     var showSubtitle: Bool { playbackMode == .tts ? subtitleTTS : subtitleExplain }
-    var currentChunkText: String {
-        let i = chunkIndex - 1
-        return spokenChunks.indices.contains(i) ? spokenChunks[i] : ""
-    }
-    /// Current paragraph split into sentences (for the karaoke-style subtitle).
-    var currentSentences: [String] { TextSplitter.sentences(currentChunkText) }
-    /// Which sentence is being read now. Uses ElevenLabs character timestamps
-    /// (exact) when available, else estimates from intra-paragraph progress
-    /// weighted by sentence length. Audio stays paragraph-chunked either way.
-    var currentSentenceIndex: Int {
-        let s = currentSentences
-        guard s.count > 1 else { return 0 }
-        let ci = chunkIndex - 1
-        if chunkSentenceTimes.indices.contains(ci), chunkSentenceTimes[ci].count == s.count {
-            let t = chunkSeconds
-            var idx = 0
-            for (k, start) in chunkSentenceTimes[ci].enumerated() where t + 0.08 >= start { idx = k }
-            return idx
-        }
-        let lengths = s.map { Double(max(1, $0.count)) }
-        let total = lengths.reduce(0, +)
-        let target = chunkProgress * total
-        var acc = 0.0
-        for (i, len) in lengths.enumerated() { acc += len; if target <= acc { return i } }
-        return s.count - 1
-    }
 
     // MARK: - Continuous crawl (teleprompter over the WHOLE script)
 
@@ -231,14 +205,8 @@ final class AppState: ObservableObject {
     /// chunk length (chars) so it tracks the voice smoothly via chunkProgress —
     /// QueuePlayer.progress is chunk-equal-weighted, which lurches per paragraph.
     var crawlFraction: Double {
-        let lens = spokenChunks.map { Double(max(1, $0.count)) }
-        let total = lens.reduce(0, +)
-        guard total > 0 else { return 0 }
-        let cur = chunkIndex - 1
-        var read = 0.0
-        for i in 0..<lens.count where i < cur { read += lens[i] }
-        if lens.indices.contains(cur) { read += chunkProgress * lens[cur] }
-        return min(1, read / total)
+        CrawlLayout.fraction(chunkLengths: spokenChunks.map { Double(max(1, $0.count)) },
+                             chunkIndex: chunkIndex, chunkProgress: chunkProgress)
     }
 
     /// Map ElevenLabs per-character start times to one start time per sentence

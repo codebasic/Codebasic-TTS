@@ -24,10 +24,12 @@ print("TextSplitter.paragraphs / cleanInput")
 eq("blank-line paragraphs", TextSplitter.paragraphs("문단1\n\n문단2").count, 2)
 eq("cleanInput joins intra-para lines", TextSplitter.paragraphs(TextSplitter.cleanInput("a\nb\n\nc\nd")).count, 2)
 eq("long paragraph splits at spaces", TextSplitter.paragraphs("aaaa bbbb cccc", maxChars: 6), ["aaaa", "bbbb", "cccc"])
+eq("no-whitespace token hard-cuts", TextSplitter.paragraphs("aaaaaaaa", maxChars: 3), ["aaa", "aaa", "aa"])
 eq("paragraph within budget stays whole", TextSplitter.paragraphs("짧은 문단입니다", maxChars: 700).count, 1)
 eq("empty → none", TextSplitter.paragraphs("   \n  ").count, 0)
-// dedupMathLeaks (via cleanInput): a math-only line repeated as the next line's prefix is a render leak
+// dedupMathLeaks (via cleanInput): a math-only line/run repeated as the next line's prefix is a render leak
 eq("cleanInput drops leaked math prefix", TextSplitter.cleanInput("k\nk는 상수입니다."), "k는 상수입니다.")
+eq("cleanInput drops multi-line leaked math run", TextSplitter.cleanInput("k\n=\n1\nk=1은 상수입니다."), "k=1은 상수입니다.")
 eq("cleanInput keeps non-prefix math", TextSplitter.cleanInput("x\ny는 다릅니다."), "x y는 다릅니다.")
 
 print("TextSplitter.sentenceIndex — map overall progress onto the subtitle text")
@@ -38,6 +40,14 @@ eq("clamped below → 0", TextSplitter.sentenceIndex(at: -0.5, in: sents), 0)
 eq("clamped above → last", TextSplitter.sentenceIndex(at: 2.0, in: sents), 2)
 eq("single sentence → 0", TextSplitter.sentenceIndex(at: 0.9, in: ["하나뿐."]), 0)
 eq("midpoint lands in 2nd (len-weighted)", TextSplitter.sentenceIndex(at: 0.4, in: sents), 1)
+
+print("CrawlLayout.fraction — char-weighted overall progress")
+eq("mid of single chunk", CrawlLayout.fraction(chunkLengths: [100], chunkIndex: 1, chunkProgress: 0.5), 0.5)
+eq("before playback (idx 0) → 0", CrawlLayout.fraction(chunkLengths: [50, 50], chunkIndex: 0, chunkProgress: 0), 0)
+eq("start of 2nd chunk", CrawlLayout.fraction(chunkLengths: [50, 50], chunkIndex: 2, chunkProgress: 0), 0.5)
+eq("end of last chunk → 1", CrawlLayout.fraction(chunkLengths: [50, 50], chunkIndex: 2, chunkProgress: 1), 1)
+eq("uneven chunks weighted by length", CrawlLayout.fraction(chunkLengths: [30, 70], chunkIndex: 2, chunkProgress: 0.5), 0.65)
+eq("empty → 0", CrawlLayout.fraction(chunkLengths: [], chunkIndex: 1, chunkProgress: 0.5), 0)
 
 print("CrawlLayout.crawlOffset — content scrolls up; reading line at the anchor")
 eq("progress 0 → anchor*viewport", CrawlLayout.crawlOffset(progress: 0, contentHeight: 1000, viewportHeight: 200, readingAnchor: 0.5), 100)
