@@ -5,6 +5,10 @@ import SwiftUI
 /// navigation.
 struct PlayerOverlay: View {
     @ObservedObject var app: AppState
+    /// The 10 Hz playback values (progress / crawl position) — observed here ONLY,
+    /// so ticking doesn't re-render the whole app. crawlFraction on `app` reads
+    /// telemetry.chunkProgress, so observing telemetry keeps the crawl live.
+    @ObservedObject var telemetry: PlaybackTelemetry
 
     /// Measured natural height of the full subtitle column (for the crawl mapping).
     @State private var contentHeight: CGFloat = 0
@@ -96,9 +100,10 @@ struct PlayerOverlay: View {
                 // The WHOLE script is one column that scrolls continuously in step
                 // with playback (paragraphs flow into each other), keeping the
                 // current sentence centered.
+                let currentLineID = app.currentCrawlLineID   // compute once per frame, not per line
                 VStack(alignment: .leading, spacing: 4) {
                     ForEach(app.crawlLines) { line in
-                        let cur = app.isCurrentLine(line)
+                        let cur = line.id == currentLineID
                         Text(line.text)
                             .font(.system(size: app.subtitleFontSize))
                             // distinguish the current line by brightness only (no weight
@@ -139,7 +144,7 @@ struct PlayerOverlay: View {
                 Button { app.skipNext() } label: { Image(systemName: "forward.fill") }
                     .disabled(!app.canSkipNext)
 
-                ProgressView(value: app.progress).progressViewStyle(.linear)
+                ProgressView(value: telemetry.progress).progressViewStyle(.linear)
                     .frame(width: 140)
 
                 Button { app.stop() } label: { Image(systemName: "stop.fill") }

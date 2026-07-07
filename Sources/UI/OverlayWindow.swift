@@ -51,7 +51,7 @@ final class OverlayWindow {
 
     private func ensurePanel() {
         guard panel == nil else { return }
-        let h = NSHostingView(rootView: PlayerOverlay(app: app))
+        let h = NSHostingView(rootView: PlayerOverlay(app: app, telemetry: app.telemetry))
         let p = NonKeyPanel(contentRect: NSRect(x: 0, y: 0, width: 360, height: 80),
                             styleMask: [.nonactivatingPanel, .borderless],
                             backing: .buffered, defer: false)

@@ -151,7 +151,10 @@ final class AppState: ObservableObject {
     // Runtime
     enum Phase: Equatable { case idle, synthesizing, playing, paused }
     @Published var phase: Phase = .idle
-    @Published var progress: Double = 0          // 0…1 across all chunks
+    /// High-frequency playback values (progress/chunkProgress/chunkSeconds) live on
+    /// a SEPARATE ObservableObject so the 10 Hz tick doesn't invalidate every view
+    /// observing AppState. Only PlayerOverlay observes this. See PlaybackTelemetry.
+    let telemetry = PlaybackTelemetry()
 
     /// What the current playback is — shown in the HUD instead of the script text.
     enum PlaybackMode { case tts, explain
@@ -174,8 +177,6 @@ final class AppState: ObservableObject {
     var hudPositions: [CGDirectDisplayID: CGPoint] = [:] // bottom-left offset within each screen's visibleFrame
     @Published var spokenChunks: [String] = []   // the spoken (대본) paragraph chunks — drives crawlFraction
     @Published var subtitleText = ""             // the human-readable subtitle source (원본/해설), shown as the crawl
-    @Published var chunkProgress: Double = 0      // 0…1 within the current paragraph
-    @Published var chunkSeconds: Double = 0       // seconds into the current paragraph
     @Published var chunkSentenceTimes: [[Double]] = []  // exact sentence start times per chunk (ElevenLabs); [] = estimate
     var showSubtitle: Bool { playbackMode == .tts ? subtitleTTS : subtitleExplain }
 
@@ -189,15 +190,30 @@ final class AppState: ObservableObject {
         let text: String
     }
 
+    /// Memoized sentence split of the current subtitle. `TextSplitter.sentences`
+    /// is an O(N) char scan; the crawl reads it every 0.1s frame (and used to
+    /// re-split once PER line for the current-line test), so recomputing it per
+    /// frame stalls the main thread and janks the subtitle + typing. Recompute
+    /// only when `subtitleText` actually changes.
+    private var sentenceCacheKey: String?
+    private var sentenceCache: [String] = []
+    private var subtitleSentences: [String] {
+        if sentenceCacheKey != subtitleText {
+            sentenceCacheKey = subtitleText
+            sentenceCache = TextSplitter.sentences(subtitleText)
+        }
+        return sentenceCache
+    }
+
     /// The full subtitle text split into sentences, flattened in reading order.
     var crawlLines: [CrawlLine] {
-        TextSplitter.sentences(subtitleText).enumerated().map { CrawlLine(id: $0.offset, text: $0.element) }
+        subtitleSentences.enumerated().map { CrawlLine(id: $0.offset, text: $0.element) }
     }
 
     /// Which subtitle sentence is being read now — overall audio progress
     /// (`crawlFraction`) mapped onto the subtitle text by length.
     var currentCrawlLineID: Int {
-        TextSplitter.sentenceIndex(at: crawlFraction, in: TextSplitter.sentences(subtitleText))
+        TextSplitter.sentenceIndex(at: crawlFraction, in: subtitleSentences)
     }
     func isCurrentLine(_ line: CrawlLine) -> Bool { line.id == currentCrawlLineID }
 
@@ -206,7 +222,7 @@ final class AppState: ObservableObject {
     /// QueuePlayer.progress is chunk-equal-weighted, which lurches per paragraph.
     var crawlFraction: Double {
         CrawlLayout.fraction(chunkLengths: spokenChunks.map { Double(max(1, $0.count)) },
-                             chunkIndex: chunkIndex, chunkProgress: chunkProgress)
+                             chunkIndex: chunkIndex, chunkProgress: telemetry.chunkProgress)
     }
 
     /// Map ElevenLabs per-character start times to one start time per sentence
@@ -292,7 +308,7 @@ final class AppState: ObservableObject {
 
     private func finish() {
         stopTimer()
-        phase = .idle; progress = 0; statusText = ""; chunkIndex = 0; chunkCount = 0
+        phase = .idle; telemetry.reset(); statusText = ""; chunkIndex = 0; chunkCount = 0
     }
 
     // MARK: - Transport (overlay controls)
@@ -313,10 +329,14 @@ final class AppState: ObservableObject {
     }
     private func stopTimer() { timer?.invalidate(); timer = nil }
     private func tick() {
-        progress = player.progress
-        chunkProgress = player.chunkFraction
-        chunkSeconds = player.chunkSeconds
-        chunkIndex = min(max(1, player.finishedCount + 1), max(1, chunkCount))
+        telemetry.progress = player.progress
+        telemetry.chunkProgress = player.chunkFraction
+        telemetry.chunkSeconds = player.chunkSeconds
+        // Only assign chunkIndex when the paragraph actually turns — it lives on
+        // AppState (read by GenerateView/overlay), so a 10 Hz same-value write would
+        // needlessly fire AppState.objectWillChange and re-render the whole window.
+        let ci = min(max(1, player.finishedCount + 1), max(1, chunkCount))
+        if ci != chunkIndex { chunkIndex = ci }
     }
 
     var backendIdentity: String { backendKind == .elevenlabs ? "elevenlabs" : "qwen3-local" }
@@ -357,7 +377,7 @@ final class AppState: ObservableObject {
         // reformatted paragraphs (web-selected math, etc.).
         subtitleText = TextSplitter.cleanInput(displayText ?? t)
         chunkSentenceTimes = Array(repeating: [], count: chunks.count)
-        progress = 0
+        telemetry.reset()
         player.start(expected: chunks.count)
         chunkCount = chunks.count; chunkIndex = 0
 
@@ -423,7 +443,13 @@ final class AppState: ObservableObject {
             } catch is CancellationError {
                 self.finish()
             } catch {
-                self.phase = .idle
+                // Tear playback down like finish() (stop the timer + player) but keep
+                // the error message. Without stopTimer() a mid-playback synthesis
+                // error left the 10 Hz timer running forever, growing memory at idle.
+                self.stopTimer()
+                self.player.stop()
+                self.phase = .idle; self.telemetry.reset()
+                self.chunkIndex = 0; self.chunkCount = 0
                 self.statusText = "오류: \(error.localizedDescription)"
             }
         }
@@ -1003,8 +1029,9 @@ final class AppState: ObservableObject {
         guard let url = cache.fileURL(forKey: e.id) else { statusText = "오디오 파일 없음"; return }
         cache.touch(e.id); historyRevision += 1
         inputText = e.text; currentText = e.text; spokenChunks = [e.text]
-        chunkSentenceTimes = [cache.times(forKey: e.id) ?? []]; chunkSeconds = 0
-        chunkCount = 1; chunkIndex = 1; progress = 0
+        chunkSentenceTimes = [cache.times(forKey: e.id) ?? []]
+        telemetry.reset()
+        chunkCount = 1; chunkIndex = 1
         player.start(expected: 1)
         player.enqueue(url)
         phase = .playing; statusText = "캐시에서 재생"; startTimer()
