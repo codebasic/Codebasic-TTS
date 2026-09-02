@@ -1257,9 +1257,11 @@ final class AppState: ObservableObject {
 
     // MARK: - Hermes 세션 수신 재생 (PlaybackInbox)
 
-    /// Hermes 세션이 만든 (자막용 해설, 음성용 대본) 쌍을 재생 준비 상태로
-    /// 올려둔다. LLM 없음 — 전달받은 텍스트를 그대로 패널·재생에 반영.
-    /// 자막 = narration(해설), 음성 = script(대본). 대본이 비면 원문 그대로.
+    /// Hermes 세션이 만든 (자막용 해설, 음성용 대본) 쌍을 반영한다. LLM 없음 —
+    /// 전달받은 텍스트를 그대로 패널·재생에 반영. 자막 = narration(해설),
+    /// 음성 = script(대본). autoplay가 true면 수신 즉시 재생(세션이 사용자의
+    /// "바로 재생" 요청을 반영한 경우), 아니면 재생 준비만 하고 사용자 트리거를
+    /// 기다린다. 정지·스킵 등 재생 제어는 어느 쪽이든 앱 소유.
     func prepareInboxPackage(_ pkg: PlaybackInbox.PlaybackPackage) {
         cancelActiveWork()
         playbackMode = .explain
@@ -1267,8 +1269,14 @@ final class AppState: ObservableObject {
         scriptText = pkg.script                  // 음성용 대본 → TTS 탭 대본 패널
         inputText = pkg.narration                // TTS 탭 원본 (표시 일관)
         markScriptFresh()                        // 내부 대본 아님 — stale 플래그 방지
-        statusText = pkg.topic.isEmpty ? "세션에서 수신 — 재생 준비됨" : "세션 수신: \(pkg.topic) — 재생 준비됨"
-        onRequestReview?()                       // 관리 창을 띄워 사용자가 확인 후 재생
+        if pkg.autoplay {
+            phase = .synthesizing
+            statusText = pkg.topic.isEmpty ? "세션 수신 — 바로 재생합니다" : "\(pkg.topic) — 바로 재생합니다"
+            synthesize(pkg.script, displayText: TextSplitter.cleanInput(pkg.narration))
+        } else {
+            statusText = pkg.topic.isEmpty ? "세션에서 수신 — 재생 준비됨" : "세션 수신: \(pkg.topic) — 재생 준비됨"
+            onRequestReview?()                   // 관리 창을 띄워 사용자가 확인 후 재생
+        }
     }
 
     /// Services entry: set the source, build the script, then speak it.

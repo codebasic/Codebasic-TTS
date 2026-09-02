@@ -33,6 +33,7 @@ final class PlaybackInbox: ObservableObject {
         let narration: String   // 자막용 해설 (원문)
         let script: String      // 음성용 대본 (TTS 입력)
         let topic: String
+        let autoplay: Bool      // true = 수신 즉시 재생 (세션이 "바로 재생" 요청 시)
     }
 
     private var timer: AnyCancellable?
@@ -85,7 +86,8 @@ final class PlaybackInbox: ObservableObject {
             let pkg = PlaybackPackage(id: id,
                                       narration: narration,
                                       script: script,
-                                      topic: (obj["topic"] as? String) ?? "")
+                                      topic: (obj["topic"] as? String) ?? "",
+                                      autoplay: (obj["autoplay"] as? Bool) ?? false)
             lastReceived = pkg
             status = "수신: \(pkg.topic.isEmpty ? id : pkg.topic)"
             markProcessed(url, suffix: "done")
