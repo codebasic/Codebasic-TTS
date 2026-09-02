@@ -157,6 +157,68 @@ enum LLM {
             continuation.onTermination = { _ in work.cancel() }
         }
     }
+
+    /// OpenAI 호환(chat/completions, stream:true → SSE). OpenCode·OpenRouter 등
+    /// 공통. Yields each `delta.content` increment; `[DONE]` line ends the stream.
+    /// Images ride as `image_url` data URLs (vision-capable models only).
+    /// Cancelling the consuming task tears down the request.
+    static func openaiChatStream(baseURL: String, apiKey: String, model: String,
+                                 prompt: String, images: [Data] = [],
+                                 temperature: Double = 0.2) -> AsyncThrowingStream<String, Error> {
+        AsyncThrowingStream { continuation in
+            let work = Task {
+                do {
+                    var base = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if base.isEmpty { base = "https://openrouter.ai/api/v1" }
+                    while base.hasSuffix("/") { base.removeLast() }
+                    guard let url = URL(string: "\(base)/chat/completions") else {
+                        throw NSError(domain: "OpenAICompat", code: -1,
+                                      userInfo: [NSLocalizedDescriptionKey: "잘못된 엔드포인트 URL"])
+                    }
+                    var req = URLRequest(url: url)
+                    req.httpMethod = "POST"
+                    req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+                    // OpenRouter 권장 헤더 (없어도 무해)
+                    req.setValue("SelectedTextTTS", forHTTPHeaderField: "X-Title")
+                    var userContent: [[String: Any]] = [["type": "text", "text": prompt]]
+                    for img in images {
+                        userContent.append(["type": "image_url",
+                                            "image_url": ["url": "data:image/png;base64,\(img.base64EncodedString())"]])
+                    }
+                    req.httpBody = try JSONSerialization.data(withJSONObject: [
+                        "model": model,
+                        "messages": [["role": "user", "content": userContent]],
+                        "stream": true,
+                        "temperature": temperature,
+                    ])
+                    let (bytes, response) = try await URLSession.shared.bytes(for: req)
+                    guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+                        throw NSError(domain: "OpenAICompat",
+                                      code: (response as? HTTPURLResponse)?.statusCode ?? -1,
+                                      userInfo: [NSLocalizedDescriptionKey:
+                                        "엔드포인트 요청 실패 (\((response as? HTTPURLResponse)?.statusCode ?? -1))"])
+                    }
+                    for try await line in bytes.lines {
+                        try Task.checkCancellation()
+                        guard line.hasPrefix("data:") else { continue }
+                        let json = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+                        guard !json.isEmpty, json != "[DONE]",
+                              let d = json.data(using: .utf8),
+                              let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+                              let choices = obj["choices"] as? [[String: Any]],
+                              let delta = choices.first?["delta"] as? [String: Any],
+                              let text = delta["content"] as? String, !text.isEmpty else { continue }
+                        continuation.yield(text)
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in work.cancel() }
+        }
+    }
 }
 
 /// Local LLM via Ollama.
@@ -398,5 +460,129 @@ enum Ollama {
         let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         let arr = (obj?["models"] as? [[String: Any]]) ?? []
         return arr.compactMap { $0["name"] as? String }
+    }
+}
+
+// MARK: - OpenAI 호환 엔드포인트 (OpenCode · OpenRouter)
+
+/// OpenAI 호환 채널의 엔드포인트 프리셋. 앱 어디서든 이 목록만 알면 된다.
+enum OpenAICompat {
+    static let defaultOpenCodeBaseURL = "https://opencode.ai/zen/go/v1"
+    static let defaultOpenRouterBaseURL = "https://openrouter.ai/api/v1"
+    /// 연결 확인 전(모델 목록 미수신)에도 목록에 보여줄 기본 모델.
+    static let fallbackOpenCodeModels = ["glm-5.3-flash", "qwen3.8-flash", "deepseek-v4-flash"]
+    static let fallbackOpenRouterModels = ["google/gemini-3.1-flash-lite", "google/gemini-3.6-flash", "google/gemini-3.7-flash"]
+
+    /// `GET {base}/models` — OpenAI 호환 목록. Bearer 인증. `data[].id`만 뽑는다.
+    static func models(baseURL: String, apiKey: String) async throws -> [String] {
+        var base = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if base.isEmpty { base = defaultOpenRouterBaseURL }
+        while base.hasSuffix("/") { base.removeLast() }
+        guard let url = URL(string: "\(base)/models") else {
+            throw NSError(domain: "OpenAICompat", code: -1,
+                          userInfo: [NSLocalizedDescriptionKey: "잘못된 엔드포인트 URL"])
+        }
+        var req = URLRequest(url: url)
+        req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        let (data, response) = try await URLSession.shared.data(for: req)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            let msg = String(data: data, encoding: .utf8) ?? "엔드포인트에 연결할 수 없음"
+            throw NSError(domain: "OpenAICompat", code: (response as? HTTPURLResponse)?.statusCode ?? -1,
+                          userInfo: [NSLocalizedDescriptionKey: msg])
+        }
+        let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let arr = (obj?["data"] as? [[String: Any]]) ?? []
+        return arr.compactMap { $0["id"] as? String }.sorted { $0.lowercased() < $1.lowercased() }
+    }
+}
+
+/// TTS-friendly normalizer via an OpenAI-compatible endpoint.
+struct OpenAICompatNormalizer: Normalizing {
+    let baseURL: String
+    let apiKey: String
+    let model: String
+    let instruction: String
+
+    var temperature: Double = 0.2
+    func normalizeStream(_ text: String) -> AsyncThrowingStream<String, Error> {
+        LLM.openaiChatStream(baseURL: baseURL, apiKey: apiKey, model: model,
+                             prompt: normalizationPrompt(instruction, text), temperature: temperature)
+    }
+}
+
+/// Code explanation via an OpenAI-compatible endpoint.
+struct OpenAICompatExplainer: Explaining {
+    let baseURL: String
+    let apiKey: String
+    let model: String
+    let instruction: String
+    var temperature: Double = 0.4
+    func stream(_ code: String, hint: String) -> AsyncThrowingStream<String, Error> {
+        LLM.openaiChatStream(baseURL: baseURL, apiKey: apiKey, model: model,
+                             prompt: CodeExplanation.prompt(instruction, code, hint: hint), temperature: temperature)
+    }
+    func streamContinuing(previous: String, current: String, hint: String) -> AsyncThrowingStream<String, Error> {
+        LLM.openaiChatStream(baseURL: baseURL, apiKey: apiKey, model: model,
+                             prompt: CodeExplanation.continuePrompt(previous: previous, current: current, hint: hint),
+                             temperature: temperature)
+    }
+}
+
+/// 해설(대본)을 TTS 관점에서 검수하는 단계. 자막으로 쓰일 해설 vs 실제 음성으로
+/// 읽힐 대본을 대조해 발음 위험·누락·톤 문제를 지적한다. 출력은 해설 패널 아래
+/// 검수 리포트에 표시되며, 원문을 덮어쓰지 않는다(수정은 사용자가 판단).
+protocol Reviewing {
+    func stream(script: String, narration: String) -> AsyncThrowingStream<String, Error>
+}
+
+enum ScriptReview {
+    static let defaultInstruction = """
+    당신은 강의 해설 대본의 검수자입니다. 자막용 해설(원문)과 그것을 음성 합성에 넣기 전에 다듬은 TTS 대본을 대조해 검수하세요.
+    규칙:
+    - 검수 항목: (1) 의미 왜곡·누락 (2) TTS가 잘못 읽을 표기(미확장 영문 약어, 기호, 소수점, 단위) (3) 문단 구조 보존 (4) 어색하거나 입에 안 맞는 문장.
+    - 문제를 찾으면 '줄/문단 위치 — 문제 — 제안 수정' 형식으로 짧게 나열합니다.
+    - 문제가 없으면 '문제 없음' 한 줄만 출력합니다.
+    - 칭찬·총평·서론 없이 문제 지적만 출력합니다.
+    """
+    static func prompt(_ instruction: String, script: String, narration: String) -> String {
+        "\(instruction)\n\n[자막용 해설]\n\(narration)\n\n[TTS 대본]\n\(script)\n\n검수:"
+    }
+}
+
+struct OpenAICompatReviewer: Reviewing {
+    let baseURL: String
+    let apiKey: String
+    let model: String
+    let instruction: String
+    var temperature: Double = 0.2
+    func stream(script: String, narration: String) -> AsyncThrowingStream<String, Error> {
+        LLM.openaiChatStream(baseURL: baseURL, apiKey: apiKey, model: model,
+                             prompt: ScriptReview.prompt(instruction, script: script, narration: narration),
+                             temperature: temperature)
+    }
+}
+
+struct GeminiReviewer: Reviewing {
+    let baseURL: String
+    let apiKey: String
+    let model: String
+    let instruction: String
+    var temperature: Double = 0.2
+    func stream(script: String, narration: String) -> AsyncThrowingStream<String, Error> {
+        LLM.geminiStream(baseURL: baseURL, apiKey: apiKey, model: model,
+                         prompt: ScriptReview.prompt(instruction, script: script, narration: narration),
+                         temperature: temperature)
+    }
+}
+
+struct OllamaReviewer: Reviewing {
+    let baseURL: URL
+    let model: String
+    let instruction: String
+    var temperature: Double = 0.2
+    func stream(script: String, narration: String) -> AsyncThrowingStream<String, Error> {
+        LLM.ollamaStream(baseURL: baseURL, model: model,
+                         prompt: ScriptReview.prompt(instruction, script: script, narration: narration),
+                         temperature: temperature)
     }
 }

@@ -9,6 +9,8 @@ struct SettingsView: View {
     @EnvironmentObject var app: AppState
     @State private var channel = 0               // 0 = 음성 합성, 1 = 텍스트 생성
     @State private var geminiKeyInput = ""
+    @State private var openCodeKeyInput = ""
+    @State private var openRouterKeyInput = ""
     @State private var keyInput = ""             // ElevenLabs key entry
 
     var body: some View {
@@ -25,31 +27,10 @@ struct SettingsView: View {
             }
             .formStyle(.grouped)
         }
-        .onAppear {
-            if app.ollamaModels.isEmpty { app.refreshOllamaModels() }
-            if app.voices.isEmpty && app.keyPresent { app.refreshVoices() }
-            keyInput = Secrets.elevenLabsKey ?? ""        // pre-fill so the current key is visible/editable
-            geminiKeyInput = Secrets.geminiKey ?? ""
-        }
-        .onChange(of: app.localBaseURL) { _, _ in app.saveSettings() }
-        .onChange(of: app.normalizeEnabled) { _, _ in app.saveSettings() }
-        .onChange(of: app.normalizeProvider) { _, _ in app.saveSettings() }
-        .onChange(of: app.geminiModel) { _, _ in app.saveSettings() }
-        .onChange(of: app.geminiBaseURL) { _, _ in app.saveSettings() }
-        .onChange(of: app.ollamaModel) { _, _ in app.saveSettings() }
-        .onChange(of: app.ollamaURL) { _, _ in app.saveSettings() }
-        .onChange(of: app.maxChunkChars) { _, _ in app.saveSettings() }
-        .onChange(of: app.subtitleTTS) { _, _ in app.saveSettings() }
-        .onChange(of: app.subtitleExplain) { _, _ in app.saveSettings() }
-        .onChange(of: app.voiceId) { _, newID in
-            if let v = app.voices.first(where: { $0.id == newID }) { app.voiceName = v.name }
-            app.saveSettings()
-        }
-        .onChange(of: app.modelId) { _, _ in app.saveSettings() }
-        .onChange(of: app.backendKind) { _, _ in app.saveSettings() }
-        .onChange(of: app.useCache) { _, _ in app.saveSettings() }
-        .onChange(of: app.voiceSettings) { _, _ in app.saveSettings() }
+        .onAppear { appearSetup() }
         .onDisappear { app.saveSettings() }
+        .modifier(SettingsSaveTriggersA(app: app, voiceId: app.voiceId))
+        .modifier(SettingsSaveTriggersB(app: app))
     }
 
     // MARK: - ① 음성 합성 (TTS engine)
@@ -159,7 +140,7 @@ struct SettingsView: View {
 
     @ViewBuilder private var llmChannel: some View {
         Section {
-            Text("코드 해설·음성 대본 생성에 쓰는 텍스트 생성 모델입니다. Ollama와 Gemini를 동시에 연결할 수 있고, 모델은 해설/TTS 패널에서 두 제공자의 통합 목록에서 고릅니다. temperature는 각 패널 인스펙터(⊟)에서 조절합니다.")
+            Text("코드 해설·음성 대본 생성에 쓰는 텍스트 생성 모델입니다. Ollama·Gemini·OpenCode·OpenRouter를 동시에 연결할 수 있고, 모델은 해설/TTS 패널에서 연결된 제공자의 통합 목록에서 고릅니다. temperature는 각 패널 인스펙터(⊟)에서 조절합니다.")
                 .font(.caption).foregroundStyle(.secondary)
         }
 
@@ -189,6 +170,36 @@ struct SettingsView: View {
             }
         }
 
+        Section("OpenCode (클라우드 · OpenAI 호환)") {
+            labeledField("엔드포인트", placeholder: OpenAICompat.defaultOpenCodeBaseURL,
+                         text: $app.openCodeBaseURL,
+                         hint: "OpenAI 호환 API 루트. 끝에 /chat/completions · /models 가 붙습니다.")
+            KeyField(label: "API 키", text: $openCodeKeyInput,
+                     hint: app.openCodeKeyPresent ? "현재: 설정됨 (App Support)" : "현재: 없음 — 키를 넣으면 모델 목록에 OpenCode 모델이 함께 표시됩니다")
+            HStack {
+                Button("키 저장") { app.saveOpenCodeKey(openCodeKeyInput) }
+                    .disabled(openCodeKeyInput.trimmingCharacters(in: .whitespaces).isEmpty)
+                Button("연결 확인 / 모델 목록") { app.refreshOpenCodeModels() }
+                Spacer()
+                Text(app.openCodeStatus).font(.caption).foregroundStyle(.secondary)
+            }
+        }
+
+        Section("OpenRouter (클라우드 · OpenAI 호환)") {
+            labeledField("엔드포인트", placeholder: OpenAICompat.defaultOpenRouterBaseURL,
+                         text: $app.openRouterBaseURL,
+                         hint: "OpenAI 호환 API 루트. 자체 프록시·게이트웨이로 교체해도 됩니다.")
+            KeyField(label: "API 키", text: $openRouterKeyInput,
+                     hint: app.openRouterKeyPresent ? "현재: 설정됨 (App Support)" : "현재: 없음 — 키를 넣으면 모델 목록에 OpenRouter 모델이 함께 표시됩니다")
+            HStack {
+                Button("키 저장") { app.saveOpenRouterKey(openRouterKeyInput) }
+                    .disabled(openRouterKeyInput.trimmingCharacters(in: .whitespaces).isEmpty)
+                Button("연결 확인 / 모델 목록") { app.refreshOpenRouterModels() }
+                Spacer()
+                Text(app.openRouterStatus).font(.caption).foregroundStyle(.secondary)
+            }
+        }
+
         Section("음성 대본 정규화") {
             Toggle("대본 생성 시 LLM으로 발음·표기 정규화", isOn: $app.normalizeEnabled)
             Text("끄면 해설을 거의 그대로 합성합니다. 켜면 숫자·기호·코드 명칭을 발음대로 다듬습니다 (경량 로컬 모델은 부정확할 수 있어 강한 모델 권장).")
@@ -197,6 +208,16 @@ struct SettingsView: View {
     }
 
     // MARK: - Helpers
+
+    /// onAppear 본문 (표현식 분해 — 컴파일러 타입체크 시간 초과 방지).
+    private func appearSetup() {
+        if app.ollamaModels.isEmpty { app.refreshOllamaModels() }
+        if app.voices.isEmpty && app.keyPresent { app.refreshVoices() }
+        keyInput = Secrets.elevenLabsKey ?? ""        // pre-fill so the current key is visible/editable
+        geminiKeyInput = Secrets.geminiKey ?? ""
+        openCodeKeyInput = Secrets.openCodeKey ?? ""
+        openRouterKeyInput = Secrets.openRouterKey ?? ""
+    }
 
     @ViewBuilder
     private func slider(_ label: String, _ value: Binding<Double>) -> some View {

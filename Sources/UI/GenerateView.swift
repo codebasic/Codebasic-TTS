@@ -75,10 +75,7 @@ struct GenerateView: View {
                 }
                 Spacer()
                 if app.normalizeEnabled {
-                    LLMModelPicker(label: "대본 모델",
-                                   provider: $app.scriptProvider,
-                                   geminiModel: $app.geminiModel,
-                                   ollamaModel: $app.ollamaModel,
+                    LLMModelPicker(label: "대본 모델", role: .script,
                                    onChange: { app.saveSettings() })
                 } else {
                     Text("정규화 꺼짐 (설정)").font(.caption).foregroundStyle(.secondary)
@@ -106,6 +103,40 @@ struct GenerateView: View {
             TextEditor(text: $app.scriptText)
                 .font(.body).frame(minHeight: 110)
                 .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
+
+            // 검수 리포트: 자막용 원본 vs TTS 대본 대조. 원문을 덮지 않는다.
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 10) {
+                    Text("검수").font(.headline)
+                    Toggle("대본 생성 후 자동 검수", isOn: $app.reviewEnabled)
+                        .toggleStyle(.checkbox).controlSize(.small)
+                        .onChange(of: app.reviewEnabled) { _, _ in app.saveSettings() }
+                    if app.reviewing {
+                        ProgressView().controlSize(.small)
+                        Text("검수 중…").font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button { app.runReview(narration: app.inputText, script: app.scriptText) } label: {
+                        Label("검수 실행", systemImage: "checkmark.seal")
+                    }
+                    .controlSize(.small)
+                    .disabled(app.scriptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || app.reviewing)
+                    .help("자막용 원본과 TTS 대본을 대조해 발음 위험·누락·어색한 문장을 짚어 봅니다")
+                }
+                HStack(spacing: 16) {
+                    LLMModelPicker(label: "검수 모델", role: .review,
+                                   onChange: { app.saveSettings() })
+                    Spacer()
+                }
+                if !app.reviewText.isEmpty {
+                    ScrollView {
+                        Text(app.reviewText)
+                            .font(.caption).frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxHeight: 110)
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
+                }
+            }
 
             HStack(spacing: 10) {
                 Button { app.speakScript() } label: { Label("재생", systemImage: "play.fill") }

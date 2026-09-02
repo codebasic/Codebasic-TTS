@@ -1,18 +1,17 @@
 import SwiftUI
 
 /// In-panel model selector for one LLM role. Lists models from ALL connected
-/// providers (Ollama + Gemini) — picking one sets both the role's provider and
-/// that provider's model field. Ollama and Gemini can be configured at once.
+/// providers (Ollama · Gemini · OpenCode · OpenRouter) — picking one sets both
+/// the role's provider and that provider's model field. All four channels can
+/// be configured at once (Settings → 텍스트 생성).
 struct LLMModelPicker: View {
     @EnvironmentObject var app: AppState
     let label: String
-    @Binding var provider: AppState.NormalizeProvider
-    @Binding var geminiModel: String
-    @Binding var ollamaModel: String
+    let role: AppState.LLMRole
     var onChange: () -> Void = {}
 
     private var current: AppState.LLMChoice {
-        AppState.LLMChoice(provider: provider, model: provider == .gemini ? geminiModel : ollamaModel)
+        AppState.LLMChoice(provider: app.roleProvider(role), model: app.roleModel(role))
     }
 
     /// Connected models, with the current selection folded in so a saved model
@@ -28,10 +27,9 @@ struct LLMModelPicker: View {
         let models: [AppState.LLMChoice]
         var id: String { provider.rawValue }
     }
-    /// Models grouped by provider (Ollama, then Gemini), sorted by name within each.
+    /// Models grouped by provider (declaration order), sorted by name within each.
     private var grouped: [Group] {
-        let providers: [AppState.NormalizeProvider] = [.ollama, .gemini]
-        return providers.compactMap { prov -> Group? in
+        AppState.NormalizeProvider.allCases.compactMap { prov -> Group? in
             let ms = options.filter { $0.provider == prov }
                 .sorted { $0.model.lowercased() < $1.model.lowercased() }
             return ms.isEmpty ? nil : Group(provider: prov, models: ms)
@@ -48,13 +46,12 @@ struct LLMModelPicker: View {
                     get: { current.id },
                     set: { id in
                         guard let c = options.first(where: { $0.id == id }) else { return }
-                        provider = c.provider
-                        if c.provider == .gemini { geminiModel = c.model } else { ollamaModel = c.model }
+                        app.setRole(role, provider: c.provider, model: c.model)
                         onChange()
                     }
                 )) {
                     ForEach(grouped) { group in
-                        Section(group.provider == .gemini ? "Gemini" : "Ollama") {
+                        Section(group.provider.label) {
                             ForEach(group.models) { Text($0.model).tag($0.id) }
                         }
                     }
