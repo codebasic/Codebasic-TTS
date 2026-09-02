@@ -36,8 +36,8 @@ struct SettingsSaveTriggersB: ViewModifier {
             .onChange(of: app.geminiBaseURL) { _, _ in app.saveSettings() }
             .onChange(of: app.openCodeModel) { _, _ in app.saveSettings() }
             .onChange(of: app.openCodeBaseURL) { _, _ in app.saveSettings() }
-            .onChange(of: app.openRouterModel) { _, _ in app.saveSettings() }
-            .onChange(of: app.openRouterBaseURL) { _, _ in app.saveSettings() }
+            .onChange(of: app.openAIModel) { _, _ in app.saveSettings() }
+            .onChange(of: app.openAIBaseURL) { _, _ in app.saveSettings() }
             .onChange(of: app.reviewEnabled) { _, _ in app.saveSettings() }
             .onChange(of: app.ollamaModel) { _, _ in app.saveSettings() }
             .onChange(of: app.ollamaURL) { _, _ in app.saveSettings() }

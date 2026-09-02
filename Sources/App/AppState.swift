@@ -44,16 +44,16 @@ final class AppState: ObservableObject {
     @Published var localBaseURL = "http://127.0.0.1:8765"
 
     // TTS-friendly text normalization (LLM: Gemini API, local Ollama, or an
-    // OpenAI-compatible endpoint — OpenCode / OpenRouter)
+    // OpenAI-compatible endpoints)
     enum NormalizeProvider: String, CaseIterable, Identifiable {
-        case gemini, ollama, opencode, openrouter
+        case gemini, ollama, opencode, openai
         var id: String { rawValue }
         var label: String {
             switch self {
             case .gemini: return "Gemini"
             case .ollama: return "Ollama"
             case .opencode: return "OpenCode"
-            case .openrouter: return "OpenRouter"
+            case .openai: return "OpenAI 호환"
             }
         }
     }
@@ -64,18 +64,20 @@ final class AppState: ObservableObject {
     @Published var geminiModels: [String] = []        // fetched from the endpoint (models.list)
     @Published var geminiStatus = ""
     @Published var geminiKeyPresent = Secrets.geminiKey != nil
-    // OpenAI 호환 채널 (OpenCode · OpenRouter): 엔드포인트·모델·키 상태.
-    // 엔드포인트는 설정에서 URL 수정 가능 — 자체 프록시/게이트웨이로 교체해도 된다.
+    /// OpenAI 호환 채널: 기본 엔드포인트는 Gemini의 공식 OpenAI 호환 경로이고
+    /// 키는 TTS 앱의 gemini_key를 공용으로 쓴다(Secrets.openAIKey — openai_key
+    /// 파일이 있으면 우선). URL을 OpenCode·자체 프록시 등으로 바꾸면 그
+    /// 엔드포인트의 키를 openai_key에 넣으면 된다.
+    @Published var openAIBaseURL = OpenAICompat.defaultOpenAIBaseURL
+    @Published var openAIModel = "gemini-3.1-flash-lite"
+    @Published var openAIModels: [String] = OpenAICompat.fallbackOpenAIModels
+    @Published var openAIStatus = ""
+    @Published var openAIKeyPresent = Secrets.openAIKey != nil
     @Published var openCodeBaseURL = OpenAICompat.defaultOpenCodeBaseURL
     @Published var openCodeModel = "glm-5.3-flash"
     @Published var openCodeModels: [String] = OpenAICompat.fallbackOpenCodeModels
     @Published var openCodeStatus = ""
     @Published var openCodeKeyPresent = Secrets.openCodeKey != nil
-    @Published var openRouterBaseURL = OpenAICompat.defaultOpenRouterBaseURL
-    @Published var openRouterModel = "google/gemini-3.1-flash-lite"
-    @Published var openRouterModels: [String] = OpenAICompat.fallbackOpenRouterModels
-    @Published var openRouterStatus = ""
-    @Published var openRouterKeyPresent = Secrets.openRouterKey != nil
     @Published var ollamaModel = "gemma4:31b-cloud"   // 대본(정규화)용. 3B local models garble Korean numbers; a strong model is needed
     @Published var ollamaURL = "http://localhost:11434"
     @Published var ollamaModels: [String] = []
@@ -107,7 +109,7 @@ final class AppState: ObservableObject {
     @Published var explainGeminiModel = "gemini-2.0-flash"   // 해설용
     @Published var explainOllamaModel = "gemma4:31b-cloud"   // 해설용
     @Published var explainOpenCodeModel = "glm-5.3-flash"    // 해설용 (OpenCode)
-    @Published var explainOpenRouterModel = "google/gemini-3.1-flash-lite"  // 해설용 (OpenRouter)
+    @Published var explainOpenAIModel = "gemini-3.1-flash-lite"  // 해설용 (OpenAI 호환)
     @Published var explainTemperature: Double = 0.4          // 해설 LLM 생성 매개변수
     @Published var scriptTemperature: Double = 0.2           // 대본 LLM 생성 매개변수
     // 검수 단계 (해설 vs TTS 대본 대조): 리뷰어 모델·리포트·진행 상태.
@@ -116,7 +118,7 @@ final class AppState: ObservableObject {
     @Published var reviewGeminiModel = "gemini-2.0-flash"
     @Published var reviewOllamaModel = "gemma4:31b-cloud"
     @Published var reviewOpenCodeModel = "glm-5.3-flash"
-    @Published var reviewOpenRouterModel = "google/gemini-3.1-flash-lite"
+    @Published var reviewOpenAIModel = "gemini-3.1-flash-lite"
     @Published var reviewPrompt = ScriptReview.defaultInstruction
     @Published var reviewText = ""               // latest 검수 리포트
     @Published var reviewing = false
@@ -128,7 +130,7 @@ final class AppState: ObservableObject {
     @Published var explainVisionGeminiModel = ""
     @Published var explainVisionOllamaModel = ""
     @Published var explainVisionOpenCodeModel = ""
-    @Published var explainVisionOpenRouterModel = ""
+    @Published var explainVisionOpenAIModel = ""
     var hasImages: Bool { !codeImages.isEmpty }
     @Published var lastExplainedCode = ""        // baseline snapshot for "이어서 해설" (incremental)
     @Published var lastSegment = ""              // the most recently produced commentary (full or appended delta)
@@ -154,7 +156,7 @@ final class AppState: ObservableObject {
         case .gemini: return geminiModel
         case .ollama: return ollamaModel
         case .opencode: return openCodeModel
-        case .openrouter: return openRouterModel
+        case .openai: return openAIModel
         }
     }
     var explainModel: String {
@@ -162,7 +164,7 @@ final class AppState: ObservableObject {
         case .gemini: return explainGeminiModel
         case .ollama: return explainOllamaModel
         case .opencode: return explainOpenCodeModel
-        case .openrouter: return explainOpenRouterModel
+        case .openai: return explainOpenAIModel
         }
     }
     var visionProviderEff: NormalizeProvider { visionOverridden ? visionProvider : explainProvider }
@@ -172,7 +174,7 @@ final class AppState: ObservableObject {
         case .gemini: return explainVisionGeminiModel
         case .ollama: return explainVisionOllamaModel
         case .opencode: return explainVisionOpenCodeModel
-        case .openrouter: return explainVisionOpenRouterModel
+        case .openai: return explainVisionOpenAIModel
         }
     }
 
@@ -204,7 +206,7 @@ final class AppState: ObservableObject {
             case .gemini: geminiModel = model
             case .ollama: ollamaModel = model
             case .opencode: openCodeModel = model
-            case .openrouter: openRouterModel = model
+            case .openai: openAIModel = model
             }
         case .explain:
             explainProvider = provider
@@ -212,7 +214,7 @@ final class AppState: ObservableObject {
             case .gemini: explainGeminiModel = model
             case .ollama: explainOllamaModel = model
             case .opencode: explainOpenCodeModel = model
-            case .openrouter: explainOpenRouterModel = model
+            case .openai: explainOpenAIModel = model
             }
         case .vision:
             visionProvider = provider
@@ -221,7 +223,7 @@ final class AppState: ObservableObject {
             case .gemini: explainVisionGeminiModel = model
             case .ollama: explainVisionOllamaModel = model
             case .opencode: explainVisionOpenCodeModel = model
-            case .openrouter: explainVisionOpenRouterModel = model
+            case .openai: explainVisionOpenAIModel = model
             }
         case .review:
             reviewProvider = provider
@@ -229,7 +231,7 @@ final class AppState: ObservableObject {
             case .gemini: reviewGeminiModel = model
             case .ollama: reviewOllamaModel = model
             case .opencode: reviewOpenCodeModel = model
-            case .openrouter: reviewOpenRouterModel = model
+            case .openai: reviewOpenAIModel = model
             }
         }
     }
@@ -244,7 +246,7 @@ final class AppState: ObservableObject {
     }
 
     /// All models from connected providers (Ollama always; Gemini once a key is
-    /// set; OpenCode/OpenRouter once a key is set — fallback lists before the
+    /// set; OpenAI-compatible channels once a key is set — fallback lists before the
     /// first successful models fetch).
     var connectedModels: [LLMChoice] {
         var out = ollamaModels.map { LLMChoice(provider: .ollama, model: $0) }
@@ -255,8 +257,8 @@ final class AppState: ObservableObject {
         if openCodeKeyPresent {
             out += openCodeModels.map { LLMChoice(provider: .opencode, model: $0) }
         }
-        if openRouterKeyPresent {
-            out += openRouterModels.map { LLMChoice(provider: .openrouter, model: $0) }
+        if openAIKeyPresent {
+            out += openAIModels.map { LLMChoice(provider: .openai, model: $0) }
         }
         return out
     }
@@ -265,13 +267,13 @@ final class AppState: ObservableObject {
         refreshOllamaModels()
         if geminiKeyPresent { refreshGeminiModels() }
         if openCodeKeyPresent { refreshOpenCodeModels() }
-        if openRouterKeyPresent { refreshOpenRouterModels() }
+        if openAIKeyPresent { refreshOpenAIModels() }
     }
     func refreshAllModelsIfNeeded() {
         if ollamaModels.isEmpty { refreshOllamaModels() }
         if geminiModels.isEmpty && geminiKeyPresent { refreshGeminiModels() }
         if openCodeModels.isEmpty && openCodeKeyPresent { refreshOpenCodeModels() }
-        if openRouterModels.isEmpty && openRouterKeyPresent { refreshOpenRouterModels() }
+        if openAIModels.isEmpty && openAIKeyPresent { refreshOpenAIModels() }
     }
 
     // Runtime
@@ -595,9 +597,9 @@ final class AppState: ObservableObject {
             guard let key = Secrets.openCodeKey else { return nil }
             return OpenAICompatNormalizer(baseURL: openCodeBaseURL, apiKey: key, model: openCodeModel,
                                           instruction: instruction, temperature: scriptTemperature)
-        case .openrouter:
-            guard let key = Secrets.openRouterKey else { return nil }
-            return OpenAICompatNormalizer(baseURL: openRouterBaseURL, apiKey: key, model: openRouterModel,
+        case .openai:
+            guard let key = Secrets.openAIKey else { return nil }
+            return OpenAICompatNormalizer(baseURL: openAIBaseURL, apiKey: key, model: openAIModel,
                                           instruction: instruction, temperature: scriptTemperature)
         }
     }
@@ -626,12 +628,16 @@ final class AppState: ObservableObject {
         if !k.isEmpty { refreshOpenCodeModels() }
     }
 
-    func saveOpenRouterKey(_ key: String) {
+    /// OpenAI 호환 채널 키 저장. 기본은 gemini_key 공용이므로, 엔드포인트를
+    /// OpenCode·자체 프록시 등으로 바꿨을 때만 별도 키를 저장하면 된다.
+    func saveOpenAIKey(_ key: String) {
         let k = key.trimmingCharacters(in: .whitespacesAndNewlines)
-        Secrets.writeKey(named: "openrouter_key", k)
-        openRouterKeyPresent = !k.isEmpty
-        if !k.isEmpty { refreshOpenRouterModels() }
+        guard !k.isEmpty else { return }
+        Secrets.writeKey(named: "openai_key", k)
+        openAIKeyPresent = true
+        refreshOpenAIModels()
     }
+
 
     // MARK: - Commentary (코드 → 해설)
 
@@ -649,9 +655,9 @@ final class AppState: ObservableObject {
             guard let key = Secrets.openCodeKey else { return nil }
             return OpenAICompatExplainer(baseURL: openCodeBaseURL, apiKey: key, model: explainOpenCodeModel,
                                          instruction: explainPrompt, temperature: explainTemperature)
-        case .openrouter:
-            guard let key = Secrets.openRouterKey else { return nil }
-            return OpenAICompatExplainer(baseURL: openRouterBaseURL, apiKey: key, model: explainOpenRouterModel,
+        case .openai:
+            guard let key = Secrets.openAIKey else { return nil }
+            return OpenAICompatExplainer(baseURL: openAIBaseURL, apiKey: key, model: explainOpenAIModel,
                                          instruction: explainPrompt, temperature: explainTemperature)
         }
     }
@@ -675,9 +681,9 @@ final class AppState: ObservableObject {
             guard let key = Secrets.openCodeKey else { return AsyncThrowingStream { $0.finish() } }
             return LLM.openaiChatStream(baseURL: openCodeBaseURL, apiKey: key, model: explainOpenCodeModel,
                                         prompt: prompt, images: images, temperature: explainTemperature)
-        case .openrouter:
-            guard let key = Secrets.openRouterKey else { return AsyncThrowingStream { $0.finish() } }
-            return LLM.openaiChatStream(baseURL: openRouterBaseURL, apiKey: key, model: explainOpenRouterModel,
+        case .openai:
+            guard let key = Secrets.openAIKey else { return AsyncThrowingStream { $0.finish() } }
+            return LLM.openaiChatStream(baseURL: openAIBaseURL, apiKey: key, model: explainOpenAIModel,
                                         prompt: prompt, images: images, temperature: explainTemperature)
         }
     }
@@ -732,9 +738,9 @@ final class AppState: ObservableObject {
             guard let key = Secrets.openCodeKey else { statusText = "OpenCode 키 미설정"; return nil }
             stream = LLM.openaiChatStream(baseURL: openCodeBaseURL, apiKey: key, model: visionModel,
                                           prompt: prompt, images: imgs, temperature: 0)
-        case .openrouter:
-            guard let key = Secrets.openRouterKey else { statusText = "OpenRouter 키 미설정"; return nil }
-            stream = LLM.openaiChatStream(baseURL: openRouterBaseURL, apiKey: key, model: visionModel,
+        case .openai:
+            guard let key = Secrets.openAIKey else { statusText = "키 미설정"; return nil }
+            stream = LLM.openaiChatStream(baseURL: openAIBaseURL, apiKey: key, model: visionModel,
                                           prompt: prompt, images: imgs, temperature: 0)
         }
         var acc = ""
@@ -1124,9 +1130,9 @@ final class AppState: ObservableObject {
             guard let key = Secrets.openCodeKey else { return nil }
             return OpenAICompatReviewer(baseURL: openCodeBaseURL, apiKey: key, model: reviewOpenCodeModel,
                                         instruction: reviewPrompt, temperature: reviewTemperature)
-        case .openrouter:
-            guard let key = Secrets.openRouterKey else { return nil }
-            return OpenAICompatReviewer(baseURL: openRouterBaseURL, apiKey: key, model: reviewOpenRouterModel,
+        case .openai:
+            guard let key = Secrets.openAIKey else { return nil }
+            return OpenAICompatReviewer(baseURL: openAIBaseURL, apiKey: key, model: reviewOpenAIModel,
                                         instruction: reviewPrompt, temperature: reviewTemperature)
         }
     }
@@ -1137,7 +1143,7 @@ final class AppState: ObservableObject {
         case .gemini: return reviewGeminiModel
         case .ollama: return reviewOllamaModel
         case .opencode: return reviewOpenCodeModel
-        case .openrouter: return reviewOpenRouterModel
+        case .openai: return reviewOpenAIModel
         }
     }
 
@@ -1388,18 +1394,18 @@ final class AppState: ObservableObject {
         }
     }
 
-    func refreshOpenRouterModels() {
-        guard let key = Secrets.openRouterKey else { openRouterStatus = "키 없음"; return }
-        openRouterStatus = "확인 중…"
-        let base = openRouterBaseURL
+    func refreshOpenAIModels() {
+        guard let key = Secrets.openAIKey else { openAIStatus = "키 없음"; return }
+        openAIStatus = "확인 중…"
+        let base = openAIBaseURL
         Task { [weak self] in
             do {
                 let ms = try await OpenAICompat.models(baseURL: base, apiKey: key)
                 guard let self else { return }
-                self.openRouterModels = ms.isEmpty ? OpenAICompat.fallbackOpenRouterModels : ms
-                self.openRouterStatus = "연결됨 · 모델 \(ms.count)개"
+                self.openAIModels = ms.isEmpty ? OpenAICompat.fallbackOpenAIModels : ms
+                self.openAIStatus = "연결됨 · 모델 \(ms.count)개"
             } catch {
-                self?.openRouterStatus = "연결 실패: \(error.localizedDescription)"
+                self?.openAIStatus = "연결 실패: \(error.localizedDescription)"
             }
         }
     }
@@ -1464,13 +1470,13 @@ final class AppState: ObservableObject {
             "geminiBaseURL": geminiBaseURL,
             "explainGeminiModel": explainGeminiModel, "explainOllamaModel": explainOllamaModel,
             "openCodeBaseURL": openCodeBaseURL, "openCodeModel": openCodeModel,
-            "openRouterBaseURL": openRouterBaseURL, "openRouterModel": openRouterModel,
-            "explainOpenCodeModel": explainOpenCodeModel, "explainOpenRouterModel": explainOpenRouterModel,
+            "openAIBaseURL": openAIBaseURL, "openAIModel": openAIModel,
+            "explainOpenCodeModel": explainOpenCodeModel, "explainOpenAIModel": explainOpenAIModel,
             "explainVisionOpenCodeModel": explainVisionOpenCodeModel,
-            "explainVisionOpenRouterModel": explainVisionOpenRouterModel,
+            "explainVisionOpenAIModel": explainVisionOpenAIModel,
             "reviewProvider": reviewProvider.rawValue,
             "reviewGeminiModel": reviewGeminiModel, "reviewOllamaModel": reviewOllamaModel,
-            "reviewOpenCodeModel": reviewOpenCodeModel, "reviewOpenRouterModel": reviewOpenRouterModel,
+            "reviewOpenCodeModel": reviewOpenCodeModel, "reviewOpenAIModel": reviewOpenAIModel,
             "reviewEnabled": reviewEnabled, "reviewTemperature": reviewTemperature,
             "explainVisionGeminiModel": explainVisionGeminiModel,
             "explainVisionOllamaModel": explainVisionOllamaModel,
@@ -1529,17 +1535,17 @@ final class AppState: ObservableObject {
         explainOllamaModel = o["explainOllamaModel"] as? String ?? explainOllamaModel
         openCodeBaseURL = o["openCodeBaseURL"] as? String ?? openCodeBaseURL
         openCodeModel = o["openCodeModel"] as? String ?? openCodeModel
-        openRouterBaseURL = o["openRouterBaseURL"] as? String ?? openRouterBaseURL
-        openRouterModel = o["openRouterModel"] as? String ?? openRouterModel
+        openAIBaseURL = o["openAIBaseURL"] as? String ?? openAIBaseURL
+        openAIModel = o["openAIModel"] as? String ?? openAIModel
         explainOpenCodeModel = o["explainOpenCodeModel"] as? String ?? explainOpenCodeModel
-        explainOpenRouterModel = o["explainOpenRouterModel"] as? String ?? explainOpenRouterModel
+        explainOpenAIModel = o["explainOpenAIModel"] as? String ?? explainOpenAIModel
         explainVisionOpenCodeModel = o["explainVisionOpenCodeModel"] as? String ?? explainVisionOpenCodeModel
-        explainVisionOpenRouterModel = o["explainVisionOpenRouterModel"] as? String ?? explainVisionOpenRouterModel
+        explainVisionOpenAIModel = o["explainVisionOpenAIModel"] as? String ?? explainVisionOpenAIModel
         reviewProvider = NormalizeProvider(rawValue: o["reviewProvider"] as? String ?? "") ?? reviewProvider
         reviewGeminiModel = o["reviewGeminiModel"] as? String ?? reviewGeminiModel
         reviewOllamaModel = o["reviewOllamaModel"] as? String ?? reviewOllamaModel
         reviewOpenCodeModel = o["reviewOpenCodeModel"] as? String ?? reviewOpenCodeModel
-        reviewOpenRouterModel = o["reviewOpenRouterModel"] as? String ?? reviewOpenRouterModel
+        reviewOpenAIModel = o["reviewOpenAIModel"] as? String ?? reviewOpenAIModel
         reviewEnabled = o["reviewEnabled"] as? Bool ?? reviewEnabled
         reviewTemperature = o["reviewTemperature"] as? Double ?? reviewTemperature
         explainVisionGeminiModel = o["explainVisionGeminiModel"] as? String ?? explainVisionGeminiModel

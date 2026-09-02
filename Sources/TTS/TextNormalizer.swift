@@ -169,7 +169,7 @@ enum LLM {
             let work = Task {
                 do {
                     var base = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if base.isEmpty { base = "https://openrouter.ai/api/v1" }
+                    if base.isEmpty { base = OpenAICompat.defaultOpenAIBaseURL }
                     while base.hasSuffix("/") { base.removeLast() }
                     guard let url = URL(string: "\(base)/chat/completions") else {
                         throw NSError(domain: "OpenAICompat", code: -1,
@@ -467,16 +467,19 @@ enum Ollama {
 
 /// OpenAI 호환 채널의 엔드포인트 프리셋. 앱 어디서든 이 목록만 알면 된다.
 enum OpenAICompat {
+    /// Google Gemini의 공식 OpenAI 호환 경로 — TTS 앱의 gemini_key(AIza…)를
+    /// Bearer 키로 그대로 쓴다. 별도 키 발급 불필요.
+    static let defaultOpenAIBaseURL = "https://generativelanguage.googleapis.com/v1beta/openai"
     static let defaultOpenCodeBaseURL = "https://opencode.ai/zen/go/v1"
     static let defaultOpenRouterBaseURL = "https://openrouter.ai/api/v1"
     /// 연결 확인 전(모델 목록 미수신)에도 목록에 보여줄 기본 모델.
+    static let fallbackOpenAIModels = ["gemini-3.1-flash-lite", "gemini-3.6-flash", "gemini-3.7-flash", "gemini-2.5-flash"]
     static let fallbackOpenCodeModels = ["glm-5.3-flash", "qwen3.8-flash", "deepseek-v4-flash"]
-    static let fallbackOpenRouterModels = ["google/gemini-3.1-flash-lite", "google/gemini-3.6-flash", "google/gemini-3.7-flash"]
 
     /// `GET {base}/models` — OpenAI 호환 목록. Bearer 인증. `data[].id`만 뽑는다.
     static func models(baseURL: String, apiKey: String) async throws -> [String] {
         var base = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        if base.isEmpty { base = defaultOpenRouterBaseURL }
+        if base.isEmpty { base = defaultOpenAIBaseURL }
         while base.hasSuffix("/") { base.removeLast() }
         guard let url = URL(string: "\(base)/models") else {
             throw NSError(domain: "OpenAICompat", code: -1,
@@ -492,7 +495,11 @@ enum OpenAICompat {
         }
         let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         let arr = (obj?["data"] as? [[String: Any]]) ?? []
-        return arr.compactMap { $0["id"] as? String }.sorted { $0.lowercased() < $1.lowercased() }
+        return arr.compactMap { m -> String? in
+            guard var id = m["id"] as? String else { return nil }
+            if id.hasPrefix("models/") { id.removeFirst("models/".count) }   // Gemini 호환 경로 표기 정규화
+            return id.isEmpty ? nil : id
+        }.sorted { $0.lowercased() < $1.lowercased() }
     }
 }
 

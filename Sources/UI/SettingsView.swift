@@ -10,7 +10,7 @@ struct SettingsView: View {
     @State private var channel = 0               // 0 = 음성 합성, 1 = 텍스트 생성
     @State private var geminiKeyInput = ""
     @State private var openCodeKeyInput = ""
-    @State private var openRouterKeyInput = ""
+    @State private var openAIKeyInput = ""
     @State private var keyInput = ""             // ElevenLabs key entry
 
     var body: some View {
@@ -185,18 +185,18 @@ struct SettingsView: View {
             }
         }
 
-        Section("OpenRouter (클라우드 · OpenAI 호환)") {
-            labeledField("엔드포인트", placeholder: OpenAICompat.defaultOpenRouterBaseURL,
-                         text: $app.openRouterBaseURL,
-                         hint: "OpenAI 호환 API 루트. 자체 프록시·게이트웨이로 교체해도 됩니다.")
-            KeyField(label: "API 키", text: $openRouterKeyInput,
-                     hint: app.openRouterKeyPresent ? "현재: 설정됨 (App Support)" : "현재: 없음 — 키를 넣으면 모델 목록에 OpenRouter 모델이 함께 표시됩니다")
+        Section("OpenAI 호환 (Gemini · OpenCode · 자체 프록시)") {
+            labeledField("엔드포인트", placeholder: OpenAICompat.defaultOpenAIBaseURL,
+                         text: $app.openAIBaseURL,
+                         hint: "기본은 Gemini의 공식 OpenAI 호환 경로(위 Gemini 키 공용). URL을 OpenCode·자체 프록시로 바꾸면 아래 키에 그 엔드포인트의 키를 넣으세요.")
+            KeyField(label: "API 키 (비우면 Gemini 키 공용)", text: $openAIKeyInput,
+                     hint: app.openAIKeyPresent ? "현재: 설정됨 (Gemini 키 공용 또는 openai_key)" : "현재: 없음 — 위 Gemini 섹션에서 키를 저장하면 함께 사용됩니다")
             HStack {
-                Button("키 저장") { app.saveOpenRouterKey(openRouterKeyInput) }
-                    .disabled(openRouterKeyInput.trimmingCharacters(in: .whitespaces).isEmpty)
-                Button("연결 확인 / 모델 목록") { app.refreshOpenRouterModels() }
+                Button("키 저장") { app.saveOpenAIKey(openAIKeyInput) }
+                    .disabled(openAIKeyInput.trimmingCharacters(in: .whitespaces).isEmpty)
+                Button("연결 확인 / 모델 목록") { app.refreshOpenAIModels() }
                 Spacer()
-                Text(app.openRouterStatus).font(.caption).foregroundStyle(.secondary)
+                Text(app.openAIStatus).font(.caption).foregroundStyle(.secondary)
             }
         }
 
@@ -216,7 +216,7 @@ struct SettingsView: View {
         keyInput = Secrets.elevenLabsKey ?? ""        // pre-fill so the current key is visible/editable
         geminiKeyInput = Secrets.geminiKey ?? ""
         openCodeKeyInput = Secrets.openCodeKey ?? ""
-        openRouterKeyInput = Secrets.openRouterKey ?? ""
+        openAIKeyInput = Secrets.openAIKey ?? ""
     }
 
     @ViewBuilder
