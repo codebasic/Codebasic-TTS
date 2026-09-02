@@ -1255,6 +1255,22 @@ final class AppState: ObservableObject {
         }
     }
 
+    // MARK: - Hermes 세션 수신 재생 (PlaybackInbox)
+
+    /// Hermes 세션이 만든 (자막용 해설, 음성용 대본) 쌍을 재생 준비 상태로
+    /// 올려둔다. LLM 없음 — 전달받은 텍스트를 그대로 패널·재생에 반영.
+    /// 자막 = narration(해설), 음성 = script(대본). 대본이 비면 원문 그대로.
+    func prepareInboxPackage(_ pkg: PlaybackInbox.PlaybackPackage) {
+        cancelActiveWork()
+        playbackMode = .explain
+        explanationText = pkg.narration          // 자막용 해설 → 해설 패널
+        scriptText = pkg.script                  // 음성용 대본 → TTS 탭 대본 패널
+        inputText = pkg.narration                // TTS 탭 원본 (표시 일관)
+        markScriptFresh()                        // 내부 대본 아님 — stale 플래그 방지
+        statusText = pkg.topic.isEmpty ? "세션에서 수신 — 재생 준비됨" : "세션 수신: \(pkg.topic) — 재생 준비됨"
+        onRequestReview?()                       // 관리 창을 띄워 사용자가 확인 후 재생
+    }
+
     /// Services entry: set the source, build the script, then speak it.
     func speakSelected(_ text: String) {
         cancelActiveWork()

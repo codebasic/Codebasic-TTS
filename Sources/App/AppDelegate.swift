@@ -32,7 +32,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if appState.keyPresent { appState.refreshVoices() }
         mainWindow.show()                       // open the management window on launch
 
-        Log.app.info("Codebasic TTS launched. Backend: \(self.appState.backendIdentity, privacy: .public)")
+        // Hermes 세션 재생 수신함: 패키지 도착 시 재생 준비(자동 재생은 안 함).
+        PlaybackInbox.shared.start()
+        PlaybackInbox.shared.$lastReceived
+            .compactMap { $0 }
+            .receive(on: RunLoop.main)
+            .sink { [weak self] pkg in
+                self?.appState.prepareInboxPackage(pkg)
+            }
+            .store(in: &cancellables)
+
+        Log.app.info("Codebasic TTS launched. Backend: \\(self.appState.backendIdentity, privacy: .public)")
     }
 
     // MARK: - Status item (persistent, focus-safe affordance to reopen the UI)
