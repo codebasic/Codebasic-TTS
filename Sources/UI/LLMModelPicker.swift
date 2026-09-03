@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// In-panel model selector for one LLM role. Lists models from ALL connected
-/// providers (Ollama · Gemini · OpenCode · OpenRouter) — picking one sets both
+/// providers (Ollama · Gemini · OpenCode · OpenAI 호환) — picking one sets both
 /// the role's provider and that provider's model field. All four channels can
 /// be configured at once (Settings → 텍스트 생성).
 struct LLMModelPicker: View {

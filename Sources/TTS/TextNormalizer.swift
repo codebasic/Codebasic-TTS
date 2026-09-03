@@ -158,7 +158,7 @@ enum LLM {
         }
     }
 
-    /// OpenAI 호환(chat/completions, stream:true → SSE). OpenCode·OpenRouter 등
+    /// OpenAI 호환(chat/completions, stream:true → SSE). Gemini 호환 경로·OpenCode 등
     /// 공통. Yields each `delta.content` increment; `[DONE]` line ends the stream.
     /// Images ride as `image_url` data URLs (vision-capable models only).
     /// Cancelling the consuming task tears down the request.
@@ -179,7 +179,7 @@ enum LLM {
                     req.httpMethod = "POST"
                     req.setValue("application/json", forHTTPHeaderField: "Content-Type")
                     req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-                    // OpenRouter 권장 헤더 (없어도 무해)
+                    // 일부 게이트웨이가 권장하는 식별 헤더 (없어도 무해)
                     req.setValue("SelectedTextTTS", forHTTPHeaderField: "X-Title")
                     var userContent: [[String: Any]] = [["type": "text", "text": prompt]]
                     for img in images {
@@ -463,7 +463,7 @@ enum Ollama {
     }
 }
 
-// MARK: - OpenAI 호환 엔드포인트 (OpenCode · OpenRouter)
+// MARK: - OpenAI 호환 엔드포인트 (Gemini 공식 호환 경로 · OpenCode · 자체 프록시)
 
 /// OpenAI 호환 채널의 엔드포인트 프리셋. 앱 어디서든 이 목록만 알면 된다.
 enum OpenAICompat {
@@ -471,7 +471,6 @@ enum OpenAICompat {
     /// Bearer 키로 그대로 쓴다. 별도 키 발급 불필요.
     static let defaultOpenAIBaseURL = "https://generativelanguage.googleapis.com/v1beta/openai"
     static let defaultOpenCodeBaseURL = "https://opencode.ai/zen/go/v1"
-    static let defaultOpenRouterBaseURL = "https://openrouter.ai/api/v1"
     /// 연결 확인 전(모델 목록 미수신)에도 목록에 보여줄 기본 모델.
     static let fallbackOpenAIModels = ["gemini-3.1-flash-lite", "gemini-3.6-flash", "gemini-3.7-flash", "gemini-2.5-flash"]
     static let fallbackOpenCodeModels = ["glm-5.3-flash", "qwen3.8-flash", "deepseek-v4-flash"]

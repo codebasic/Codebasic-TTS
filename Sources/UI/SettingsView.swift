@@ -140,7 +140,7 @@ struct SettingsView: View {
 
     @ViewBuilder private var llmChannel: some View {
         Section {
-            Text("코드 해설·음성 대본 생성에 쓰는 텍스트 생성 모델입니다. Ollama·Gemini·OpenCode·OpenRouter를 동시에 연결할 수 있고, 모델은 해설/TTS 패널에서 연결된 제공자의 통합 목록에서 고릅니다. temperature는 각 패널 인스펙터(⊟)에서 조절합니다.")
+            Text("코드 해설·음성 대본 생성에 쓰는 텍스트 생성 모델입니다. Ollama·Gemini·OpenCode·OpenAI 호환 채널을 동시에 연결할 수 있고, 모델은 해설/TTS 패널에서 연결된 제공자의 통합 목록에서 고릅니다. temperature는 각 패널 인스펙터(⊟)에서 조절합니다.")
                 .font(.caption).foregroundStyle(.secondary)
         }
 
