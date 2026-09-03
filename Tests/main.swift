@@ -76,4 +76,11 @@ eq("판정 줄 없음 → none", ReviewVerdict.parse("대체로 괜찮습니다.
 eq("판정 값 불명 → none", ReviewVerdict.parse("판정: 보류"), .none)
 eq("빈 리포트 → none", ReviewVerdict.parse(""), .none)
 
+print("ReviewMark — 캐시 표시 ↔ 배지 판정")
+eq("pass → 통과", ReviewMark.pass.verdict, .pass)
+eq("revised → 통과", ReviewMark.revisedPass.verdict, .pass)
+check("flagged → 수정(플래그)", ReviewMark.revisedFlagged.verdict != .pass && ReviewMark.revisedFlagged.flagged)
+eq("rawValue 왕복", ReviewMark(rawValue: ReviewMark.revisedFlagged.rawValue), .revisedFlagged)
+eq("알 수 없는 표시 → nil", ReviewMark(rawValue: "??"), nil)
+
 if failures == 0 { print("\nAll tests passed.") } else { print("\n\(failures) test(s) FAILED."); exit(1) }

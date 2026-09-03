@@ -159,7 +159,7 @@ struct CommentaryView: View {
             // 해설 검수: 코드 vs 해설 대조. 판정이 '수정'이면 (자동 반영 시) 1회 재생성 뒤 재검수.
             ReviewPanel(title: "해설 검수", autoLabel: "해설 생성 후 자동 검수",
                         enabled: $app.explainReviewEnabled, reviewing: app.explainReviewing,
-                        report: app.explainReviewText, verdict: app.explainReviewVerdict,
+                        report: app.explainReviewText, verdict: app.explainReviewVerdict, flagged: app.explainReviewFlagged,
                         prompt: $app.explainReviewPrompt, defaultPrompt: ExplanationReview.defaultInstruction,
                         canRun: !explanationEmpty && !app.explaining,
                         runHelp: "코드와 해설을 대조해 창작·누락·형식 위반을 짚어 봅니다 (리포트만, 수정 반영 없음)",

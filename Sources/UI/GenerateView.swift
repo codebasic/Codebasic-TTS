@@ -107,7 +107,7 @@ struct GenerateView: View {
             // 검수: 자막용 원본 vs TTS 대본 대조. 판정이 '수정'이면 (자동 반영 시) 1회 다듬은 뒤 재검수.
             ReviewPanel(title: "검수", autoLabel: "대본 생성 후 자동 검수",
                         enabled: $app.reviewEnabled, reviewing: app.reviewing,
-                        report: app.reviewText, verdict: app.reviewVerdict,
+                        report: app.reviewText, verdict: app.reviewVerdict, flagged: app.reviewFlagged,
                         prompt: $app.reviewPrompt, defaultPrompt: ScriptReview.defaultInstruction,
                         canRun: !app.scriptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                         runHelp: "자막용 원본과 TTS 대본을 대조해 발음 위험·누락·어색한 문장을 짚어 봅니다 (리포트만, 수정 반영 없음)",

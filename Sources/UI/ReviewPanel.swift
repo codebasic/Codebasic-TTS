@@ -11,6 +11,7 @@ struct ReviewPanel: View {
     let reviewing: Bool
     let report: String
     let verdict: ReviewVerdict?
+    let flagged: Bool            // 재검수 미통과로 원본을 유지한 상태
     @Binding var prompt: String
     let defaultPrompt: String
     let canRun: Bool
@@ -49,6 +50,10 @@ struct ReviewPanel: View {
             if reviewing {
                 ProgressView().controlSize(.small)
                 Text("검수 중…").font(.caption).foregroundStyle(.secondary)
+            } else if flagged {
+                Label("재검수 미통과 — 원본 유지 (백로그 기록)", systemImage: "flag.fill")
+                    .font(.caption.bold()).foregroundStyle(.red)
+                    .help("수정 지시를 반영한 재생성본이 재검수에서도 '수정' 판정을 받아 버리고 원본을 유지했습니다. 상세는 백로그 탭")
             } else if let v = verdict {
                 Text("판정: \(v.label)").font(.caption.bold()).foregroundStyle(color(for: v))
             }

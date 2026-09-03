@@ -17,4 +17,5 @@ enum Log {
     static let service = Logger(subsystem: subsystem, category: "service")
     static let app = Logger(subsystem: subsystem, category: "app")
     static let tts = Logger(subsystem: subsystem, category: "tts")
+    static let review = Logger(subsystem: subsystem, category: "review")   // 검수 판정·재검수 미통과 플래그
 }
