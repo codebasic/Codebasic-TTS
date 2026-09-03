@@ -47,8 +47,7 @@ final class PlaybackInbox: ObservableObject {
     private init() {}
 
     func start() {
-        try? FileManager.default.createDirectory(at: Self.dir, withIntermediateDirectories: true)
-        watch()
+        watch()   // 디렉터리 생성 포함
         scanOnce()   // 앱이 닫혀 있던 동안 쌓인 것 기동 시 1회 로드
     }
 
