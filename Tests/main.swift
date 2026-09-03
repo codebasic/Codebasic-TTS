@@ -1,4 +1,4 @@
-// Standalone unit tests for the pure logic (TextSplitter, CrawlLayout) — compiled
+// Standalone unit tests for the pure logic (TextSplitter, CrawlLayout, ReviewVerdict) — compiled
 // with the sources by `./build.sh test` (no Xcode/XCTest; those files only import
 // Foundation / CoreGraphics).
 import Foundation
@@ -61,5 +61,19 @@ eq("inside → unchanged", CrawlLayout.clampOrigin(CGPoint(x: 50, y: 50), size: 
 eq("past right → pinned", CrawlLayout.clampOrigin(CGPoint(x: 450, y: 50), size: panel, in: screen), CGPoint(x: 400, y: 50))
 eq("below origin → pinned", CrawlLayout.clampOrigin(CGPoint(x: -10, y: -10), size: panel, in: screen), CGPoint(x: 0, y: 0))
 eq("wider than screen → pinned to minX", CrawlLayout.clampOrigin(CGPoint(x: 30, y: 30), size: CGSize(width: 600, height: 100), in: screen), CGPoint(x: 0, y: 30))
+
+print("ReviewVerdict.parse — 검수 리포트 마지막 줄의 판정")
+eq("통과", ReviewVerdict.parse("문제 없음\n판정: 통과"), .pass)
+eq("pass (영문)", ReviewVerdict.parse("판정: pass"), .pass)
+eq("수정 + 지시 (굵게)", ReviewVerdict.parse("2문단 — 0.5를 '영 점 오'로 — 숫자 그대로\n**판정: 수정 — 2문단 숫자 표기를 원문대로**"),
+   .revise("2문단 숫자 표기를 원문대로"))
+eq("수정, 지시 없음 → 본문이 지시", ReviewVerdict.parse("1문단 — 인사말 — 삭제\n판정: 수정"), .revise("1문단 — 인사말 — 삭제"))
+eq("전각 콜론·하이픈", ReviewVerdict.parse("판정： 수정 - 존댓말로"), .revise("존댓말로"))
+eq("글머리 붙은 판정", ReviewVerdict.parse("- 판정: 통과"), .pass)
+eq("빈 줄 뒤 판정", ReviewVerdict.parse("판정: 통과\n\n  "), .pass)
+eq("문제 없음만 → 통과", ReviewVerdict.parse("문제 없음"), .pass)
+eq("판정 줄 없음 → none", ReviewVerdict.parse("대체로 괜찮습니다."), .none)
+eq("판정 값 불명 → none", ReviewVerdict.parse("판정: 보류"), .none)
+eq("빈 리포트 → none", ReviewVerdict.parse(""), .none)
 
 if failures == 0 { print("\nAll tests passed.") } else { print("\n\(failures) test(s) FAILED."); exit(1) }

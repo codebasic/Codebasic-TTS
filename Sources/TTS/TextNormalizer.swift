@@ -537,22 +537,44 @@ struct OpenAICompatExplainer: Explaining {
 
 /// 해설(대본)을 TTS 관점에서 검수하는 단계. 자막으로 쓰일 해설 vs 실제 음성으로
 /// 읽힐 대본을 대조해 발음 위험·누락·톤 문제를 지적한다. 출력은 해설 패널 아래
-/// 검수 리포트에 표시되며, 원문을 덮어쓰지 않는다(수정은 사용자가 판단).
+/// 검수기: 프롬프트를 받아 리포트를 스트리밍한다. 리포트 형식(마지막 줄의 판정)은
+/// ScriptReview / ExplanationReview가 정하고 ReviewVerdict가 읽는다. 검수기 자체는
+/// 원문을 덮어쓰지 않는다 — 수정 반영은 AppState가 판정을 보고 별도 생성 호출로 한다.
 protocol Reviewing {
-    func stream(script: String, narration: String) -> AsyncThrowingStream<String, Error>
+    func stream(prompt: String) -> AsyncThrowingStream<String, Error>
 }
 
+/// 판정 줄 규칙 — 두 검수 지시문이 공유한다.
+enum ReviewFormat {
+    static let verdictRule = """
+    - 출력 형식: 문제가 있으면 '위치 — 문제 — 제안 수정' 한 줄씩 나열하고, 없으면 '문제 없음' 한 줄만 씁니다. 칭찬·총평·서론·마크다운 없이.
+    - 마지막 줄은 반드시 정확히 '판정: 통과' 또는 '판정: 수정 — <수정 지시>' 형식입니다. 수정 지시는 생성기가 그대로 따를 수 있게 구체적으로 한 문단으로 씁니다. 사소한 취향 차이는 통과로 판정합니다.
+    """
+}
+
+/// 대본 검수: 자막용 해설(원문) vs TTS 대본.
 enum ScriptReview {
     static let defaultInstruction = """
     당신은 강의 해설 대본의 검수자입니다. 자막용 해설(원문)과 그것을 음성 합성에 넣기 전에 다듬은 TTS 대본을 대조해 검수하세요.
     규칙:
-    - 검수 항목: (1) 의미 왜곡·누락 (2) TTS가 잘못 읽을 표기(미확장 영문 약어, 기호, 소수점, 단위) (3) 문단 구조 보존 (4) 어색하거나 입에 안 맞는 문장.
-    - 문제를 찾으면 '줄/문단 위치 — 문제 — 제안 수정' 형식으로 짧게 나열합니다.
-    - 문제가 없으면 '문제 없음' 한 줄만 출력합니다.
-    - 칭찬·총평·서론 없이 문제 지적만 출력합니다.
+    - 검수 항목: (1) 의미 왜곡·누락 (2) TTS가 잘못 읽을 표기(미확장 영문 약어, 기호, 소수점, 단위) (3) 문단 구조 보존(문단 수·순서 일치) (4) 어색하거나 입에 안 맞는 문장 (5) 마크다운·인사말·검수 메모 등 본문 외 잔여물.
+    \(ReviewFormat.verdictRule)
     """
     static func prompt(_ instruction: String, script: String, narration: String) -> String {
         "\(instruction)\n\n[자막용 해설]\n\(narration)\n\n[TTS 대본]\n\(script)\n\n검수:"
+    }
+}
+
+/// 해설 검수: 코드(소스) vs 해설.
+enum ExplanationReview {
+    static let defaultInstruction = """
+    당신은 코드 해설의 검수자입니다. 코드(소스)와 그에 대한 해설을 대조해 검수하세요.
+    규칙:
+    - 검수 항목: (1) 코드에 없는 내용의 창작, 실행 결과 예측, 코드와 다른 설명 (2) 코드의 핵심 요소 누락 (3) 형식 위반: 마크다운 기호(#, *, `, -, |), 제목 줄, 인사말·맺음말('안녕하세요', '감사합니다' 등), 타임코드·장면 마커, '여러분' 호칭, 음성용 발음 표기('영 점 오' 등) (4) 존댓말·구어체 일관성 (5) 코드를 한 줄씩 낭독하거나 재현한 부분.
+    \(ReviewFormat.verdictRule)
+    """
+    static func prompt(_ instruction: String, code: String, explanation: String) -> String {
+        "\(instruction)\n\n[코드]\n\(code)\n\n[해설]\n\(explanation)\n\n검수:"
     }
 }
 
@@ -560,12 +582,10 @@ struct OpenAICompatReviewer: Reviewing {
     let baseURL: String
     let apiKey: String
     let model: String
-    let instruction: String
     var temperature: Double = 0.2
-    func stream(script: String, narration: String) -> AsyncThrowingStream<String, Error> {
+    func stream(prompt: String) -> AsyncThrowingStream<String, Error> {
         LLM.openaiChatStream(baseURL: baseURL, apiKey: apiKey, model: model,
-                             prompt: ScriptReview.prompt(instruction, script: script, narration: narration),
-                             temperature: temperature)
+                             prompt: prompt, temperature: temperature)
     }
 }
 
@@ -573,23 +593,18 @@ struct GeminiReviewer: Reviewing {
     let baseURL: String
     let apiKey: String
     let model: String
-    let instruction: String
     var temperature: Double = 0.2
-    func stream(script: String, narration: String) -> AsyncThrowingStream<String, Error> {
+    func stream(prompt: String) -> AsyncThrowingStream<String, Error> {
         LLM.geminiStream(baseURL: baseURL, apiKey: apiKey, model: model,
-                         prompt: ScriptReview.prompt(instruction, script: script, narration: narration),
-                         temperature: temperature)
+                         prompt: prompt, temperature: temperature)
     }
 }
 
 struct OllamaReviewer: Reviewing {
     let baseURL: URL
     let model: String
-    let instruction: String
     var temperature: Double = 0.2
-    func stream(script: String, narration: String) -> AsyncThrowingStream<String, Error> {
-        LLM.ollamaStream(baseURL: baseURL, model: model,
-                         prompt: ScriptReview.prompt(instruction, script: script, narration: narration),
-                         temperature: temperature)
+    func stream(prompt: String) -> AsyncThrowingStream<String, Error> {
+        LLM.ollamaStream(baseURL: baseURL, model: model, prompt: prompt, temperature: temperature)
     }
 }

@@ -124,6 +124,14 @@ final class AppState: ObservableObject {
     @Published var reviewing = false
     @Published var reviewTemperature: Double = 0.2
     @Published var reviewEnabled = true          // 대본 생성 후 자동 검수 토글
+    @Published var reviewAutoFix = true          // 판정이 '수정'이면 지시를 반영해 1회 자동 재생성 (해설·대본 공통)
+    @Published var reviewVerdict: ReviewVerdict? // 대본 검수 최종 판정
+    // 해설 검수 (코드 vs 해설): 대본 검수와 같은 검수 모델·자동 반영 설정을 쓴다.
+    @Published var explainReviewEnabled = true   // 해설 생성 후 자동 검수 토글
+    @Published var explainReviewPrompt = ExplanationReview.defaultInstruction
+    @Published var explainReviewText = ""        // latest 해설 검수 리포트
+    @Published var explainReviewing = false
+    @Published var explainReviewVerdict: ReviewVerdict?
     private var reviewTask: Task<Void, Never>?
     @Published var codeImages: [Data] = []       // pasted code screenshots (PNG); needs a vision model
     // Vision model = the explain model by default; a non-empty value is a remembered override.
@@ -664,8 +672,8 @@ final class AppState: ObservableObject {
 
     /// Single-stage image explain: the 해설 model (== vision model) reads the
     /// screenshot(s) and explains in one streamed call, using the explain prompt.
-    private func explainStreamWithImages(code: String, images: [Data]) -> AsyncThrowingStream<String, Error> {
-        let prompt = CodeExplanation.prompt(explainPrompt, code, hint: explainHint)
+    private func explainStreamWithImages(code: String, images: [Data], hint: String? = nil) -> AsyncThrowingStream<String, Error> {
+        let prompt = CodeExplanation.prompt(explainPrompt, code, hint: hint ?? explainHint)
         switch explainProvider {
         case .gemini:
             guard let key = Secrets.geminiKey else {
@@ -822,7 +830,9 @@ final class AppState: ObservableObject {
         let nk = NormalizationCache.key(text: keyText, provider: provider, model: explainModel,
                                         prompt: explainPrompt + "\u{1F}" + explainHint)
         if !force, let cached = normCache.script(forKey: nk) {
-            explanationText = cached; lastExplainedCode = code; lastSegment = cached; return cached
+            explanationText = cached; lastExplainedCode = code; lastSegment = cached
+            explainReviewText = "(캐시된 해설 — 생성 시 검수됨. 다시 보려면 ‘검수 실행’)"; explainReviewVerdict = nil
+            return cached
         }
         explanationText = ""
         statusText = "해설 생성 중…"
@@ -845,12 +855,15 @@ final class AppState: ObservableObject {
         guard !Task.isCancelled else { return nil }   // superseded just as the stream ended
         let out = CodeExplanation.stripMarkdown(acc)
         guard !out.isEmpty else { statusText = "해설 생성 실패 (빈 응답)"; return nil }
-        normCache.put(key: nk, script: out)
         explanationText = out          // finalize (stripped)
+        let reviewed = await reviewAndReviseExplanation(code: code, explanation: out, images: singleStage ? imgs : [])
+        guard !Task.isCancelled else { return nil }
+        normCache.put(key: nk, script: reviewed)   // 검수·수정을 거친 결과를 캐시
+        explanationText = reviewed
         lastExplainedCode = code       // baseline for "이어서 해설"
-        lastSegment = out
+        lastSegment = reviewed
         statusText = ""
-        return out
+        return reviewed
     }
 
     /// Stream only the added/changed part (이어서 해설), appending to the running
@@ -1020,7 +1033,11 @@ final class AppState: ObservableObject {
             for try await delta in norm.normalizeStream(src) { try Task.checkCancellation(); acc += delta }
         } catch { return text }   // cancel/error → read the prose as-is
         let out = acc.trimmingCharacters(in: .whitespacesAndNewlines)
-        let final = out.isEmpty ? text : out
+        var final = out.isEmpty ? text : out
+        if !out.isEmpty {
+            final = await reviewAndReviseScript(narration: src, script: final, live: nil)
+            if Task.isCancelled { return text }
+        }
         normCache.put(key: nk, script: final)
         return final
     }
@@ -1079,7 +1096,9 @@ final class AppState: ObservableObject {
         // paragraph downstream; only the text rewrite is whole-document here.
         let nk = NormalizationCache.key(text: src, provider: provider, model: model, prompt: instruction)
         if !force, let cached = normCache.script(forKey: nk) {
-            scriptText = cached; markScriptFresh(); return cached
+            scriptText = cached; markScriptFresh()
+            reviewText = "(캐시된 대본 — 생성 시 검수됨. 다시 보려면 ‘검수 실행’)"; reviewVerdict = nil
+            return cached
         }
         normalizing = true
         defer { normalizing = false }
@@ -1099,11 +1118,13 @@ final class AppState: ObservableObject {
         }
         let out = acc.trimmingCharacters(in: .whitespacesAndNewlines)
         let finalScript = out.isEmpty ? src : out
-        markScriptFresh()
-        normCache.put(key: nk, script: finalScript)
         scriptText = finalScript
-        if reviewEnabled { startReview(narration: src, script: finalScript) }
-        return finalScript
+        let reviewed = await reviewAndReviseScript(narration: src, script: finalScript) { [weak self] in self?.scriptText = $0 }
+        guard !Task.isCancelled else { return scriptText }
+        scriptText = reviewed
+        markScriptFresh()
+        normCache.put(key: nk, script: reviewed)   // 검수·수정을 거친 결과를 캐시
+        return reviewed
     }
 
     /// 대본 생성 (sync entry): manage the single `scriptTask`, serialized so a new
@@ -1121,19 +1142,19 @@ final class AppState: ObservableObject {
         case .gemini:
             guard let key = Secrets.geminiKey else { return nil }
             return GeminiReviewer(baseURL: geminiBaseURL, apiKey: key, model: reviewGeminiModel,
-                                  instruction: reviewPrompt, temperature: reviewTemperature)
+                                  temperature: reviewTemperature)
         case .ollama:
             return OllamaReviewer(
                 baseURL: URL(string: ollamaURL) ?? URL(string: "http://localhost:11434")!,
-                model: reviewOllamaModel, instruction: reviewPrompt, temperature: reviewTemperature)
+                model: reviewOllamaModel, temperature: reviewTemperature)
         case .opencode:
             guard let key = Secrets.openCodeKey else { return nil }
             return OpenAICompatReviewer(baseURL: openCodeBaseURL, apiKey: key, model: reviewOpenCodeModel,
-                                        instruction: reviewPrompt, temperature: reviewTemperature)
+                                        temperature: reviewTemperature)
         case .openai:
             guard let key = Secrets.openAIKey else { return nil }
             return OpenAICompatReviewer(baseURL: openAIBaseURL, apiKey: key, model: reviewOpenAIModel,
-                                        instruction: reviewPrompt, temperature: reviewTemperature)
+                                        temperature: reviewTemperature)
         }
     }
 
@@ -1147,39 +1168,123 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// 검수 단계 실행: 대본(음성) vs 해설(자막) 대조 리포트를 스트리밍해
-    /// `reviewText`에 적는다. 캐시 없음 — 항상 최신 상태를 봐야 한다.
-    func runReview(narration: String, script: String) {
-        reviewTask?.cancel()
-        reviewText = ""
-        guard !script.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+    /// 검수 스트림 1회: 리포트를 `publish`로 흘리고 최종 판정을 돌려준다.
+    /// 캐시 없음 — 항상 최신 상태를 봐야 한다. 취소·오류·키 미설정이면 .none.
+    private func streamReview(prompt: String, publish: (String) -> Void) async -> ReviewVerdict {
         guard let reviewer = makeReviewer() else {
-            reviewText = "(\(reviewProvider.label) 키 미설정 — 검수 건너뜀)"
-            return
+            publish("(\(reviewProvider.label) 키 미설정 — 검수 건너뜀)")
+            return .none
         }
-        reviewing = true
-        reviewTask = Task { [weak self] in
-            defer { self?.reviewing = false }
-            var acc = ""
-            do {
-                for try await delta in reviewer.stream(script: script, narration: narration) {
-                    try Task.checkCancellation()
-                    acc += delta
-                    self?.reviewText = acc
-                }
-            } catch is CancellationError {
-                return
-            } catch {
-                acc = acc.isEmpty ? "검수 오류: \(error.localizedDescription)" : acc
+        var acc = ""
+        do {
+            for try await delta in reviewer.stream(prompt: prompt) {
+                try Task.checkCancellation()
+                acc += delta
+                publish(acc)
             }
-            self?.reviewText = acc.isEmpty ? "검수 결과 없음" : acc
+        } catch is CancellationError {
+            return .none
+        } catch {
+            publish(acc.isEmpty ? "검수 오류: \(error.localizedDescription)" : acc)
+            return .none
         }
+        guard !acc.isEmpty else { publish("검수 결과 없음"); return .none }
+        return ReviewVerdict.parse(acc)
     }
 
-    /// Auto-trigger after a fresh 대본 lands (검수 토글이 켜져 있을 때만).
-    private func startReview(narration: String, script: String) {
-        guard reviewEnabled else { return }
-        runReview(narration: narration, script: script)
+    /// 대본 검수 (원문/해설 vs TTS 대본). 리포트 → `reviewText`, 판정 → `reviewVerdict`.
+    @discardableResult
+    func reviewScript(narration: String, script: String) async -> ReviewVerdict {
+        reviewText = ""; reviewVerdict = nil
+        guard !script.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .none }
+        reviewing = true
+        defer { reviewing = false }
+        let v = await streamReview(prompt: ScriptReview.prompt(reviewPrompt, script: script, narration: narration)) {
+            reviewText = $0
+        }
+        reviewVerdict = v
+        return v
+    }
+
+    /// 해설 검수 (코드 vs 해설). 리포트 → `explainReviewText`, 판정 → `explainReviewVerdict`.
+    @discardableResult
+    func reviewExplanation(code: String, explanation: String) async -> ReviewVerdict {
+        explainReviewText = ""; explainReviewVerdict = nil
+        guard !explanation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .none }
+        explainReviewing = true
+        defer { explainReviewing = false }
+        let v = await streamReview(prompt: ExplanationReview.prompt(explainReviewPrompt, code: code, explanation: explanation)) {
+            explainReviewText = $0
+        }
+        explainReviewVerdict = v
+        return v
+    }
+
+    /// 버튼용(비동기 진입): 대본 검수만 실행 — 리포트·판정만, 수정 반영 없음.
+    func runReview(narration: String, script: String) {
+        reviewTask?.cancel()
+        reviewTask = Task { [weak self] in _ = await self?.reviewScript(narration: narration, script: script) }
+    }
+
+    /// 버튼용: 해설 검수만 실행 — 리포트·판정만, 수정 반영 없음.
+    func runExplainReview() {
+        reviewTask?.cancel()
+        let code = codeText, expl = explanationText
+        reviewTask = Task { [weak self] in _ = await self?.reviewExplanation(code: code, explanation: expl) }
+    }
+
+    /// 검수 → 판정이 '수정'이고 자동 반영이 켜져 있으면 검수 지시를 반영해 1회 다듬기 →
+    /// 재검수(최종 리포트). 라운드는 1회 고정: 검수기와 생성기가 서로 양보하지 않아도
+    /// 무한히 돌지 않는다. 수정본이 비거나 실패하면 원본 유지. 결과 대본을 돌려준다.
+    private func reviewAndReviseScript(narration: String, script: String, live: ((String) -> Void)?) async -> String {
+        guard reviewEnabled else { return script }
+        statusText = "대본 검수 중…"
+        defer { if statusText.hasSuffix("검수 중…") || statusText == "검수 지시 반영 중…" { statusText = "" } }
+        let v = await reviewScript(narration: narration, script: script)
+        guard case .revise(let instruction) = v, reviewAutoFix, !Task.isCancelled else { return script }
+        statusText = "검수 지시 반영 중…"
+        let extra = "\n\n[검수 리포트]\n\(reviewText)\n\n[수정 지시 — 반드시 반영]\n\(instruction)"
+        guard let revised = await refineScript(source: narration, current: script, extra: extra, live: live),
+              !Task.isCancelled else { return script }
+        statusText = "수정본 재검수 중…"
+        _ = await reviewScript(narration: narration, script: revised)
+        return revised
+    }
+
+    /// 해설 검수 → '수정' 판정 + 자동 반영이면 현재 해설·리포트·지시를 힌트로 넣어 1회
+    /// 재생성 → 재검수. 이미지 단일 단계로 만든 해설이면 이미지도 다시 준다.
+    private func reviewAndReviseExplanation(code: String, explanation: String, images: [Data]) async -> String {
+        guard explainReviewEnabled else { return explanation }
+        statusText = "해설 검수 중…"
+        let v = await reviewExplanation(code: code, explanation: explanation)
+        guard case .revise(let instruction) = v, reviewAutoFix, !Task.isCancelled else { return explanation }
+        statusText = "검수 지시 반영 중…"
+        let hint = explainHint
+            + "\n\n[현재 해설]\n\(explanation)\n\n[검수 리포트]\n\(explainReviewText)"
+            + "\n\n[수정 지시 — 반드시 반영]\n\(instruction)\n현재 해설을 수정 지시에 따라 고쳐, 전체 해설을 처음부터 끝까지 다시 쓰세요."
+        var acc = ""
+        do {
+            let stream = images.isEmpty
+                ? (makeExplainer()?.stream(code, hint: hint) ?? AsyncThrowingStream { $0.finish() })
+                : explainStreamWithImages(code: code, images: images, hint: hint)
+            for try await delta in stream {
+                try Task.checkCancellation()
+                acc += delta
+                explanationText = acc
+            }
+        } catch is CancellationError {
+            return explanation
+        } catch {
+            statusText = "수정 반영 오류: \(error.localizedDescription)"
+            explanationText = explanation
+            return explanation
+        }
+        let revised = CodeExplanation.stripMarkdown(acc)
+        guard !revised.isEmpty else { explanationText = explanation; return explanation }
+        explanationText = revised
+        statusText = "수정본 재검수 중…"
+        _ = await reviewExplanation(code: code, explanation: revised)
+        return revised
     }
 
     /// "재생성/다듬기" (sync entry): if a 대본 already exists, REFINE it (원본 +
@@ -1207,41 +1312,51 @@ final class AppState: ObservableObject {
             + " 이미 규칙에 맞는 부분은 그대로 둡니다."
     }
 
-    /// Stream a refined 대본 from 원본 + the current 대본 (no cache — it's a moving
-    /// target). On cancel/error, restores the pre-refine 대본.
-    @discardableResult
-    private func runRefineScript() async -> String? {
-        let current = scriptText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !current.isEmpty else { return nil }
-        guard let norm = makeNormalizer(instruction: refineInstruction()) else {
+    /// 원본 + 현재 대본(+ 추가 지시)으로 대본을 다듬는 스트리밍 호출(캐시 없음 — 움직이는
+    /// 대상). 중간 텍스트는 `live`로 흘린다. 취소·오류·빈 응답이면 nil (호출자가 복원).
+    private func refineScript(source: String, current: String, extra: String = "",
+                              live: ((String) -> Void)?) async -> String? {
+        guard let norm = makeNormalizer(instruction: refineInstruction() + extra) else {
             statusText = "\(scriptProvider.label) 키 미설정"
             return nil
         }
-        let combined = "[원본]\n\(inputText)\n\n[현재 대본]\n\(current)"
-        normalizing = true
-        defer { normalizing = false }
-        statusText = "대본 다듬는 중…"
+        let combined = "[원본]\n\(source)\n\n[현재 대본]\n\(current)"
         var acc = ""
         do {
             for try await delta in norm.normalizeStream(combined) {
                 try Task.checkCancellation()
                 acc += delta
-                scriptText = acc
+                live?(acc)
             }
         } catch is CancellationError {
-            scriptText = current        // restore
             return nil
         } catch {
-            scriptText = current
             statusText = "다듬기 오류: \(error.localizedDescription)"
             return nil
         }
         let out = acc.trimmingCharacters(in: .whitespacesAndNewlines)
-        let final = out.isEmpty ? current : out
-        scriptText = final
+        return out.isEmpty ? nil : out
+    }
+
+    /// "다듬기": 현재 대본을 다듬고, 검수 단계를 거친다. 취소·오류면 이전 대본 복원.
+    @discardableResult
+    private func runRefineScript() async -> String? {
+        let current = scriptText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !current.isEmpty else { return nil }
+        normalizing = true
+        defer { normalizing = false }
+        statusText = "대본 다듬는 중…"
+        guard let refined = await refineScript(source: inputText, current: current, live: { [weak self] in self?.scriptText = $0 }) else {
+            scriptText = current        // restore
+            return nil
+        }
+        scriptText = refined
+        let reviewed = await reviewAndReviseScript(narration: inputText, script: refined) { [weak self] in self?.scriptText = $0 }
+        guard !Task.isCancelled else { return scriptText }
+        scriptText = reviewed
         markScriptFresh()
         statusText = ""
-        return final
+        return reviewed
     }
 
     /// Generate-tab "재생": speak the script (or the original if it is empty).
@@ -1478,6 +1593,7 @@ final class AppState: ObservableObject {
             "reviewGeminiModel": reviewGeminiModel, "reviewOllamaModel": reviewOllamaModel,
             "reviewOpenCodeModel": reviewOpenCodeModel, "reviewOpenAIModel": reviewOpenAIModel,
             "reviewEnabled": reviewEnabled, "reviewTemperature": reviewTemperature,
+            "reviewAutoFix": reviewAutoFix, "explainReviewEnabled": explainReviewEnabled,
             "explainVisionGeminiModel": explainVisionGeminiModel,
             "explainVisionOllamaModel": explainVisionOllamaModel,
             "explainTemperature": explainTemperature, "scriptTemperature": scriptTemperature,
@@ -1492,6 +1608,12 @@ final class AppState: ObservableObject {
         }
         if explainPrompt != CodeExplanation.defaultInstruction {
             dict["explainPrompt"] = explainPrompt
+        }
+        if reviewPrompt != ScriptReview.defaultInstruction {
+            dict["reviewPrompt"] = reviewPrompt
+        }
+        if explainReviewPrompt != ExplanationReview.defaultInstruction {
+            dict["explainReviewPrompt"] = explainReviewPrompt
         }
         if let d = try? JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted]) {
             try? d.write(to: settingsURL)
@@ -1548,6 +1670,10 @@ final class AppState: ObservableObject {
         reviewOpenAIModel = o["reviewOpenAIModel"] as? String ?? reviewOpenAIModel
         reviewEnabled = o["reviewEnabled"] as? Bool ?? reviewEnabled
         reviewTemperature = o["reviewTemperature"] as? Double ?? reviewTemperature
+        reviewAutoFix = o["reviewAutoFix"] as? Bool ?? reviewAutoFix
+        explainReviewEnabled = o["explainReviewEnabled"] as? Bool ?? explainReviewEnabled
+        reviewPrompt = o["reviewPrompt"] as? String ?? reviewPrompt
+        explainReviewPrompt = o["explainReviewPrompt"] as? String ?? explainReviewPrompt
         explainVisionGeminiModel = o["explainVisionGeminiModel"] as? String ?? explainVisionGeminiModel
         explainVisionOllamaModel = o["explainVisionOllamaModel"] as? String ?? explainVisionOllamaModel
         explainTemperature = o["explainTemperature"] as? Double ?? explainTemperature

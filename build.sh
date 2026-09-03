@@ -118,6 +118,7 @@ case "${1:-install}" in
     echo "==> Compiling + running unit tests"
     mkdir -p "$BUILD_DIR"
     swiftc -O "$HERE/Sources/Core/TextSplitter.swift" "$HERE/Sources/Core/CrawlLayout.swift" \
+      "$HERE/Sources/Core/ReviewVerdict.swift" \
       "$HERE/Tests/main.swift" -o "$BUILD_DIR/tests" && "$BUILD_DIR/tests"
     ;;
   clean) rm -rf "$BUILD_DIR"; echo "cleaned" ;;
