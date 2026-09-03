@@ -19,7 +19,8 @@ The `TTSBackend` protocol (the pluggable engine abstraction) is defined; only a 
 ./build.sh          # build → install to ~/Applications → register Services → launch
 ./build.sh dev      # build → run in THIS terminal (stdout/os_log visible, no install)
 ./build.sh build    # build into ./build only
-./build.sh test     # compile + run the unit tests (TextSplitter, subtitle alignment)
+./build.sh test     # compile + run the unit tests (TextSplitter, CrawlLayout, ReviewVerdict)
+./build.sh smoke    # 실제 LLM 엔드포인트로 해설→검수→대본→검수 스모크 (gemini_key 필요, 유료 호출)
 ./build.sh logs     # tail the app's unified logs
 ./build.sh clean    # remove ./build
 ```

@@ -121,6 +121,13 @@ case "${1:-install}" in
       "$HERE/Sources/Core/ReviewVerdict.swift" \
       "$HERE/Tests/main.swift" -o "$BUILD_DIR/tests" && "$BUILD_DIR/tests"
     ;;
+  smoke)
+    # 실제 LLM 엔드포인트로 해설→검수→대본→검수 (유료 호출, 옵트인). Tests/smoke.swift 참고.
+    mkdir -p "$BUILD_DIR"
+    swiftc -O -parse-as-library "$HERE/Sources/TTS/TextNormalizer.swift" "$HERE/Sources/App/Secrets.swift" \
+      "$HERE/Sources/Core/ReviewVerdict.swift" "$HERE/Tests/smoke.swift" -o "$BUILD_DIR/smoke" \
+      && "$BUILD_DIR/smoke"
+    ;;
   clean) rm -rf "$BUILD_DIR"; echo "cleaned" ;;
   install|"") build; install_and_register ;;
   *) echo "unknown command: $1"; exit 2 ;;
