@@ -48,6 +48,8 @@ final class PlaybackInbox: ObservableObject {
 
     /// open() 실패 후 재시도 간격. 수신함은 세션→앱의 유일한 채널이라 조용히 죽으면 안 된다.
     static let rewatchRetryDelay: TimeInterval = 5
+    /// 디렉터리 삭제/치환 이벤트 버스트를 한 번의 재감시로 모으는 지연.
+    static let rewatchDebounce: TimeInterval = 0.25
 
     private init() {}
 
@@ -85,17 +87,14 @@ final class PlaybackInbox: ObservableObject {
             Log.app.error("inbox: open failed (\(err, privacy: .public)); retry in \(Self.rewatchRetryDelay, privacy: .public)s")
             watchFailed = true
             status = "수신함 감시 실패: \(err) — \(Int(Self.rewatchRetryDelay))초 후 재시도"
-            let work = DispatchWorkItem { [weak self] in self?.watch() }
-            rewatchWork = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + Self.rewatchRetryDelay, execute: work)
+            scheduleRewatch(after: Self.rewatchRetryDelay)
             return
         }
         if watchFailed {
-            // 복구: 감시가 끊긴 동안 도착한 패키지를 한 번 훑는다
+            // 복구: 뒤따르는 scheduleScan이 끊긴 동안 도착한 패키지를 훑는다
             watchFailed = false
             status = ""
             Log.app.info("inbox: watching resumed")
-            scheduleScan()
         }
         let src = DispatchSource.makeFileSystemObjectSource(
             fileDescriptor: fd,
@@ -107,13 +106,28 @@ final class PlaybackInbox: ObservableObject {
             guard let self else { return }
             let mask = src.data
             if mask.contains(.delete) || mask.contains(.rename) || mask.contains(.revoke) {
-                self.watch()   // 디렉터리 자체가 치환됨 → 재감시
+                // 디렉터리 자체가 치환됨 → 재감시(버스트 병합; 재감시 후 스캔)
+                self.scheduleRewatch(after: Self.rewatchDebounce)
+            } else {
+                self.scheduleScan()
             }
-            self.scheduleScan()
         }
         src.setCancelHandler { close(fd) }   // 이 소스의 fd만, 값으로 캡처
         source = src
         src.resume()
+    }
+
+    /// 재감시 예약 — 연속 삭제/치환 이벤트(또는 open 실패 재시도)를 한 번으로 모으고,
+    /// 재감시가 끝나면 스캔을 이어 건다. 메인 큐에서 mkdir/open을 이벤트마다 반복하지 않는다.
+    private func scheduleRewatch(after delay: TimeInterval) {
+        rewatchWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.watch()
+            self.scheduleScan()
+        }
+        rewatchWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     /// 이벤트 버스트를 살짝 모아 1회만 스캔 (rename 원자성과 합쳐 충분).
