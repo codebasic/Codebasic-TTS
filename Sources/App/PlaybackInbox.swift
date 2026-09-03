@@ -101,8 +101,10 @@ final class PlaybackInbox: ObservableObject {
             fileDescriptor: fd,
             eventMask: [.write, .extend, .delete, .rename, .revoke],
             queue: .main)
-        src.setEventHandler { [weak self, weak src] in
-            guard let self, let src else { return }
+        // src는 강하게 캡처해도 된다: cancel 시 GCD가 핸들러를 해제해 순환을 끊고,
+        // watch()/stop()은 항상 이전 소스를 cancel한다.
+        src.setEventHandler { [weak self] in
+            guard let self else { return }
             let mask = src.data
             if mask.contains(.delete) || mask.contains(.rename) || mask.contains(.revoke) {
                 self.watch()   // 디렉터리 자체가 치환됨 → 재감시
