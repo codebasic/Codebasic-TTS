@@ -27,7 +27,7 @@ final class PlaybackInbox: ObservableObject {
     static let shared = PlaybackInbox()
 
     static let dir: URL = URL(fileURLWithPath:
-        (("~/Library/Application Support/Codebasic TTS/tts-inbox" as NSString).expandingTildeInPath))
+        (Secrets.appSupportDir as NSString).appendingPathComponent("tts-inbox"))
 
     @Published var lastReceived: PlaybackPackage?
     @Published var status: String = ""
