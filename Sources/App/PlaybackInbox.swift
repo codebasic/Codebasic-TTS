@@ -42,7 +42,12 @@ final class PlaybackInbox: ObservableObject {
 
     private var source: DispatchSourceFileSystemObject?
     private var scanWork: DispatchWorkItem?
+    private var rewatchWork: DispatchWorkItem?
+    private var watchFailed = false
     private var processed = Set<String>()
+
+    /// open() 실패 후 재시도 간격. 수신함은 세션→앱의 유일한 채널이라 조용히 죽으면 안 된다.
+    static let rewatchRetryDelay: TimeInterval = 5
 
     private init() {}
 
@@ -53,6 +58,7 @@ final class PlaybackInbox: ObservableObject {
 
     func stop() {
         scanWork?.cancel(); scanWork = nil
+        rewatchWork?.cancel(); rewatchWork = nil
         if let src = source { src.cancel() }
         source = nil
     }
@@ -64,11 +70,33 @@ final class PlaybackInbox: ObservableObject {
     /// 대신 값으로 캡처해야 한다 — 그렇지 않으면 재감시 때 이전 소스의 핸들러가
     /// 새 소스의 fd를 닫아 감시가 조용히 죽는다.
     private func watch() {
+        rewatchWork?.cancel(); rewatchWork = nil
         source?.cancel(); source = nil   // 이전 소스는 자기 fd를 스스로 닫는다
-        // 디렉터리가 삭제/치환된 뒤의 재감시: 없으면 다시 만들어야 open이 성공한다
-        try? FileManager.default.createDirectory(at: Self.dir, withIntermediateDirectories: true)
+        // 기동 시, 그리고 디렉터리가 삭제/치환된 뒤의 재감시: 없으면 만들어야 open이 성공한다
+        do {
+            try FileManager.default.createDirectory(at: Self.dir, withIntermediateDirectories: true)
+        } catch {
+            Log.app.error("inbox: mkdir failed: \(error.localizedDescription, privacy: .public)")
+        }
         let fd = open(Self.dir.path, O_EVTONLY)
-        guard fd >= 0 else { return }
+        guard fd >= 0 else {
+            // 조용히 죽지 않는다: 로그 + 상태 표시 + 재시도 예약
+            let err = String(cString: strerror(errno))
+            Log.app.error("inbox: open failed (\(err, privacy: .public)); retry in \(Self.rewatchRetryDelay, privacy: .public)s")
+            watchFailed = true
+            status = "수신함 감시 실패: \(err) — \(Int(Self.rewatchRetryDelay))초 후 재시도"
+            let work = DispatchWorkItem { [weak self] in self?.watch() }
+            rewatchWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.rewatchRetryDelay, execute: work)
+            return
+        }
+        if watchFailed {
+            // 복구: 감시가 끊긴 동안 도착한 패키지를 한 번 훑는다
+            watchFailed = false
+            status = ""
+            Log.app.info("inbox: watching resumed")
+            scheduleScan()
+        }
         let src = DispatchSource.makeFileSystemObjectSource(
             fileDescriptor: fd,
             eventMask: [.write, .extend, .delete, .rename, .revoke],
