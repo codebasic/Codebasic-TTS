@@ -42,7 +42,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             .store(in: &cancellables)
 
-        Log.app.info("Codebasic TTS launched. Backend: \\(self.appState.backendIdentity, privacy: .public)")
+        Log.app.info("Codebasic TTS launched. Backend: \(self.appState.backendIdentity, privacy: .public)")
     }
 
     // MARK: - Status item (persistent, focus-safe affordance to reopen the UI)

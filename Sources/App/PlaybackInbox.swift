@@ -41,7 +41,6 @@ final class PlaybackInbox: ObservableObject {
     }
 
     private var source: DispatchSourceFileSystemObject?
-    private var dirFD: Int32 = -1
     private var scanWork: DispatchWorkItem?
     private var processed = Set<String>()
 
@@ -60,29 +59,30 @@ final class PlaybackInbox: ObservableObject {
     }
 
     /// 디렉터리 vnode 감시 — 이벤트 도착 시에만 스캔한다 (폴링 없음).
+    ///
+    /// fd 소유권: 각 DispatchSource가 자기 fd를 소유하고, **cancel 핸들러에서만**
+    /// 닫는다 (Apple 계약). cancel 핸들러는 비동기로 실행되므로 fd를 공유 프로퍼티
+    /// 대신 값으로 캡처해야 한다 — 그렇지 않으면 재감시 때 이전 소스의 핸들러가
+    /// 새 소스의 fd를 닫아 감시가 조용히 죽는다.
     private func watch() {
-        source?.cancel(); source = nil
-        if dirFD >= 0 { close(dirFD); dirFD = -1 }
+        source?.cancel(); source = nil   // 이전 소스는 자기 fd를 스스로 닫는다
+        // 디렉터리가 삭제/치환된 뒤의 재감시: 없으면 다시 만들어야 open이 성공한다
+        try? FileManager.default.createDirectory(at: Self.dir, withIntermediateDirectories: true)
         let fd = open(Self.dir.path, O_EVTONLY)
         guard fd >= 0 else { return }
-        dirFD = fd
         let src = DispatchSource.makeFileSystemObjectSource(
             fileDescriptor: fd,
             eventMask: [.write, .extend, .delete, .rename, .revoke],
             queue: .main)
-        src.setEventHandler { [weak self] in
-            guard let self else { return }
-            let mask = self.source?.data ?? []
+        src.setEventHandler { [weak self, weak src] in
+            guard let self, let src else { return }
+            let mask = src.data
             if mask.contains(.delete) || mask.contains(.rename) || mask.contains(.revoke) {
                 self.watch()   // 디렉터리 자체가 치환됨 → 재감시
             }
             self.scheduleScan()
         }
-        src.setCancelHandler { [weak self] in
-            guard let self, self.dirFD >= 0 else { return }
-            close(self.dirFD)
-            self.dirFD = -1
-        }
+        src.setCancelHandler { close(fd) }   // 이 소스의 fd만, 값으로 캡처
         source = src
         src.resume()
     }
