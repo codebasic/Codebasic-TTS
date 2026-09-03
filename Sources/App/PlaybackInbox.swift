@@ -73,7 +73,14 @@ final class PlaybackInbox: ObservableObject {
     /// 새 소스의 fd를 닫아 감시가 조용히 죽는다.
     private func watch() {
         rewatchWork?.cancel(); rewatchWork = nil
+        let isRewatch = source != nil || watchFailed
         source?.cancel(); source = nil   // 이전 소스는 자기 fd를 스스로 닫는다
+        if isRewatch && !FileManager.default.fileExists(atPath: Self.dir.path) {
+            // 폴더가 통째로 이동/삭제됨. 같은 경로에 빈 폴더를 새로 만들어 감시를 잇지만,
+            // 옮겨진 폴더 안의 패키지는 여기서 집어오지 않는다 — 사용자에게 알린다.
+            Log.app.warning("inbox: directory vanished (moved or deleted); recreating \(Self.dir.path, privacy: .public)")
+            status = "수신함 폴더가 이동/삭제되어 새로 만들었습니다"
+        }
         // 기동 시, 그리고 디렉터리가 삭제/치환된 뒤의 재감시: 없으면 만들어야 open이 성공한다
         do {
             try FileManager.default.createDirectory(at: Self.dir, withIntermediateDirectories: true)
