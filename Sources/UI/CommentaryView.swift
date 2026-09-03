@@ -18,21 +18,6 @@ struct CommentaryView: View {
     }
     private var border: some View { RoundedRectangle(cornerRadius: 6).stroke(.quaternary) }
 
-    // Vision model bindings: show the effective model (override, else follow the
-    // 해설 model) and store a remembered override once the user picks one.
-    private var visionProviderBinding: Binding<AppState.NormalizeProvider> {
-        Binding(get: { app.visionProviderEff },
-                set: { app.visionProvider = $0; app.visionOverridden = true })
-    }
-    private var visionOllamaBinding: Binding<String> {
-        Binding(get: { app.visionOverridden ? app.explainVisionOllamaModel : app.explainOllamaModel },
-                set: { app.explainVisionOllamaModel = $0; app.visionOverridden = true })
-    }
-    private var visionGeminiBinding: Binding<String> {
-        Binding(get: { app.visionOverridden ? app.explainVisionGeminiModel : app.explainGeminiModel },
-                set: { app.explainVisionGeminiModel = $0; app.visionOverridden = true })
-    }
-
     var body: some View {
         HSplitView {
             main
@@ -137,15 +122,9 @@ struct CommentaryView: View {
                     .onChange(of: app.explainAutoPlay) { _, _ in app.saveSettings() }
             }
             HStack(spacing: 16) {
-                LLMModelPicker(label: "해설 모델",
-                               provider: $app.explainProvider,
-                               geminiModel: $app.explainGeminiModel,
-                               ollamaModel: $app.explainOllamaModel,
+                LLMModelPicker(label: "해설 모델", role: .explain,
                                onChange: { app.saveSettings() })
-                LLMModelPicker(label: "비전 모델",
-                               provider: visionProviderBinding,
-                               geminiModel: visionGeminiBinding,
-                               ollamaModel: visionOllamaBinding,
+                LLMModelPicker(label: "비전 모델", role: .vision,
                                onChange: { app.saveSettings() })
                 if app.visionOverridden {
                     Button {
@@ -198,7 +177,7 @@ struct CommentaryView: View {
                 Spacer()
             }
 
-            Text("모델은 위에서 선택 (Ollama·Gemini 통합 목록) · 연결은 설정 탭")
+            Text("모델은 위에서 선택 (연결된 제공자 통합 목록) · 연결은 설정 탭")
                 .font(.caption).foregroundStyle(.secondary)
         }
         .padding()
