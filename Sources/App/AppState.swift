@@ -3,6 +3,15 @@ import Combine
 import CryptoKit
 import AppKit
 
+/// 용어 → 발음 한 쌍. 대본(정규화) LLM에 few-shot 사전으로 주입되어 코드 명칭·
+/// 고유명사 발음을 일관되게 만든다. settings.json의 "glossary"에 저장된다.
+struct GlossaryEntry: Codable, Equatable, Identifiable {
+    var id: UUID = UUID()
+    var term: String
+    var pronunciation: String
+    var note: String = ""
+}
+
 /// Single source of truth for the UI and the speak path. Holds connection,
 /// settings, history, and runs synthesis (cache-first) + playback.
 @MainActor
@@ -54,6 +63,18 @@ final class AppState: ObservableObject {
     @Published var normalizePrompt = TextNormalizer.defaultInstruction
     @Published var normalizing = false
     @Published var scriptHint = ""               // 대본 단계 (원문→대본) 추가 지시
+    /// 대본 few-shot 용어 발음 사전 (glossary). 대본(정규화) 단계에만 프롬프트에
+    /// 주입된다 — 해설 단계는 코드 해설이라 제외.
+    @Published var glossary: [GlossaryEntry] = []
+    /// glossary 키가 settings.json에 아직 없을 때만 심는 기본 예시
+    /// (defaultInstruction의 예시 활용). 빈 배열 저장은 "전부 삭제"로 존중됨.
+    static let seedGlossary: [GlossaryEntry] = [
+        GlossaryEntry(term: "np", pronunciation: "넘파이"),
+        GlossaryEntry(term: "pd", pronunciation: "판다스"),
+        GlossaryEntry(term: "sklearn", pronunciation: "싸이킷런"),
+        GlossaryEntry(term: "plt", pronunciation: "매트플롯립"),
+        GlossaryEntry(term: "tf", pronunciation: "텐서플로우"),
+    ]
     private var scriptBuiltFrom = ""             // (원본 ∥ 지시) the 대본 was built from
     /// True when 원본 or 추가 지시 changed after the 대본 was generated. Suppressed
     /// while generating — scriptText fills before scriptBuiltFrom is stamped.
@@ -77,6 +98,11 @@ final class AppState: ObservableObject {
     var onRequestReview: (() -> Void)?
     @Published var explainTemperature: Double = 0.4          // 해설 LLM 생성 매개변수
     @Published var scriptTemperature: Double = 0.2           // 대본 LLM 생성 매개변수
+    /// 역할별 reasoning(thinking) 수준 — 공급자별 파라미터로 변환해 요청에 실린다
+    /// (ReasoningLevel 참고). 엔드포인트별이 아닌 역할별로 단순하게.
+    @Published var explainReasoningLevel: ReasoningLevel = .medium   // 해설 (+single-stage 해설)
+    @Published var scriptReasoningLevel: ReasoningLevel = .medium    // 대본 정규화
+    @Published var visionReasoningLevel: ReasoningLevel = .medium    // 스크린샷 전사 (비전)
     @Published var codeImages: [Data] = []       // pasted code screenshots (PNG); needs a vision model
     var hasImages: Bool { !codeImages.isEmpty }
     @Published var lastExplainedCode = ""        // baseline snapshot for "이어서 해설" (incremental)
@@ -517,25 +543,54 @@ final class AppState: ObservableObject {
         case .gemini:
             guard let key = Secrets.endpointKey(e.id) else { return nil }
             return GeminiNormalizer(baseURL: e.baseURL, apiKey: key, model: model,
-                                    instruction: instruction, temperature: scriptTemperature)
+                                    instruction: instruction, temperature: scriptTemperature,
+                                    reasoningLevel: scriptReasoningLevel)
         case .openAICompatible:
             return ZAINormalizer(baseURL: e.baseURL, apiKey: endpointKey(e), model: model,
-                                 instruction: instruction, temperature: scriptTemperature)
+                                 instruction: instruction, temperature: scriptTemperature,
+                                 reasoningLevel: scriptReasoningLevel)
         case .ollama:
             guard let url = URL(string: e.baseURL) else { return nil }
             return TextNormalizer(baseURL: url, model: model,
-                                  instruction: instruction, temperature: scriptTemperature)
+                                  instruction: instruction, temperature: scriptTemperature,
+                                  reasoningLevel: scriptReasoningLevel)
         }
+    }
+
+    /// few-shot 용어 발음 사전 섹션. term 순(알파벳/가나다)으로 정렬해 결정적
+    /// 프롬프트를 유지하고, 용어·발음이 빈 행은 건너뛴다. 사전이 비면 "".
+    private func glossaryBlock() -> String {
+        let entries = glossary
+            .map { GlossaryEntry(id: $0.id,
+                                 term: $0.term.trimmingCharacters(in: .whitespaces),
+                                 pronunciation: $0.pronunciation.trimmingCharacters(in: .whitespaces),
+                                 note: $0.note) }
+            .filter { !$0.term.isEmpty && !$0.pronunciation.isEmpty }
+            .sorted { $0.term.localizedCaseInsensitiveCompare($1.term) == .orderedAscending }
+        guard !entries.isEmpty else { return "" }
+        let table = entries.map { "\($0.term) → \($0.pronunciation)" }.joined(separator: "\n")
+        return "[용어 발음 사전 — 반드시 이 표기대로 변환]\n\(table)\n"
+            + "위 사전에 있는 표기는 아래 일반 규칙(영어는 그대로 둠 등)보다 우선한다."
+            + " 사전에 없는 표기는 아래 규칙을 따른다."
     }
 
     /// Normalize instruction with the optional per-run 대본 hint folded in. The
     /// hint goes FIRST as highest-priority: appended after the base rules, the
     /// base "영어는 그대로 둠 / 의미 보존" rules drown it out (verified w/ gemma —
     /// top placement is followed, trailing placement is ignored).
+    /// 용어 발음 사전도 같은 이유로 base rules **앞**에 둔다: 사전은 "영어는 그대로
+    /// 둠" 규칙과 정면으로 충돌하므로(np → 넘파이) 뒤에 붙이면 무시된다.
+    /// 우선순위는 추가 지시 > 사전 > 기본 규칙 — 사전에 없는 표기는 기본 규칙이 맡는다.
     private func scriptInstruction() -> String {
         let h = scriptHint.trimmingCharacters(in: .whitespacesAndNewlines)
-        return h.isEmpty ? normalizePrompt
-            : "[가장 중요한 지시 — 아래 규칙과 충돌하면 이 지시를 최우선으로 따른다]\n\(h)\n\n\(normalizePrompt)"
+        var parts: [String] = []
+        if !h.isEmpty {
+            parts.append("[가장 중요한 지시 — 아래 규칙과 충돌하면 이 지시를 최우선으로 따른다]\n\(h)")
+        }
+        let g = glossaryBlock()
+        if !g.isEmpty { parts.append(g) }
+        parts.append(normalizePrompt)
+        return parts.joined(separator: "\n\n")
     }
 
     // MARK: - Endpoint management (settings UI)
@@ -651,14 +706,17 @@ final class AppState: ObservableObject {
         case .gemini:
             guard let key = Secrets.endpointKey(e.id) else { return nil }
             return GeminiExplainer(baseURL: e.baseURL, apiKey: key, model: model,
-                                   instruction: explainPrompt, temperature: explainTemperature)
+                                   instruction: explainPrompt, temperature: explainTemperature,
+                                   reasoningLevel: explainReasoningLevel)
         case .openAICompatible:
             return ZAIExplainer(baseURL: e.baseURL, apiKey: endpointKey(e), model: model,
-                                instruction: explainPrompt, temperature: explainTemperature)
+                                instruction: explainPrompt, temperature: explainTemperature,
+                                reasoningLevel: explainReasoningLevel)
         case .ollama:
             guard let url = URL(string: e.baseURL) else { return nil }
             return OllamaExplainer(baseURL: url, model: model,
-                                   instruction: explainPrompt, temperature: explainTemperature)
+                                   instruction: explainPrompt, temperature: explainTemperature,
+                                   reasoningLevel: explainReasoningLevel)
         }
     }
 
@@ -677,16 +735,19 @@ final class AppState: ObservableObject {
                 return AsyncThrowingStream { $0.finish() }
             }
             return LLM.geminiStream(baseURL: e.baseURL, apiKey: key, model: model,
-                                    prompt: prompt, images: images, temperature: explainTemperature)
+                                    prompt: prompt, images: images, temperature: explainTemperature,
+                                    reasoningLevel: explainReasoningLevel)
         case .openAICompatible:
             return LLM.openAIChatStream(baseURL: e.baseURL, model: model, apiKey: endpointKey(e),
-                                        prompt: prompt, images: images, temperature: explainTemperature)
+                                        prompt: prompt, images: images, temperature: explainTemperature,
+                                        reasoningLevel: explainReasoningLevel)
         case .ollama:
             guard let url = URL(string: e.baseURL) else {
                 return AsyncThrowingStream { $0.finish() }
             }
             return LLM.ollamaChatStream(baseURL: url, model: model,
-                                        prompt: prompt, images: images, temperature: explainTemperature)
+                                        prompt: prompt, images: images, temperature: explainTemperature,
+                                        reasoningLevel: explainReasoningLevel)
         }
     }
 
@@ -712,7 +773,8 @@ final class AppState: ObservableObject {
         }
         let tkey = NormalizationCache.key(text: imagesDigest(imgs),
                                           provider: "vision:" + visionProv.id.uuidString,
-                                          model: visionModel, prompt: "transcribe")
+                                          model: visionModel,
+                                          prompt: "transcribe" + visionReasoningLevel.cacheSuffix)
         if let cached = normCache.script(forKey: tkey) { return cached }
         let prompt = """
         이미지를 텍스트로 옮기는 작업입니다. 여러 장이 첨부될 수 있으며, 서로 보완하는 자료(코드 화면 + 필기
@@ -740,15 +802,18 @@ final class AppState: ObservableObject {
                 statusText = "\(visionProv.name) 키 미설정"; return nil
             }
             stream = LLM.geminiStream(baseURL: visionProv.baseURL, apiKey: key, model: visionModel,
-                                      prompt: prompt, images: imgs, temperature: 0)
+                                      prompt: prompt, images: imgs, temperature: 0,
+                                      reasoningLevel: visionReasoningLevel)
         case .openAICompatible:
             stream = LLM.openAIChatStream(baseURL: visionProv.baseURL, model: visionModel,
                                           apiKey: endpointKey(visionProv),
-                                          prompt: prompt, images: imgs, temperature: 0)
+                                          prompt: prompt, images: imgs, temperature: 0,
+                                          reasoningLevel: visionReasoningLevel)
         case .ollama:
             let url = URL(string: visionProv.baseURL) ?? URL(string: "http://localhost:11434")!
             stream = LLM.ollamaChatStream(baseURL: url, model: visionModel,
-                                          prompt: prompt, images: imgs, temperature: 0)
+                                          prompt: prompt, images: imgs, temperature: 0,
+                                          reasoningLevel: visionReasoningLevel)
         }
         var acc = ""
         do {
@@ -827,7 +892,8 @@ final class AppState: ObservableObject {
         let provider = "explain:" + ep.id.uuidString
         let keyText = singleStage ? code + imagesDigest(imgs) : code
         let nk = NormalizationCache.key(text: keyText, provider: provider, model: explainModel,
-                                        prompt: explainPrompt + "\u{1F}" + explainHint)
+                                        prompt: explainPrompt + "\u{1F}" + explainHint
+                                                + explainReasoningLevel.cacheSuffix)
         if !force, let cached = normCache.script(forKey: nk) {
             explanationText = cached; lastExplainedCode = code; lastSegment = cached; return cached
         }
@@ -875,7 +941,8 @@ final class AppState: ObservableObject {
         let provider = "explain-cont:" + ep.id.uuidString
         let keyText = lastExplainedCode + "\u{1F}" + current
         let nk = NormalizationCache.key(text: keyText, provider: provider, model: explainModel,
-                                        prompt: "continue\u{1F}" + explainHint)
+                                        prompt: "continue\u{1F}" + explainHint
+                                                + explainReasoningLevel.cacheSuffix)
         if !force, let cached = normCache.script(forKey: nk) {
             applyContinuation(cached, newBaseline: current); return cached
         }
@@ -1017,7 +1084,8 @@ final class AppState: ObservableObject {
         guard normalizeEnabled, !src.isEmpty,
               let norm = makeNormalizer(instruction: instruction) else { return text }
         let nk = NormalizationCache.key(text: src, provider: scriptEndpointID,
-                                        model: scriptModel, prompt: instruction)
+                                        model: scriptModel,
+                                        prompt: instruction + scriptReasoningLevel.cacheSuffix)
         if let cached = normCache.script(forKey: nk) { return cached }
         normalizing = true
         defer { normalizing = false }
@@ -1089,7 +1157,8 @@ final class AppState: ObservableObject {
         // per-paragraph calls applied instructions unevenly (the hint landed on
         // some paragraphs, missed others). Audio synthesis still chunks by
         // paragraph downstream; only the text rewrite is whole-document here.
-        let nk = NormalizationCache.key(text: src, provider: provider, model: model, prompt: instruction)
+        let nk = NormalizationCache.key(text: src, provider: provider, model: model,
+                                        prompt: instruction + scriptReasoningLevel.cacheSuffix)
         if !force, let cached = normCache.script(forKey: nk) {
             scriptText = cached; markScriptFresh(); return cached
         }
@@ -1357,6 +1426,9 @@ final class AppState: ObservableObject {
                 hudPositions.map { (String($0.key), [$0.value.x, $0.value.y]) }),
             "normalize": normalizeEnabled,
             "explainTemperature": explainTemperature, "scriptTemperature": scriptTemperature,
+            "explainReasoningLevel": explainReasoningLevel.rawValue,
+            "scriptReasoningLevel": scriptReasoningLevel.rawValue,
+            "visionReasoningLevel": visionReasoningLevel.rawValue,
             "explainAutoPlay": explainAutoPlay,
             "stability": voiceSettings.stability, "similarity": voiceSettings.similarityBoost,
             "style": voiceSettings.style, "speakerBoost": voiceSettings.useSpeakerBoost,
@@ -1374,6 +1446,10 @@ final class AppState: ObservableObject {
         if let data = try? JSONEncoder().encode(endpoints),
            let arr = try? JSONSerialization.jsonObject(with: data) {
             dict["endpoints"] = arr
+        }
+        if let data = try? JSONEncoder().encode(glossary),
+           let arr = try? JSONSerialization.jsonObject(with: data) {
+            dict["glossary"] = arr
         }
         // Only persist the prompt if the user customized it, so default-prompt
         // updates auto-apply for everyone who didn't.
@@ -1393,7 +1469,11 @@ final class AppState: ObservableObject {
               let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else {
             // No settings yet (fresh install): still seed the 3 standard
             // endpoints so the app works out of the box, then persist them.
+            // 용어 사전도 여기서 심어야 한다 — 아래 saveSettings()가 "glossary" 키를
+            // 빈 배열로 써버리면 다음 실행부터 그 파일은 "사용자가 전부 지웠다"로
+            // 읽혀 예시가 영영 안 나온다.
             seedEndpoints(from: [:])
+            glossary = Self.seedGlossary
             saveSettings()
             return
         }
@@ -1419,6 +1499,9 @@ final class AppState: ObservableObject {
         explainTemperature = o["explainTemperature"] as? Double ?? explainTemperature
         explainAutoPlay = o["explainAutoPlay"] as? Bool ?? explainAutoPlay
         scriptTemperature = o["scriptTemperature"] as? Double ?? scriptTemperature
+        explainReasoningLevel = ReasoningLevel(rawValue: o["explainReasoningLevel"] as? String ?? "") ?? explainReasoningLevel
+        scriptReasoningLevel = ReasoningLevel(rawValue: o["scriptReasoningLevel"] as? String ?? "") ?? scriptReasoningLevel
+        visionReasoningLevel = ReasoningLevel(rawValue: o["visionReasoningLevel"] as? String ?? "") ?? visionReasoningLevel
         voiceSettings.stability = o["stability"] as? Double ?? voiceSettings.stability
         voiceSettings.similarityBoost = o["similarity"] as? Double ?? voiceSettings.similarityBoost
         voiceSettings.style = o["style"] as? Double ?? voiceSettings.style
@@ -1457,6 +1540,19 @@ final class AppState: ObservableObject {
         explainEndpointID = resolve(explainEndpointID)
         scriptEndpointID = resolve(scriptEndpointID)
         visionEndpointID = resolve(visionEndpointID)
+
+        // --- 용어 발음 사전 (glossary) ---
+        // The PRESENCE of the "glossary" key means this file knows about the
+        // feature — an EMPTY array then means "the user deleted them all" and is
+        // honored (same rule as endpoints). Only a missing key seeds the examples;
+        // 키가 있는데 못 읽히면(손상·손편집) 지운 항목이 되살아나지 않도록 빈 사전.
+        if o["glossary"] == nil {
+            glossary = Self.seedGlossary
+        } else {
+            let arr = o["glossary"] as? [[String: Any]] ?? []
+            let data = (try? JSONSerialization.data(withJSONObject: arr)) ?? Data()
+            glossary = (try? JSONDecoder().decode([GlossaryEntry].self, from: data)) ?? []
+        }
 
         // Persist the migration only AFTER every field is loaded — saving inside
         // the branch above wrote the pre-load defaults for anything read below it

@@ -35,6 +35,9 @@ struct CommentaryView: View {
             if showPrompt {
                 StageInspector(title: "해설 설정",
                                temperature: $app.explainTemperature,
+                               reasoningLevel: $app.explainReasoningLevel,
+                               visionLevelTitle: "비전 생성 수준",
+                               visionReasoningLevel: $app.visionReasoningLevel,
                                prompt: $app.explainPrompt,
                                promptCaption: "해설 지시문 — 코드를 어떻게 해설할지 LLM에게 주는 규칙",
                                restore: { app.explainPrompt = CodeExplanation.defaultInstruction },

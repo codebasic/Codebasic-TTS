@@ -21,6 +21,7 @@ struct GenerateView: View {
             if showPrompt {
                 StageInspector(title: "대본 설정",
                                temperature: $app.scriptTemperature,
+                               reasoningLevel: $app.scriptReasoningLevel,
                                prompt: $app.normalizePrompt,
                                promptCaption: "정규화 지시문 — 대본을 어떻게 다듬을지 LLM에게 주는 규칙",
                                restore: { app.normalizePrompt = TextNormalizer.defaultInstruction },

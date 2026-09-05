@@ -16,6 +16,7 @@ struct SettingsView: View {
     @State private var newStyle: CustomEndpoint.APIStyle = .openAICompatible
     @State private var newKey = ""
     @State private var newDefaultModel = ""
+    @State private var showGlossaryEditor = false   // 용어 발음 사전 편집 시트
 
     var body: some View {
         settingsForm
@@ -61,6 +62,7 @@ struct SettingsView: View {
             }
             .formStyle(.grouped)
         }
+        .sheet(isPresented: $showGlossaryEditor) { GlossaryEditorView() }
     }
 
     // MARK: - ① 음성 합성 (TTS engine)
@@ -222,6 +224,18 @@ struct SettingsView: View {
         Section("음성 대본 정규화") {
             Toggle("대본 생성 시 LLM으로 발음·표기 정규화", isOn: $app.normalizeEnabled)
             Text("끄면 해설을 거의 그대로 합성합니다. 켜면 숫자·기호·코드 명칭을 발음대로 다듬습니다 (경량 로컬 모델은 부정확할 수 있어 강한 모델 권장).")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+
+        Section("용어 발음 사전 (대본)") {
+            HStack {
+                Text(app.glossary.isEmpty ? "항목 없음" : "\(app.glossary.count)개 항목")
+                Spacer()
+                Button { showGlossaryEditor = true } label: {
+                    Label("편집…", systemImage: "square.and.pencil")
+                }
+            }
+            Text("대본 정규화 프롬프트에 few-shot 사전으로 주입됩니다: 등록한 용어는 발음 그대로 변환됩니다 (예: np → 넘파이). 해설 단계에는 적용되지 않습니다.")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }

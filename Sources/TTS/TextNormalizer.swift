@@ -14,6 +14,67 @@ func normalizationPrompt(_ instruction: String, _ text: String) -> String {
     return "\(instr)\n\n원문:\n\(text)\n\n변환:"
 }
 
+/// 사용자 친화적 3단 reasoning(thinking) 수준. 공급자별 파라미터로 변환된다:
+/// OpenAI 호환 = reasoning_effort, GLM = thinking on/off, Gemini = thinkingBudget,
+/// Ollama = think.
+///
+/// 핵심 규칙: **"보통"은 어떤 파라미터도 싣지 않는다** (전부 nil). 공급자 기본값이
+/// 곧 "보통"이기 때문이다 — Gemini 2.5는 동적 thinking, GLM은 thinking on, Ollama
+/// thinking 모델은 think on, OpenAI reasoning 모델은 effort medium이 기본이다.
+/// 덕분에 기본 설정(=보통)의 요청 본문은 이 기능 도입 전과 완전히 동일하고,
+/// thinking을 모르는 모델(gemini-2.0-flash, gemma 계열 등 — 이 저장소의 기본
+/// 모델들이다)에 낯선 필드를 보내 400을 맞는 일이 없다. 낮음/높음은 사용자가
+/// 명시적으로 고른 경우에만 실린다.
+enum ReasoningLevel: String, CaseIterable, Identifiable {
+    case low, medium, high
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .low: return "낮음"
+        case .medium: return "보통"
+        case .high: return "높음"
+        }
+    }
+    /// "보통" = 공급자 기본값에 맡김 (파라미터 미전송).
+    var isProviderDefault: Bool { self == .medium }
+
+    /// NormalizationCache 키에 덧붙이는 조각 — 수준을 바꾸면 요청이 달라지므로
+    /// 같은 텍스트라도 캐시 적중 없이 다시 생성돼야 한다. 기본값(보통)에서는 빈
+    /// 문자열이라 이 기능 이전에 쌓인 캐시가 그대로 유효하다.
+    var cacheSuffix: String { isProviderDefault ? "" : "\u{1F}reasoning=\(rawValue)" }
+
+    /// OpenAI 호환 reasoning_effort 값. 보통이면 nil(미전송).
+    var openAIEffort: String? { isProviderDefault ? nil : rawValue }
+
+    /// GLM은 effort 단계가 없어 on/off만: 낮음=disabled, 높음=enabled.
+    /// 보통이면 nil(미전송 → GLM 기본 thinking on).
+    var glmThinkingEnabled: Bool? { isProviderDefault ? nil : self != .low }
+
+    /// Ollama `think`. **끄는 쪽(false)만 보낸다** — thinking 미지원 모델에
+    /// `think:true`를 보내면 Ollama가 "does not support thinking"으로 요청을
+    /// 거절하지만, `false`는 어떤 모델에도 능력을 요구하지 않아 안전하다.
+    /// 보통·높음은 미전송 → thinking 모델은 기본대로 켜진 채 동작한다.
+    var ollamaThink: Bool? { self == .low ? false : nil }
+
+    /// Gemini `generationConfig.thinkingConfig` (없으면 nil).
+    /// thinkingConfig를 이해하지 못하는 세대(1.5 / 2.0 / Gemini API가 서빙하는
+    /// gemma 등)에 실으면 400 INVALID_ARGUMENT가 나므로, thinking 지원이 확실한
+    /// 이름에만 붙인다. 2.5 pro는 thinking을 완전히 끌 수 없어(budget 0 거부)
+    /// 낮음을 최소 budget 128로 낮춘다.
+    func geminiThinkingConfig(model: String) -> [String: Any]? {
+        guard !isProviderDefault, Self.geminiSupportsThinking(model) else { return nil }
+        if self == .high { return ["thinkingBudget": 8192] }
+        return ["thinkingBudget": model.lowercased().contains("pro") ? 128 : 0]
+    }
+
+    /// 이름만으로 thinking 지원을 단정할 수 있는 세대(2.5 / 3.x)만 허용한다.
+    /// 모르는 이름은 보수적으로 미전송 — 기능이 안 걸리는 쪽이 400보다 낫다.
+    private static func geminiSupportsThinking(_ model: String) -> Bool {
+        let m = model.lowercased()
+        return m.contains("2.5") || m.contains("gemini-3")
+    }
+}
+
 /// Shared LLM HTTP plumbing. Both the normalizer (원문→변환) and the explainer
 /// (코드→해설) build their own prompt and call these — the prompt scaffold is
 /// the caller's job, NOT baked in here.
@@ -23,7 +84,8 @@ enum LLM {
     /// is the increment. Cancelling the consuming task tears down the request.
     static func geminiStream(baseURL: String = GeminiNormalizer.defaultBaseURL,
                              apiKey: String, model: String, prompt: String,
-                             images: [Data] = [], temperature: Double = 0.2) -> AsyncThrowingStream<String, Error> {
+                             images: [Data] = [], temperature: Double = 0.2,
+                             reasoningLevel: ReasoningLevel = .medium) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             let work = Task {
                 do {
@@ -43,9 +105,13 @@ enum LLM {
                         parts.append(["inline_data": ["mime_type": "image/png",
                                                       "data": img.base64EncodedString()]])
                     }
+                    var generationConfig: [String: Any] = ["temperature": temperature]
+                    if let thinking = reasoningLevel.geminiThinkingConfig(model: model) {
+                        generationConfig["thinkingConfig"] = thinking
+                    }
                     req.httpBody = try JSONSerialization.data(withJSONObject: [
                         "contents": [["parts": parts]],
-                        "generationConfig": ["temperature": temperature],
+                        "generationConfig": generationConfig,
                     ])
                     let (bytes, response) = try await URLSession.shared.bytes(for: req)
                     guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
@@ -82,7 +148,8 @@ enum LLM {
     /// Images ride as `image_url` content parts (data: URLs) for vision models.
     static func openAIChatStream(baseURL: String, model: String, apiKey: String,
                                  prompt: String, images: [Data] = [],
-                                 temperature: Double = 0.2) -> AsyncThrowingStream<String, Error> {
+                                 temperature: Double = 0.2,
+                                 reasoningLevel: ReasoningLevel = .medium) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             let work = Task {
                 do {
@@ -105,12 +172,25 @@ enum LLM {
                         }
                         content = parts
                     }
-                    req.httpBody = try JSONSerialization.data(withJSONObject: [
+                    // GLM 계열은 effort 단계가 없어 thinking on/off로, 그 외 OpenAI
+                    // 호환은 reasoning_effort로 보낸다 — 배타적 분기라 두 필드가 한
+                    // 요청에 함께 실리는 일은 없다. "보통"이면 어느 쪽도 싣지 않아
+                    // 요청 본문이 기존과 동일하다 (임의의 OpenAI 호환 서버가 모르는
+                    // 필드에 400을 내는 위험을 기본 경로에서 없앤다).
+                    var payload: [String: Any] = [
                         "model": model,
                         "messages": [["role": "user", "content": content]],
                         "stream": true,
                         "temperature": temperature,
-                    ])
+                    ]
+                    if model.lowercased().contains("glm") {
+                        if let on = reasoningLevel.glmThinkingEnabled {
+                            payload["thinking"] = ["type": on ? "enabled" : "disabled"]
+                        }
+                    } else if let effort = reasoningLevel.openAIEffort {
+                        payload["reasoning_effort"] = effort
+                    }
+                    req.httpBody = try JSONSerialization.data(withJSONObject: payload)
                     let (bytes, response) = try await URLSession.shared.bytes(for: req)
                     guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
                         throw NSError(domain: "OpenAI-compat",
@@ -143,17 +223,20 @@ enum LLM {
     /// Ollama streaming (`api/generate`, stream:true → JSONL). Yields each
     /// `response` delta; stops at the `done:true` line. Cancellation tears down.
     static func ollamaStream(baseURL: URL, model: String, prompt: String,
-                             temperature: Double = 0.2) -> AsyncThrowingStream<String, Error> {
+                             temperature: Double = 0.2,
+                             reasoningLevel: ReasoningLevel = .medium) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             let work = Task {
                 do {
                     var req = URLRequest(url: baseURL.appendingPathComponent("api/generate"))
                     req.httpMethod = "POST"
                     req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                    req.httpBody = try JSONSerialization.data(withJSONObject: [
+                    var payload: [String: Any] = [
                         "model": model, "prompt": prompt, "stream": true,
                         "options": ["temperature": temperature],
-                    ])
+                    ]
+                    if let think = reasoningLevel.ollamaThink { payload["think"] = think }
+                    req.httpBody = try JSONSerialization.data(withJSONObject: payload)
                     let (bytes, response) = try await URLSession.shared.bytes(for: req)
                     guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
                         throw NSError(domain: "Ollama",
@@ -183,7 +266,8 @@ enum LLM {
     /// vision: image input is delivered via the chat message's `images` (base64),
     /// not `api/generate`. Yields each `message.content` delta.
     static func ollamaChatStream(baseURL: URL, model: String, prompt: String,
-                                 images: [Data], temperature: Double = 0.2) -> AsyncThrowingStream<String, Error> {
+                                 images: [Data], temperature: Double = 0.2,
+                                 reasoningLevel: ReasoningLevel = .medium) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             let work = Task {
                 do {
@@ -192,10 +276,12 @@ enum LLM {
                     req.setValue("application/json", forHTTPHeaderField: "Content-Type")
                     var message: [String: Any] = ["role": "user", "content": prompt]
                     if !images.isEmpty { message["images"] = images.map { $0.base64EncodedString() } }
-                    req.httpBody = try JSONSerialization.data(withJSONObject: [
+                    var payload: [String: Any] = [
                         "model": model, "messages": [message], "stream": true,
                         "options": ["temperature": temperature],
-                    ])
+                    ]
+                    if let think = reasoningLevel.ollamaThink { payload["think"] = think }
+                    req.httpBody = try JSONSerialization.data(withJSONObject: payload)
                     let (bytes, response) = try await URLSession.shared.bytes(for: req)
                     guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
                         throw NSError(domain: "Ollama",
@@ -255,9 +341,11 @@ struct TextNormalizer: Normalizing {
     """
 
     var temperature: Double = 0.2
+    var reasoningLevel: ReasoningLevel = .medium
     func normalizeStream(_ text: String) -> AsyncThrowingStream<String, Error> {
         LLM.ollamaStream(baseURL: baseURL, model: model,
-                         prompt: normalizationPrompt(instruction, text), temperature: temperature)
+                         prompt: normalizationPrompt(instruction, text), temperature: temperature,
+                         reasoningLevel: reasoningLevel)
     }
 }
 
@@ -272,9 +360,11 @@ struct GeminiNormalizer: Normalizing {
     static let defaultBaseURL = "https://generativelanguage.googleapis.com/v1beta"
 
     var temperature: Double = 0.2
+    var reasoningLevel: ReasoningLevel = .medium
     func normalizeStream(_ text: String) -> AsyncThrowingStream<String, Error> {
         LLM.geminiStream(baseURL: baseURL, apiKey: apiKey, model: model,
-                         prompt: normalizationPrompt(instruction, text), temperature: temperature)
+                         prompt: normalizationPrompt(instruction, text), temperature: temperature,
+                         reasoningLevel: reasoningLevel)
     }
 }
 
@@ -290,9 +380,11 @@ struct ZAINormalizer: Normalizing {
     static let fallbackModels = ["glm-5.3"]
 
     var temperature: Double = 0.2
+    var reasoningLevel: ReasoningLevel = .medium
     func normalizeStream(_ text: String) -> AsyncThrowingStream<String, Error> {
         LLM.openAIChatStream(baseURL: baseURL, model: model, apiKey: apiKey,
-                             prompt: normalizationPrompt(instruction, text), temperature: temperature)
+                             prompt: normalizationPrompt(instruction, text), temperature: temperature,
+                             reasoningLevel: reasoningLevel)
     }
 }
 
@@ -409,14 +501,16 @@ struct GeminiExplainer: Explaining {
     let model: String
     let instruction: String
     var temperature: Double = 0.4
+    var reasoningLevel: ReasoningLevel = .medium
     func stream(_ code: String, hint: String) -> AsyncThrowingStream<String, Error> {
         LLM.geminiStream(baseURL: baseURL, apiKey: apiKey, model: model,
-                         prompt: CodeExplanation.prompt(instruction, code, hint: hint), temperature: temperature)
+                         prompt: CodeExplanation.prompt(instruction, code, hint: hint), temperature: temperature,
+                         reasoningLevel: reasoningLevel)
     }
     func streamContinuing(previous: String, current: String, hint: String) -> AsyncThrowingStream<String, Error> {
         LLM.geminiStream(baseURL: baseURL, apiKey: apiKey, model: model,
                          prompt: CodeExplanation.continuePrompt(previous: previous, current: current, hint: hint),
-                         temperature: temperature)
+                         temperature: temperature, reasoningLevel: reasoningLevel)
     }
 }
 
@@ -427,14 +521,16 @@ struct ZAIExplainer: Explaining {
     let model: String
     let instruction: String
     var temperature: Double = 0.4
+    var reasoningLevel: ReasoningLevel = .medium
     func stream(_ code: String, hint: String) -> AsyncThrowingStream<String, Error> {
         LLM.openAIChatStream(baseURL: baseURL, model: model, apiKey: apiKey,
-                             prompt: CodeExplanation.prompt(instruction, code, hint: hint), temperature: temperature)
+                             prompt: CodeExplanation.prompt(instruction, code, hint: hint), temperature: temperature,
+                             reasoningLevel: reasoningLevel)
     }
     func streamContinuing(previous: String, current: String, hint: String) -> AsyncThrowingStream<String, Error> {
         LLM.openAIChatStream(baseURL: baseURL, model: model, apiKey: apiKey,
                              prompt: CodeExplanation.continuePrompt(previous: previous, current: current, hint: hint),
-                             temperature: temperature)
+                             temperature: temperature, reasoningLevel: reasoningLevel)
     }
 }
 
@@ -444,14 +540,16 @@ struct OllamaExplainer: Explaining {
     let model: String
     let instruction: String
     var temperature: Double = 0.4
+    var reasoningLevel: ReasoningLevel = .medium
     func stream(_ code: String, hint: String) -> AsyncThrowingStream<String, Error> {
         LLM.ollamaStream(baseURL: baseURL, model: model,
-                         prompt: CodeExplanation.prompt(instruction, code, hint: hint), temperature: temperature)
+                         prompt: CodeExplanation.prompt(instruction, code, hint: hint), temperature: temperature,
+                         reasoningLevel: reasoningLevel)
     }
     func streamContinuing(previous: String, current: String, hint: String) -> AsyncThrowingStream<String, Error> {
         LLM.ollamaStream(baseURL: baseURL, model: model,
                          prompt: CodeExplanation.continuePrompt(previous: previous, current: current, hint: hint),
-                         temperature: temperature)
+                         temperature: temperature, reasoningLevel: reasoningLevel)
     }
 }
 
