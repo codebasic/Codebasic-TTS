@@ -164,7 +164,7 @@ final class AppState: ObservableObject {
             out += g.map { LLMChoice(provider: .gemini, model: $0) }
         }
         if zaiKeyPresent || !zaiModels.isEmpty {
-            let z = zaiModels.isEmpty ? ZAINormalizer.models : zaiModels
+            let z = zaiModels.isEmpty ? ZAINormalizer.fallbackModels : zaiModels
             out += z.map { LLMChoice(provider: .zai, model: $0) }
         }
         return out
@@ -529,32 +529,18 @@ final class AppState: ObservableObject {
         if !k.isEmpty { refreshZAIModels() }
     }
 
-    /// Z.ai exposes no public models.list on the coding endpoint — verify with a
-    /// 1-token ping and fill the static list on success.
+    /// Fetch the endpoint's live models.list (OpenAI-style GET /models) and swap
+    /// it into the picker.
     func refreshZAIModels() {
         guard let key = Secrets.zaiKey else { zaiStatus = "키 없음"; return }
         zaiStatus = "확인 중…"
         let base = zaiBaseURL
-        let model = zaiModel.isEmpty ? "glm-5.3" : zaiModel
         Task { [weak self] in
             do {
-                var req = URLRequest(url: URL(string: base + "/chat/completions")!)
-                req.httpMethod = "POST"
-                req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
-                req.httpBody = try JSONSerialization.data(withJSONObject: [
-                    "model": model, "messages": [["role": "user", "content": "ping"]],
-                    "max_tokens": 1, "stream": false,
-                ])
-                let (_, resp) = try await URLSession.shared.data(for: req)
-                guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
-                    let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
-                    throw NSError(domain: "Z.ai", code: code,
-                                  userInfo: [NSLocalizedDescriptionKey: "연결 실패 (\(code))"])
-                }
+                let ms = try await ZAI.models(baseURL: base, apiKey: key)
                 guard let self else { return }
-                self.zaiModels = ZAINormalizer.models
-                self.zaiStatus = "연결됨 · \(model)"
+                self.zaiModels = ms
+                self.zaiStatus = "연결됨 · 모델 \(ms.count)개"
             } catch {
                 self?.zaiStatus = "연결 실패: \(error.localizedDescription)"
             }

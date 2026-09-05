@@ -285,8 +285,9 @@ struct ZAINormalizer: Normalizing {
     let model: String          // e.g. "glm-5.3"
     let instruction: String
 
-    static let models = ["glm-5.3"]
     static let defaultBaseURL = "https://api.z.ai/api/coding/paas/v4"
+    /// Shown before the first successful models.list fetch (e.g. offline at launch).
+    static let fallbackModels = ["glm-5.3"]
 
     var temperature: Double = 0.2
     func normalizeStream(_ text: String) -> AsyncThrowingStream<String, Error> {
@@ -482,6 +483,32 @@ enum Gemini {
             guard let name = m["name"] as? String else { return nil }
             return name.hasPrefix("models/") ? String(name.dropFirst("models/".count)) : name
         }
+    }
+}
+
+/// Z.ai (OpenAI-compatible) helpers for the UI.
+enum ZAI {
+    /// Models the endpoint exposes (OpenAI-style `GET /models` → `{data:[{id}]}`).
+    /// `baseURL` is the same API root as generation.
+    static func models(baseURL: String, apiKey: String) async throws -> [String] {
+        var base = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if base.isEmpty { base = ZAINormalizer.defaultBaseURL }
+        while base.hasSuffix("/") { base.removeLast() }
+        guard let url = URL(string: "\(base)/models") else {
+            throw NSError(domain: "Z.ai", code: -1,
+                          userInfo: [NSLocalizedDescriptionKey: "잘못된 Z.ai 엔드포인트 URL"])
+        }
+        var req = URLRequest(url: url)
+        req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        let (data, response) = try await URLSession.shared.data(for: req)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            let msg = String(data: data, encoding: .utf8) ?? "Z.ai에 연결할 수 없음"
+            throw NSError(domain: "Z.ai", code: (response as? HTTPURLResponse)?.statusCode ?? -1,
+                          userInfo: [NSLocalizedDescriptionKey: msg])
+        }
+        let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let arr = (obj?["data"] as? [[String: Any]]) ?? []
+        return arr.compactMap { $0["id"] as? String }.sorted()
     }
 }
 
