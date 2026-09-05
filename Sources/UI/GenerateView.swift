@@ -79,6 +79,7 @@ struct GenerateView: View {
                                    provider: $app.scriptProvider,
                                    geminiModel: $app.geminiModel,
                                    ollamaModel: $app.ollamaModel,
+                                   zaiModel: $app.zaiModel,
                                    onChange: { app.saveSettings() })
                 } else {
                     Text("정규화 꺼짐 (설정)").font(.caption).foregroundStyle(.secondary)

@@ -76,6 +76,70 @@ enum LLM {
         }
     }
 
+    /// OpenAI-compatible chat streaming (`chat/completions`, stream:true → SSE).
+    /// Works for Z.ai (coding endpoint), OpenRouter, vLLM, etc. Yields each
+    /// `choices[0].delta.content` delta; stops at the `data: [DONE]` line.
+    /// Images ride as `image_url` content parts (data: URLs) for vision models.
+    static func openAIChatStream(baseURL: String, model: String, apiKey: String,
+                                 prompt: String, images: [Data] = [],
+                                 temperature: Double = 0.2) -> AsyncThrowingStream<String, Error> {
+        AsyncThrowingStream { continuation in
+            let work = Task {
+                do {
+                    var base = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+                    while base.hasSuffix("/") { base.removeLast() }
+                    guard let url = URL(string: "\(base)/chat/completions") else {
+                        throw NSError(domain: "OpenAI-compat", code: -1,
+                                      userInfo: [NSLocalizedDescriptionKey: "잘못된 엔드포인트 URL"])
+                    }
+                    var req = URLRequest(url: url)
+                    req.httpMethod = "POST"
+                    req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+                    var content: Any = prompt
+                    if !images.isEmpty {
+                        var parts: [[String: Any]] = [["type": "text", "text": prompt]]
+                        for img in images {
+                            parts.append(["type": "image_url",
+                                          "image_url": ["url": "data:image/png;base64,\(img.base64EncodedString())"]])
+                        }
+                        content = parts
+                    }
+                    req.httpBody = try JSONSerialization.data(withJSONObject: [
+                        "model": model,
+                        "messages": [["role": "user", "content": content]],
+                        "stream": true,
+                        "temperature": temperature,
+                    ])
+                    let (bytes, response) = try await URLSession.shared.bytes(for: req)
+                    guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+                        throw NSError(domain: "OpenAI-compat",
+                                      code: (response as? HTTPURLResponse)?.statusCode ?? -1,
+                                      userInfo: [NSLocalizedDescriptionKey:
+                                        "LLM 요청 실패 (\((response as? HTTPURLResponse)?.statusCode ?? -1))"])
+                    }
+                    for try await line in bytes.lines {
+                        try Task.checkCancellation()
+                        guard line.hasPrefix("data:") else { continue }
+                        let json = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+                        guard json != "[DONE]" else { break }
+                        guard !json.isEmpty,
+                              let d = json.data(using: .utf8),
+                              let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+                              let choices = obj["choices"] as? [[String: Any]],
+                              let delta = choices.first?["delta"] as? [String: Any],
+                              let text = delta["content"] as? String, !text.isEmpty else { continue }
+                        continuation.yield(text)
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in work.cancel() }
+        }
+    }
+
     /// Ollama streaming (`api/generate`, stream:true → JSONL). Yields each
     /// `response` delta; stops at the `done:true` line. Cancellation tears down.
     static func ollamaStream(baseURL: URL, model: String, prompt: String,
@@ -214,6 +278,23 @@ struct GeminiNormalizer: Normalizing {
     }
 }
 
+/// Z.ai (OpenAI-compatible coding endpoint) normalizer.
+struct ZAINormalizer: Normalizing {
+    let baseURL: String
+    let apiKey: String
+    let model: String          // e.g. "glm-5.3"
+    let instruction: String
+
+    static let models = ["glm-5.3"]
+    static let defaultBaseURL = "https://api.z.ai/api/coding/paas/v4"
+
+    var temperature: Double = 0.2
+    func normalizeStream(_ text: String) -> AsyncThrowingStream<String, Error> {
+        LLM.openAIChatStream(baseURL: baseURL, model: model, apiKey: apiKey,
+                             prompt: normalizationPrompt(instruction, text), temperature: temperature)
+    }
+}
+
 // MARK: - Code explanation (코드 → 해설)
 
 /// Turns source code into a spoken-style Korean commentary. Distinct from
@@ -335,6 +416,24 @@ struct GeminiExplainer: Explaining {
         LLM.geminiStream(baseURL: baseURL, apiKey: apiKey, model: model,
                          prompt: CodeExplanation.continuePrompt(previous: previous, current: current, hint: hint),
                          temperature: temperature)
+    }
+}
+
+/// Code explanation via Z.ai (OpenAI-compatible coding endpoint).
+struct ZAIExplainer: Explaining {
+    let baseURL: String
+    let apiKey: String
+    let model: String
+    let instruction: String
+    var temperature: Double = 0.4
+    func stream(_ code: String, hint: String) -> AsyncThrowingStream<String, Error> {
+        LLM.openAIChatStream(baseURL: baseURL, model: model, apiKey: apiKey,
+                             prompt: CodeExplanation.prompt(instruction, code, hint: hint), temperature: temperature)
+    }
+    func streamContinuing(previous: String, current: String, hint: String) -> AsyncThrowingStream<String, Error> {
+        LLM.openAIChatStream(baseURL: baseURL, model: model, apiKey: apiKey,
+                             prompt: CodeExplanation.continuePrompt(previous: previous, current: current, hint: hint),
+                             temperature: temperature)
     }
 }
 

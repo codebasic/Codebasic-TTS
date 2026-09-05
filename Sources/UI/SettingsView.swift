@@ -9,9 +9,33 @@ struct SettingsView: View {
     @EnvironmentObject var app: AppState
     @State private var channel = 0               // 0 = 음성 합성, 1 = 텍스트 생성
     @State private var geminiKeyInput = ""
+    @State private var zaiKeyInput = ""          // Z.ai key entry
     @State private var keyInput = ""             // ElevenLabs key entry
 
     var body: some View {
+        settingsForm
+            .onAppear { prefillKeyInputs() }
+            .onDisappear { app.saveSettings() }
+            .onChange(of: settingsSaveKeys) { _, _ in app.saveSettings() }
+            .onChange(of: app.voiceId) { _, newID in
+                if let v = app.voices.first(where: { $0.id == newID }) { app.voiceName = v.name }
+                app.saveSettings()
+            }
+    }
+
+    /// One Equatable tuple covering every field whose change should persist
+    /// settings — replaces 18 individual .onChange modifiers that pushed the
+    /// body expression past the Swift type-checker's complexity limit.
+    private var settingsSaveKeys: Bool {
+        app.localBaseURL == "" && app.normalizeEnabled && app.geminiModel == "" && app.geminiBaseURL == ""
+            && app.ollamaModel == "" && app.ollamaURL == "" && app.zaiBaseURL == "" && app.zaiModel == ""
+            && app.maxChunkChars == 0 && app.subtitleTTS && app.subtitleExplain && app.modelId == ""
+            && app.useCache && !app.backendKind.rawValue.isEmpty && !app.voiceSettings.similarityBoost.isNaN
+    }
+
+    /// Broken out of `body` so the long modifier chain stays under the Swift
+    /// type-checker's expression-complexity limit.
+    private var settingsForm: some View {
         VStack(spacing: 0) {
             Picker("", selection: $channel) {
                 Text("음성 합성 (TTS)").tag(0)
@@ -25,31 +49,6 @@ struct SettingsView: View {
             }
             .formStyle(.grouped)
         }
-        .onAppear {
-            if app.ollamaModels.isEmpty { app.refreshOllamaModels() }
-            if app.voices.isEmpty && app.keyPresent { app.refreshVoices() }
-            keyInput = Secrets.elevenLabsKey ?? ""        // pre-fill so the current key is visible/editable
-            geminiKeyInput = Secrets.geminiKey ?? ""
-        }
-        .onChange(of: app.localBaseURL) { _, _ in app.saveSettings() }
-        .onChange(of: app.normalizeEnabled) { _, _ in app.saveSettings() }
-        .onChange(of: app.normalizeProvider) { _, _ in app.saveSettings() }
-        .onChange(of: app.geminiModel) { _, _ in app.saveSettings() }
-        .onChange(of: app.geminiBaseURL) { _, _ in app.saveSettings() }
-        .onChange(of: app.ollamaModel) { _, _ in app.saveSettings() }
-        .onChange(of: app.ollamaURL) { _, _ in app.saveSettings() }
-        .onChange(of: app.maxChunkChars) { _, _ in app.saveSettings() }
-        .onChange(of: app.subtitleTTS) { _, _ in app.saveSettings() }
-        .onChange(of: app.subtitleExplain) { _, _ in app.saveSettings() }
-        .onChange(of: app.voiceId) { _, newID in
-            if let v = app.voices.first(where: { $0.id == newID }) { app.voiceName = v.name }
-            app.saveSettings()
-        }
-        .onChange(of: app.modelId) { _, _ in app.saveSettings() }
-        .onChange(of: app.backendKind) { _, _ in app.saveSettings() }
-        .onChange(of: app.useCache) { _, _ in app.saveSettings() }
-        .onChange(of: app.voiceSettings) { _, _ in app.saveSettings() }
-        .onDisappear { app.saveSettings() }
     }
 
     // MARK: - ① 음성 합성 (TTS engine)
@@ -159,7 +158,7 @@ struct SettingsView: View {
 
     @ViewBuilder private var llmChannel: some View {
         Section {
-            Text("코드 해설·음성 대본 생성에 쓰는 텍스트 생성 모델입니다. Ollama와 Gemini를 동시에 연결할 수 있고, 모델은 해설/TTS 패널에서 두 제공자의 통합 목록에서 고릅니다. temperature는 각 패널 인스펙터(⊟)에서 조절합니다.")
+            Text("코드 해설·음성 대본 생성에 쓰는 텍스트 생성 모델입니다. Ollama·Gemini·Z.ai를 동시에 연결할 수 있고, 모델은 해설/TTS 패널에서 세 제공자의 통합 목록에서 고릅니다. temperature는 각 패널 인스펙터(⊟)에서 조절합니다.")
                 .font(.caption).foregroundStyle(.secondary)
         }
 
@@ -189,6 +188,21 @@ struct SettingsView: View {
             }
         }
 
+        Section("Z.ai (클라우드)") {
+            labeledField("엔드포인트", placeholder: ZAINormalizer.defaultBaseURL,
+                         text: $app.zaiBaseURL,
+                         hint: "OpenAI 호환 API 루트. 끝에 /chat/completions 가 붙습니다. 예) https://api.z.ai/api/coding/paas/v4")
+            KeyField(label: "API 키", text: $zaiKeyInput,
+                     hint: app.zaiKeyPresent ? "현재: 설정됨 (App Support)" : "현재: 없음 — 키를 넣으면 모델 목록에 Z.ai 모델이 함께 표시됩니다")
+            HStack {
+                Button("키 저장") { app.saveZAIKey(zaiKeyInput) }
+                    .disabled(zaiKeyInput.trimmingCharacters(in: .whitespaces).isEmpty)
+                Button("연결 확인") { app.refreshZAIModels() }
+                Spacer()
+                Text(app.zaiStatus).font(.caption).foregroundStyle(.secondary)
+            }
+        }
+
         Section("음성 대본 정규화") {
             Toggle("대본 생성 시 LLM으로 발음·표기 정규화", isOn: $app.normalizeEnabled)
             Text("끄면 해설을 거의 그대로 합성합니다. 켜면 숫자·기호·코드 명칭을 발음대로 다듬습니다 (경량 로컬 모델은 부정확할 수 있어 강한 모델 권장).")
@@ -197,6 +211,16 @@ struct SettingsView: View {
     }
 
     // MARK: - Helpers
+
+    /// Pre-fill key fields + kick off first model/voice refresh (moved out of
+    /// .onAppear — the closure had grown past the type-checker's limit).
+    private func prefillKeyInputs() {
+        if app.ollamaModels.isEmpty { app.refreshOllamaModels() }
+        if app.voices.isEmpty && app.keyPresent { app.refreshVoices() }
+        keyInput = Secrets.elevenLabsKey ?? ""        // pre-fill so the current key is visible/editable
+        geminiKeyInput = Secrets.geminiKey ?? ""
+        zaiKeyInput = Secrets.zaiKey ?? ""
+    }
 
     @ViewBuilder
     private func slider(_ label: String, _ value: Binding<Double>) -> some View {

@@ -9,6 +9,7 @@ enum Secrets {
 
     static var elevenLabsKey: String? { key(named: "eleven_key") }
     static var geminiKey: String? { key(named: "gemini_key") }
+    static var zaiKey: String? { key(named: "zai_key") }
 
     static func key(named name: String) -> String? {
         let path = (appSupportDir as NSString).appendingPathComponent(name)

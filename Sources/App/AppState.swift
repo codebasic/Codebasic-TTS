@@ -43,11 +43,11 @@ final class AppState: ObservableObject {
     @Published var useCache = true
     @Published var localBaseURL = "http://127.0.0.1:8765"
 
-    // TTS-friendly text normalization (LLM: Gemini API or local Ollama)
+    // TTS-friendly text normalization (LLM: Gemini API, Z.ai, or local Ollama)
     enum NormalizeProvider: String, CaseIterable, Identifiable {
-        case gemini, ollama
+        case gemini, zai, ollama
         var id: String { rawValue }
-        var label: String { self == .gemini ? "Gemini" : "Ollama" }
+        var label: String { self == .gemini ? "Gemini" : (self == .zai ? "Z.ai" : "Ollama") }
     }
     @Published var normalizeEnabled = false
     @Published var normalizeProvider: NormalizeProvider = .ollama
@@ -56,6 +56,11 @@ final class AppState: ObservableObject {
     @Published var geminiModels: [String] = []        // fetched from the endpoint (models.list)
     @Published var geminiStatus = ""
     @Published var geminiKeyPresent = Secrets.geminiKey != nil
+    @Published var zaiBaseURL = ZAINormalizer.defaultBaseURL
+    @Published var zaiModel = "glm-5.3"               // 대본(정규화)용 (Z.ai)
+    @Published var zaiModels: [String] = []           // static list; no public models.list endpoint
+    @Published var zaiStatus = ""
+    @Published var zaiKeyPresent = Secrets.zaiKey != nil
     @Published var ollamaModel = "gemma4:31b-cloud"   // 대본(정규화)용. 3B local models garble Korean numbers; a strong model is needed
     @Published var ollamaURL = "http://localhost:11434"
     @Published var ollamaModels: [String] = []
@@ -86,12 +91,14 @@ final class AppState: ObservableObject {
     var onRequestReview: (() -> Void)?
     @Published var explainGeminiModel = "gemini-2.0-flash"   // 해설용
     @Published var explainOllamaModel = "gemma4:31b-cloud"   // 해설용
+    @Published var explainZAIModel = "glm-5.3"               // 해설용 (Z.ai)
     @Published var explainTemperature: Double = 0.4          // 해설 LLM 생성 매개변수
     @Published var scriptTemperature: Double = 0.2           // 대본 LLM 생성 매개변수
     @Published var codeImages: [Data] = []       // pasted code screenshots (PNG); needs a vision model
     // Vision model = the explain model by default; a non-empty value is a remembered override.
     @Published var explainVisionGeminiModel = ""
     @Published var explainVisionOllamaModel = ""
+    @Published var explainVisionZAIModel = ""
     var hasImages: Bool { !codeImages.isEmpty }
     @Published var lastExplainedCode = ""        // baseline snapshot for "이어서 해설" (incremental)
     @Published var lastSegment = ""              // the most recently produced commentary (full or appended delta)
@@ -112,12 +119,28 @@ final class AppState: ObservableObject {
     @Published var visionOverridden = false       // false = vision follows the 해설 model
 
     /// Effective model per role (provider's own model field).
-    var scriptModel: String { scriptProvider == .gemini ? geminiModel : ollamaModel }
-    var explainModel: String { explainProvider == .gemini ? explainGeminiModel : explainOllamaModel }
+    var scriptModel: String {
+        switch scriptProvider {
+        case .gemini: return geminiModel
+        case .zai: return zaiModel
+        case .ollama: return ollamaModel
+        }
+    }
+    var explainModel: String {
+        switch explainProvider {
+        case .gemini: return explainGeminiModel
+        case .zai: return explainZAIModel
+        case .ollama: return explainOllamaModel
+        }
+    }
     var visionProviderEff: NormalizeProvider { visionOverridden ? visionProvider : explainProvider }
     var visionModelEff: String {
         if !visionOverridden { return explainModel }
-        return visionProvider == .gemini ? explainVisionGeminiModel : explainVisionOllamaModel
+        switch visionProvider {
+        case .gemini: return explainVisionGeminiModel
+        case .zai: return explainVisionZAIModel
+        case .ollama: return explainVisionOllamaModel
+        }
     }
 
     /// A pick in a model selector: a (provider, model) pair. Identity carries the
@@ -126,15 +149,23 @@ final class AppState: ObservableObject {
         let provider: NormalizeProvider
         let model: String
         var id: String { provider.rawValue + "\u{1F}" + model }
-        var label: String { "\(model) · \(provider == .gemini ? "Gemini" : "Ollama")" }
+        var label: String {
+            let p = provider == .gemini ? "Gemini" : (provider == .zai ? "Z.ai" : "Ollama")
+            return "\(model) · \(p)"
+        }
     }
 
-    /// All models from connected providers (Ollama always; Gemini once a key is set).
+    /// All models from connected providers (Ollama always; Gemini once a key is set;
+    /// Z.ai likewise).
     var connectedModels: [LLMChoice] {
         var out = ollamaModels.map { LLMChoice(provider: .ollama, model: $0) }
         if geminiKeyPresent || !geminiModels.isEmpty {
             let g = geminiModels.isEmpty ? GeminiNormalizer.models : geminiModels
             out += g.map { LLMChoice(provider: .gemini, model: $0) }
+        }
+        if zaiKeyPresent || !zaiModels.isEmpty {
+            let z = zaiModels.isEmpty ? ZAINormalizer.models : zaiModels
+            out += z.map { LLMChoice(provider: .zai, model: $0) }
         }
         return out
     }
@@ -142,10 +173,12 @@ final class AppState: ObservableObject {
     func refreshAllModels() {
         refreshOllamaModels()
         if geminiKeyPresent { refreshGeminiModels() }
+        if zaiKeyPresent { refreshZAIModels() }
     }
     func refreshAllModelsIfNeeded() {
         if ollamaModels.isEmpty { refreshOllamaModels() }
         if geminiModels.isEmpty && geminiKeyPresent { refreshGeminiModels() }
+        if zaiModels.isEmpty && zaiKeyPresent { refreshZAIModels() }
     }
 
     // Runtime
@@ -461,6 +494,10 @@ final class AppState: ObservableObject {
             guard let key = Secrets.geminiKey else { return nil }
             return GeminiNormalizer(baseURL: geminiBaseURL, apiKey: key, model: geminiModel,
                                     instruction: instruction, temperature: scriptTemperature)
+        case .zai:
+            guard let key = Secrets.zaiKey else { return nil }
+            return ZAINormalizer(baseURL: zaiBaseURL, apiKey: key, model: zaiModel,
+                                 instruction: instruction, temperature: scriptTemperature)
         case .ollama:
             return TextNormalizer(
                 baseURL: URL(string: ollamaURL) ?? URL(string: "http://localhost:11434")!,
@@ -485,6 +522,45 @@ final class AppState: ObservableObject {
         if !k.isEmpty { refreshGeminiModels() }   // populate the combined model list right away
     }
 
+    func saveZAIKey(_ key: String) {
+        let k = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        Secrets.writeKey(named: "zai_key", k)
+        zaiKeyPresent = !k.isEmpty
+        if !k.isEmpty { refreshZAIModels() }
+    }
+
+    /// Z.ai exposes no public models.list on the coding endpoint — verify with a
+    /// 1-token ping and fill the static list on success.
+    func refreshZAIModels() {
+        guard let key = Secrets.zaiKey else { zaiStatus = "키 없음"; return }
+        zaiStatus = "확인 중…"
+        let base = zaiBaseURL
+        let model = zaiModel.isEmpty ? "glm-5.3" : zaiModel
+        Task { [weak self] in
+            do {
+                var req = URLRequest(url: URL(string: base + "/chat/completions")!)
+                req.httpMethod = "POST"
+                req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+                req.httpBody = try JSONSerialization.data(withJSONObject: [
+                    "model": model, "messages": [["role": "user", "content": "ping"]],
+                    "max_tokens": 1, "stream": false,
+                ])
+                let (_, resp) = try await URLSession.shared.data(for: req)
+                guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
+                    let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
+                    throw NSError(domain: "Z.ai", code: code,
+                                  userInfo: [NSLocalizedDescriptionKey: "연결 실패 (\(code))"])
+                }
+                guard let self else { return }
+                self.zaiModels = ZAINormalizer.models
+                self.zaiStatus = "연결됨 · \(model)"
+            } catch {
+                self?.zaiStatus = "연결 실패: \(error.localizedDescription)"
+            }
+        }
+    }
+
     // MARK: - Commentary (코드 → 해설)
 
     private func makeExplainer() -> Explaining? {
@@ -493,6 +569,10 @@ final class AppState: ObservableObject {
             guard let key = Secrets.geminiKey else { return nil }
             return GeminiExplainer(baseURL: geminiBaseURL, apiKey: key, model: explainGeminiModel,
                                    instruction: explainPrompt, temperature: explainTemperature)
+        case .zai:
+            guard let key = Secrets.zaiKey else { return nil }
+            return ZAIExplainer(baseURL: zaiBaseURL, apiKey: key, model: explainZAIModel,
+                                instruction: explainPrompt, temperature: explainTemperature)
         case .ollama:
             return OllamaExplainer(
                 baseURL: URL(string: ollamaURL) ?? URL(string: "http://localhost:11434")!,
@@ -511,6 +591,12 @@ final class AppState: ObservableObject {
             }
             return LLM.geminiStream(baseURL: geminiBaseURL, apiKey: key, model: explainGeminiModel,
                                     prompt: prompt, images: images, temperature: explainTemperature)
+        case .zai:
+            guard let key = Secrets.zaiKey else {
+                return AsyncThrowingStream { $0.finish() }
+            }
+            return LLM.openAIChatStream(baseURL: zaiBaseURL, model: explainZAIModel, apiKey: key,
+                                        prompt: prompt, images: images, temperature: explainTemperature)
         case .ollama:
             let url = URL(string: ollamaURL) ?? URL(string: "http://localhost:11434")!
             return LLM.ollamaChatStream(baseURL: url, model: explainOllamaModel,
@@ -560,6 +646,10 @@ final class AppState: ObservableObject {
             guard let key = Secrets.geminiKey else { statusText = "Gemini 키 미설정"; return nil }
             stream = LLM.geminiStream(baseURL: geminiBaseURL, apiKey: key, model: visionModel,
                                       prompt: prompt, images: imgs, temperature: 0)
+        case .zai:
+            guard let key = Secrets.zaiKey else { statusText = "Z.ai 키 미설정"; return nil }
+            stream = LLM.openAIChatStream(baseURL: zaiBaseURL, model: visionModel, apiKey: key,
+                                          prompt: prompt, images: imgs, temperature: 0)
         case .ollama:
             let url = URL(string: ollamaURL) ?? URL(string: "http://localhost:11434")!
             stream = LLM.ollamaChatStream(baseURL: url, model: visionModel,
@@ -1187,9 +1277,12 @@ final class AppState: ObservableObject {
             "explainProvider": explainProvider.rawValue, "scriptProvider": scriptProvider.rawValue,
             "visionProvider": visionProvider.rawValue, "visionOverridden": visionOverridden,
             "geminiBaseURL": geminiBaseURL,
+            "zaiBaseURL": zaiBaseURL, "zaiModel": zaiModel,
             "explainGeminiModel": explainGeminiModel, "explainOllamaModel": explainOllamaModel,
+            "explainZAIModel": explainZAIModel,
             "explainVisionGeminiModel": explainVisionGeminiModel,
             "explainVisionOllamaModel": explainVisionOllamaModel,
+            "explainVisionZAIModel": explainVisionZAIModel,
             "explainTemperature": explainTemperature, "scriptTemperature": scriptTemperature,
             "explainAutoPlay": explainAutoPlay,
             "stability": voiceSettings.stability, "similarity": voiceSettings.similarityBoost,
@@ -1241,10 +1334,14 @@ final class AppState: ObservableObject {
         visionOverridden = o["visionOverridden"] as? Bool ?? false
         geminiModel = o["geminiModel"] as? String ?? geminiModel
         geminiBaseURL = o["geminiBaseURL"] as? String ?? geminiBaseURL
+        zaiBaseURL = o["zaiBaseURL"] as? String ?? zaiBaseURL
+        zaiModel = o["zaiModel"] as? String ?? zaiModel
         explainGeminiModel = o["explainGeminiModel"] as? String ?? explainGeminiModel
         explainOllamaModel = o["explainOllamaModel"] as? String ?? explainOllamaModel
+        explainZAIModel = o["explainZAIModel"] as? String ?? explainZAIModel
         explainVisionGeminiModel = o["explainVisionGeminiModel"] as? String ?? explainVisionGeminiModel
         explainVisionOllamaModel = o["explainVisionOllamaModel"] as? String ?? explainVisionOllamaModel
+        explainVisionZAIModel = o["explainVisionZAIModel"] as? String ?? explainVisionZAIModel
         explainTemperature = o["explainTemperature"] as? Double ?? explainTemperature
         explainAutoPlay = o["explainAutoPlay"] as? Bool ?? explainAutoPlay
         scriptTemperature = o["scriptTemperature"] as? Double ?? scriptTemperature

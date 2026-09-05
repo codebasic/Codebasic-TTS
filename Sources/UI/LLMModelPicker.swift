@@ -9,10 +9,11 @@ struct LLMModelPicker: View {
     @Binding var provider: AppState.NormalizeProvider
     @Binding var geminiModel: String
     @Binding var ollamaModel: String
+    var zaiModel: Binding<String>? = nil
     var onChange: () -> Void = {}
 
     private var current: AppState.LLMChoice {
-        AppState.LLMChoice(provider: provider, model: provider == .gemini ? geminiModel : ollamaModel)
+        AppState.LLMChoice(provider: provider, model: provider.model(app, geminiModel, zaiModel?.wrappedValue ?? "", ollamaModel))
     }
 
     /// Connected models, with the current selection folded in so a saved model
@@ -28,9 +29,9 @@ struct LLMModelPicker: View {
         let models: [AppState.LLMChoice]
         var id: String { provider.rawValue }
     }
-    /// Models grouped by provider (Ollama, then Gemini), sorted by name within each.
+    /// Models grouped by provider (Ollama, Gemini, then Z.ai), sorted by name within each.
     private var grouped: [Group] {
-        let providers: [AppState.NormalizeProvider] = [.ollama, .gemini]
+        let providers: [AppState.NormalizeProvider] = [.ollama, .gemini, .zai]
         return providers.compactMap { prov -> Group? in
             let ms = options.filter { $0.provider == prov }
                 .sorted { $0.model.lowercased() < $1.model.lowercased() }
@@ -49,12 +50,16 @@ struct LLMModelPicker: View {
                     set: { id in
                         guard let c = options.first(where: { $0.id == id }) else { return }
                         provider = c.provider
-                        if c.provider == .gemini { geminiModel = c.model } else { ollamaModel = c.model }
+                        switch c.provider {
+                        case .gemini: geminiModel = c.model
+                        case .zai: zaiModel?.wrappedValue = c.model
+                        case .ollama: ollamaModel = c.model
+                        }
                         onChange()
                     }
                 )) {
                     ForEach(grouped) { group in
-                        Section(group.provider == .gemini ? "Gemini" : "Ollama") {
+                        Section(group.provider.label) {
                             ForEach(group.models) { Text($0.model).tag($0.id) }
                         }
                     }
@@ -63,5 +68,17 @@ struct LLMModelPicker: View {
             }
         }
         .onAppear { app.refreshAllModelsIfNeeded() }
+    }
+}
+
+private extension AppState.NormalizeProvider {
+    /// The role's model for this provider, from the bound per-provider fields.
+    @MainActor
+    func model(_ app: AppState, _ gemini: String, _ zai: String, _ ollama: String) -> String {
+        switch self {
+        case .gemini: return gemini
+        case .zai: return zai.isEmpty ? app.zaiModel : zai
+        case .ollama: return ollama
+        }
     }
 }

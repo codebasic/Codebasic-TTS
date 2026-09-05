@@ -32,6 +32,10 @@ struct CommentaryView: View {
         Binding(get: { app.visionOverridden ? app.explainVisionGeminiModel : app.explainGeminiModel },
                 set: { app.explainVisionGeminiModel = $0; app.visionOverridden = true })
     }
+    private var visionZAIBinding: Binding<String> {
+        Binding(get: { app.visionOverridden ? app.explainVisionZAIModel : app.explainZAIModel },
+                set: { app.explainVisionZAIModel = $0; app.visionOverridden = true })
+    }
 
     var body: some View {
         HSplitView {
@@ -141,11 +145,13 @@ struct CommentaryView: View {
                                provider: $app.explainProvider,
                                geminiModel: $app.explainGeminiModel,
                                ollamaModel: $app.explainOllamaModel,
+                               zaiModel: $app.explainZAIModel,
                                onChange: { app.saveSettings() })
                 LLMModelPicker(label: "비전 모델",
                                provider: visionProviderBinding,
                                geminiModel: visionGeminiBinding,
                                ollamaModel: visionOllamaBinding,
+                               zaiModel: visionZAIBinding,
                                onChange: { app.saveSettings() })
                 if app.visionOverridden {
                     Button {
