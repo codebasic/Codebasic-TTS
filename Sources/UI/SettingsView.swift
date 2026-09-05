@@ -2,15 +2,20 @@ import SwiftUI
 import AppKit
 
 /// Settings split into two conceptual channels: ① 음성 합성 (the TTS engine) and
-/// ② 텍스트 생성 (the LLM used for 해설/대본). The TTS channel renders from the
-/// engine seam (BackendKind descriptors) so it's not hardcoded to ElevenLabs;
-/// each engine keeps its own typed tuning (ElevenVoiceSettings) untouched.
+/// ② 텍스트 생성 (the LLM endpoints used for 해설/대본). The TTS channel renders
+/// from the engine seam (BackendKind descriptors) so it's not hardcoded to
+/// ElevenLabs; the LLM channel renders from the endpoint list (CustomEndpoint)
+/// so providers are added/removed from settings, not code.
 struct SettingsView: View {
     @EnvironmentObject var app: AppState
     @State private var channel = 0               // 0 = 음성 합성, 1 = 텍스트 생성
-    @State private var geminiKeyInput = ""
-    @State private var zaiKeyInput = ""          // Z.ai key entry
     @State private var keyInput = ""             // ElevenLabs key entry
+    // "엔드포인트 추가" form state
+    @State private var newName = ""
+    @State private var newURL = ""
+    @State private var newStyle: CustomEndpoint.APIStyle = .openAICompatible
+    @State private var newKey = ""
+    @State private var newDefaultModel = ""
 
     var body: some View {
         settingsForm
@@ -18,9 +23,12 @@ struct SettingsView: View {
             .onDisappear { app.saveSettings() }
             .onChange(of: settingsSaveKeys) { _, _ in app.saveSettings() }
             // settingsSaveKeys is a short-circuiting && chain whose first term is
-            // false at defaults, so it never observes anything past it — the 기본 모델
-            // needs its own trigger to persist without closing the window.
-            .onChange(of: app.zaiModel) { _, _ in app.saveSettings() }
+            // false at defaults, so it never observes anything past it — endpoint
+            // edits need their own triggers to persist without closing the window.
+            .onChange(of: app.endpoints) { _, _ in app.saveSettings() }
+            .onChange(of: app.explainEndpointID) { _, _ in app.saveSettings() }
+            .onChange(of: app.scriptEndpointID) { _, _ in app.saveSettings() }
+            .onChange(of: app.visionEndpointID) { _, _ in app.saveSettings() }
             .onChange(of: app.voiceId) { _, newID in
                 if let v = app.voices.first(where: { $0.id == newID }) { app.voiceName = v.name }
                 app.saveSettings()
@@ -28,12 +36,12 @@ struct SettingsView: View {
     }
 
     /// One Equatable tuple covering every field whose change should persist
-    /// settings — replaces 18 individual .onChange modifiers that pushed the
-    /// body expression past the Swift type-checker's complexity limit.
+    /// settings — replaces individual .onChange modifiers that pushed the body
+    /// expression past the Swift type-checker's complexity limit. Endpoint edits
+    /// are saved via the dedicated .onChange(of: app.endpoints) above.
     private var settingsSaveKeys: Bool {
-        app.localBaseURL == "" && app.normalizeEnabled && app.geminiModel == "" && app.geminiBaseURL == ""
-            && app.ollamaModel == "" && app.ollamaURL == "" && app.zaiBaseURL == "" && app.zaiModel == ""
-            && app.maxChunkChars == 0 && app.subtitleTTS && app.subtitleExplain && app.modelId == ""
+        app.localBaseURL == "" && app.normalizeEnabled && app.maxChunkChars == 0
+            && app.subtitleTTS && app.subtitleExplain && app.modelId == ""
             && app.useCache && !app.backendKind.rawValue.isEmpty && !app.voiceSettings.similarityBoost.isNaN
     }
 
@@ -158,58 +166,56 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - ② 텍스트 생성 (LLM for 해설/대본)
+    // MARK: - ② 텍스트 생성 (LLM endpoints for 해설/대본)
 
     @ViewBuilder private var llmChannel: some View {
         Section {
-            Text("코드 해설·음성 대본 생성에 쓰는 텍스트 생성 모델입니다. Ollama·Gemini·Z.ai를 동시에 연결할 수 있고, 모델은 해설/TTS 패널에서 세 제공자의 통합 목록에서 고릅니다. temperature는 각 패널 인스펙터(⊟)에서 조절합니다.")
+            Text("코드 해설·음성 대본 생성에 쓰는 텍스트 생성 엔드포인트입니다. OpenAI 호환·Gemini·Ollama 엔드포인트를 여러 개 등록할 수 있고, 모델은 해설/TTS 패널에서 등록된 엔드포인트별 통합 목록에서 고릅니다. temperature는 각 패널 인스펙터(⊟)에서 조절합니다.")
                 .font(.caption).foregroundStyle(.secondary)
         }
 
-        Section("Ollama") {
-            labeledField("엔드포인트", placeholder: "http://localhost:11434",
-                         text: $app.ollamaURL,
-                         hint: "로컬/원격 모두 가능: 예) http://192.168.0.10:11434")
-            HStack {
-                Button("연결 확인 / 모델 목록") { app.refreshOllamaModels() }
-                Spacer()
-                Text(app.ollamaStatus).font(.caption).foregroundStyle(.secondary)
+        Section("엔드포인트") {
+            if app.endpoints.isEmpty {
+                Text("등록된 엔드포인트가 없습니다. 아래 폼에서 추가하세요.")
+                    .font(.caption).foregroundStyle(.tertiary)
+            }
+            ForEach($app.endpoints) { $ep in
+                EndpointRow(endpoint: $ep,
+                            status: app.endpointStatus[ep.id.uuidString] ?? "",
+                            onDelete: { app.deleteEndpoint(ep.id) },
+                            onCheck: { app.refreshEndpointModels(ep) },
+                            onSaveKey: { app.saveEndpointKey(ep.id, $0) })
             }
         }
 
-        Section("Gemini (클라우드)") {
-            labeledField("엔드포인트", placeholder: GeminiNormalizer.defaultBaseURL,
-                         text: $app.geminiBaseURL,
-                         hint: "API 루트. 끝에 /models/{모델}:generateContent 가 붙습니다. 프록시·게이트웨이 사용 시 변경.")
-            KeyField(label: "API 키", text: $geminiKeyInput,
-                     hint: app.geminiKeyPresent ? "현재: 설정됨 (App Support)" : "현재: 없음 — 키를 넣으면 모델 목록에 Gemini 모델이 함께 표시됩니다")
-            HStack {
-                Button("키 저장") { app.saveGeminiKey(geminiKeyInput) }
-                    .disabled(geminiKeyInput.trimmingCharacters(in: .whitespaces).isEmpty)
-                Button("연결 확인 / 모델 목록") { app.refreshGeminiModels() }
-                Spacer()
-                Text(app.geminiStatus).font(.caption).foregroundStyle(.secondary)
+        Section("엔드포인트 추가") {
+            labeledField("이름", placeholder: "예: Z.ai, 내 vLLM", text: $newName)
+            labeledField("URL", placeholder: "https://api.z.ai/api/coding/paas/v4",
+                         text: $newURL,
+                         hint: "OpenAI 호환: /chat/completions, Gemini: /models/{모델}:generateContent, Ollama: /api/generate 가 뒤에 붙는 API 루트")
+            Picker("스타일", selection: $newStyle) {
+                ForEach(CustomEndpoint.APIStyle.allCases) { style in
+                    Text(style.label).tag(style)
+                }
             }
-        }
-
-        Section("Z.ai (클라우드)") {
-            labeledField("엔드포인트", placeholder: ZAINormalizer.defaultBaseURL,
-                         text: $app.zaiBaseURL,
-                         hint: "OpenAI 호환 API 루트. 끝에 /chat/completions 가 붙습니다. 예) https://api.z.ai/api/coding/paas/v4")
-            KeyField(label: "API 키", text: $zaiKeyInput,
-                     hint: app.zaiKeyPresent ? "현재: 설정됨 (App Support)" : "현재: 없음 — 키를 넣으면 모델 목록에 Z.ai 모델이 함께 표시됩니다")
-            labeledField("기본 모델", placeholder: ZAINormalizer.fallbackModels.first ?? "",
-                         text: $app.zaiModel,
-                         hint: "모델 피커의 기본 선택값. 목록에서 고르지 않아도 이 모델을 사용합니다.")
-            if !app.zaiDefaultModelValid {
-                Text("⚠️ 연결된 목록에 없는 모델입니다").font(.caption).foregroundStyle(.orange)
-            }
+            .pickerStyle(.segmented)
+            labeledField("기본 모델 (선택)", placeholder: "비우면 첫 연결 때 목록에서 채움",
+                         text: $newDefaultModel)
+            KeyField(label: "API 키 (선택 — 로컬 엔드포인트는 비워 둠)", text: $newKey,
+                     hint: "App Support/<엔드포인트>.key 로 저장됩니다 (settings.json에 저장 안 됨)")
             HStack {
-                Button("키 저장") { app.saveZAIKey(zaiKeyInput) }
-                    .disabled(zaiKeyInput.trimmingCharacters(in: .whitespaces).isEmpty)
-                Button("연결 확인") { app.refreshZAIModels() }
+                Button {
+                    app.addEndpoint(name: newName.trimmingCharacters(in: .whitespaces),
+                                    baseURL: newURL.trimmingCharacters(in: .whitespaces),
+                                    style: newStyle,
+                                    apiKey: newKey,
+                                    defaultModel: newDefaultModel)
+                    newName = ""; newURL = ""; newKey = ""; newDefaultModel = ""
+                } label: {
+                    Label("엔드포인트 추가", systemImage: "plus")
+                }
+                .disabled(newURL.trimmingCharacters(in: .whitespaces).isEmpty)
                 Spacer()
-                Text(app.zaiStatus).font(.caption).foregroundStyle(.secondary)
             }
         }
 
@@ -225,11 +231,78 @@ struct SettingsView: View {
     /// Pre-fill key fields + kick off first model/voice refresh (moved out of
     /// .onAppear — the closure had grown past the type-checker's limit).
     private func prefillKeyInputs() {
-        if app.ollamaModels.isEmpty { app.refreshOllamaModels() }
+        app.refreshAllModelsIfNeeded()
         if app.voices.isEmpty && app.keyPresent { app.refreshVoices() }
         keyInput = Secrets.elevenLabsKey ?? ""        // pre-fill so the current key is visible/editable
-        geminiKeyInput = Secrets.geminiKey ?? ""
-        zaiKeyInput = Secrets.zaiKey ?? ""
+    }
+
+    /// One registered endpoint: 이름·URL·스타일·활성 토글 + 삭제, plus the
+    /// endpoint's 기본 모델, API key entry, and a 연결 확인 (models.list) row.
+    private struct EndpointRow: View {
+        @Binding var endpoint: CustomEndpoint
+        let status: String
+        let onDelete: () -> Void
+        let onCheck: () -> Void
+        let onSaveKey: (String) -> Void
+
+        @State private var keyInput = ""
+        @EnvironmentObject var app: AppState
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    TextField("이름", text: $endpoint.name).frame(width: 110)
+                        .textFieldStyle(.roundedBorder)
+                    Picker("", selection: $endpoint.apiStyle) {
+                        ForEach(CustomEndpoint.APIStyle.allCases) { style in
+                            Text(style.label).tag(style)
+                        }
+                    }
+                    .labelsHidden().frame(width: 130)
+                    Spacer()
+                    Toggle("활성", isOn: $endpoint.isEnabled)
+                        .toggleStyle(.checkbox).controlSize(.small)
+                        .help("끄면 모델 피커와 생성에서 이 엔드포인트가 제외됩니다 (설정은 유지)")
+                    Button(role: .destructive) { onDelete() } label: {
+                        Image(systemName: "trash")
+                    }
+                    .buttonStyle(.plain)
+                    .help("엔드포인트 삭제 (키 파일은 유지됩니다)")
+                }
+                TextField("http://localhost:11434", text: $endpoint.baseURL)
+                    .textFieldStyle(.roundedBorder)
+                HStack(spacing: 8) {
+                    TextField("기본 모델", text: $endpoint.defaultModel)
+                        .textFieldStyle(.roundedBorder).frame(width: 220)
+                        .help("역할별 모델 미지정 시 사용되는 이 엔드포인트의 기본 모델")
+                    if !app.endpointDefaultModelValid(endpoint) {
+                        Image(systemName: "exclamationmark.triangle")
+                            .foregroundStyle(.orange)
+                            .help("연결된 목록에 없는 기본 모델입니다")
+                    }
+                    Spacer()
+                }
+                KeyField(label: "API 키", text: $keyInput,
+                         hint: endpointKeyHint)
+                HStack {
+                    Button("키 저장") { onSaveKey(keyInput) }
+                        .disabled(keyInput.trimmingCharacters(in: .whitespaces).isEmpty)
+                    Button { onCheck() } label: {
+                        Label("연결 확인", systemImage: "arrow.clockwise")
+                    }
+                    Spacer()
+                    Text(status).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            .padding(.vertical, 2)
+            .onAppear { keyInput = Secrets.endpointKey(endpoint.id) ?? "" }
+        }
+
+        private var endpointKeyHint: String {
+            endpoint.apiStyle == .ollama
+                ? "Ollama는 보통 키가 필요 없습니다"
+                : (Secrets.endpointKey(endpoint.id) != nil ? "현재: 설정됨 (App Support)" : "현재: 없음")
+        }
     }
 
     @ViewBuilder

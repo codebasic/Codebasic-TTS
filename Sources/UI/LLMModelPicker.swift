@@ -1,41 +1,44 @@
 import SwiftUI
 
-/// In-panel model selector for one LLM role. Lists models from ALL connected
-/// providers (Ollama + Gemini) — picking one sets both the role's provider and
-/// that provider's model field. Ollama and Gemini can be configured at once.
+/// In-panel model selector for one LLM role. Lists models from ALL enabled
+/// endpoints, grouped per endpoint — picking one sets both the role's endpoint
+/// reference and that endpoint's remembered model for the role. Any number of
+/// endpoints can be configured at once (settings → 엔드포인트).
 struct LLMModelPicker: View {
     @EnvironmentObject var app: AppState
     let label: String
-    @Binding var provider: AppState.NormalizeProvider
-    @Binding var geminiModel: String
-    @Binding var ollamaModel: String
-    var zaiModel: Binding<String>? = nil
+    @Binding var endpointID: String                    // role → endpoint reference
+    @Binding var roleModels: [String: String]          // endpoint id → the role's model there
     var onChange: () -> Void = {}
 
-    private var current: AppState.LLMChoice {
-        AppState.LLMChoice(provider: provider, model: provider.model(app, geminiModel, zaiModel?.wrappedValue ?? "", ollamaModel))
+    private var current: AppState.LLMChoice? {
+        guard let e = app.activeEndpoint(byID: endpointID) else { return nil }
+        return AppState.LLMChoice(endpointID: e.id.uuidString, endpointName: e.name,
+                                  model: app.roleModel(roleModels, e))
     }
 
     /// Connected models, with the current selection folded in so a saved model
-    /// from an offline/unfetched provider still shows.
+    /// from an offline/unfetched endpoint still shows.
     private var options: [AppState.LLMChoice] {
         var m = app.connectedModels
-        if !current.model.isEmpty && !m.contains(where: { $0.id == current.id }) { m.append(current) }
+        if let c = current, !c.model.isEmpty, !m.contains(where: { $0.id == c.id }) { m.append(c) }
         return m
     }
 
     private struct Group: Identifiable {
-        let provider: AppState.NormalizeProvider
+        let endpointID: String
+        let name: String
         let models: [AppState.LLMChoice]
-        var id: String { provider.rawValue }
+        var id: String { endpointID }
     }
-    /// Models grouped by provider (Ollama, Gemini, then Z.ai), sorted by name within each.
+    /// Models grouped per endpoint (in registration order), sorted by name within each.
     private var grouped: [Group] {
-        let providers: [AppState.NormalizeProvider] = [.ollama, .gemini, .zai]
-        return providers.compactMap { prov -> Group? in
-            let ms = options.filter { $0.provider == prov }
+        app.endpoints.compactMap { e -> Group? in
+            guard e.isEnabled else { return nil }
+            let id = e.id.uuidString
+            let ms = options.filter { $0.endpointID == id }
                 .sorted { $0.model.lowercased() < $1.model.lowercased() }
-            return ms.isEmpty ? nil : Group(provider: prov, models: ms)
+            return ms.isEmpty ? nil : Group(endpointID: id, name: e.name, models: ms)
         }
     }
 
@@ -46,20 +49,16 @@ struct LLMModelPicker: View {
                 Text("연결된 모델 없음").font(.caption).foregroundStyle(.tertiary)
             } else {
                 Picker("", selection: Binding(
-                    get: { current.id },
+                    get: { current?.id ?? "" },
                     set: { id in
                         guard let c = options.first(where: { $0.id == id }) else { return }
-                        provider = c.provider
-                        switch c.provider {
-                        case .gemini: geminiModel = c.model
-                        case .zai: zaiModel?.wrappedValue = c.model
-                        case .ollama: ollamaModel = c.model
-                        }
+                        endpointID = c.endpointID
+                        roleModels[c.endpointID] = c.model
                         onChange()
                     }
                 )) {
                     ForEach(grouped) { group in
-                        Section(group.provider.label) {
+                        Section(group.name) {
                             ForEach(group.models) { Text($0.model).tag($0.id) }
                         }
                     }
@@ -68,17 +67,5 @@ struct LLMModelPicker: View {
             }
         }
         .onAppear { app.refreshAllModelsIfNeeded() }
-    }
-}
-
-private extension AppState.NormalizeProvider {
-    /// The role's model for this provider, from the bound per-provider fields.
-    @MainActor
-    func model(_ app: AppState, _ gemini: String, _ zai: String, _ ollama: String) -> String {
-        switch self {
-        case .gemini: return gemini
-        case .zai: return app.zaiEffective(zai)   // 역할 미지정이면 설정의 Z.ai 기본 모델
-        case .ollama: return ollama
-        }
     }
 }

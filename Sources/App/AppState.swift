@@ -43,31 +43,14 @@ final class AppState: ObservableObject {
     @Published var useCache = true
     @Published var localBaseURL = "http://127.0.0.1:8765"
 
-    // TTS-friendly text normalization (LLM: Gemini API, Z.ai, or local Ollama)
-    enum NormalizeProvider: String, CaseIterable, Identifiable {
-        case gemini, zai, ollama
-        var id: String { rawValue }
-        var label: String { self == .gemini ? "Gemini" : (self == .zai ? "Z.ai" : "Ollama") }
-    }
+    // TTS-friendly text normalization (LLM endpoints: dynamic, user-managed).
+    // An endpoint = baseURL + API key (own <id>.key file) + apiStyle; the legacy
+    // gemini/zai/ollama fields were migrated into 3 seeded endpoints on first
+    // run (seedEndpoints) and the old settings keys are read as seed data only.
+    @Published var endpoints: [CustomEndpoint] = []
+    @Published private var endpointModels: [String: [String]] = [:]   // endpoint id → live models.list
+    @Published private(set) var endpointStatus: [String: String] = [:] // endpoint id → 연결 확인 status
     @Published var normalizeEnabled = false
-    @Published var normalizeProvider: NormalizeProvider = .ollama
-    @Published var geminiBaseURL = GeminiNormalizer.defaultBaseURL   // endpoint root; field default, not hardcoded
-    @Published var geminiModel = "gemini-2.0-flash"   // 대본(정규화)용
-    @Published var geminiModels: [String] = []        // fetched from the endpoint (models.list)
-    @Published var geminiStatus = ""
-    @Published var geminiKeyPresent = Secrets.geminiKey != nil
-    @Published var zaiBaseURL = ZAINormalizer.defaultBaseURL
-    /// 설정에서 지정한 Z.ai 기본 모델 (역할별 미지정 시 폴백). 해설/대본/비전 피커의 기본 선택값이며,
-    /// 피커에서 다른 모델을 고르면 그 역할의 필드가 채워져 이 값을 덮어쓴다.
-    @Published var zaiModel = ZAINormalizer.fallbackModels.first ?? ""
-    @Published var zaiModels: [String] = []           // live GET /models list (no hardcoded list)
-    @Published var scriptZAIModel = ""                // 대본용 (Z.ai). 비면 zaiModel(기본 모델)을 따름
-    @Published var zaiStatus = ""
-    @Published var zaiKeyPresent = Secrets.zaiKey != nil
-    @Published var ollamaModel = "gemma4:31b-cloud"   // 대본(정규화)용. 3B local models garble Korean numbers; a strong model is needed
-    @Published var ollamaURL = "http://localhost:11434"
-    @Published var ollamaModels: [String] = []
-    @Published var ollamaStatus = ""
     @Published var normalizePrompt = TextNormalizer.defaultInstruction
     @Published var normalizing = false
     @Published var scriptHint = ""               // 대본 단계 (원문→대본) 추가 지시
@@ -80,8 +63,8 @@ final class AppState: ObservableObject {
             && scriptBuiltFrom != (inputText + "\u{1F}" + scriptHint)
     }
 
-    // Commentary (코드 → 해설). Shares the provider + endpoint above, but the
-    // explain model is SEPARATE from the script model — they can differ.
+    // Commentary (코드 → 해설). Shares the endpoint pool above, but the explain
+    // model is SEPARATE from the script model — they can differ.
     @Published var codeText = ""                 // source code (해설 panel, top)
     @Published var explanationText = ""          // generated commentary (해설 panel, bottom)
     @Published var explaining = false
@@ -92,16 +75,9 @@ final class AppState: ObservableObject {
     /// Set by AppDelegate: bring the management window forward so a review-only
     /// 해설 (explainAutoPlay == false) is visible to read/check before playing.
     var onRequestReview: (() -> Void)?
-    @Published var explainGeminiModel = "gemini-2.0-flash"   // 해설용
-    @Published var explainOllamaModel = "gemma4:31b-cloud"   // 해설용
-    @Published var explainZAIModel = ""                      // 해설용 (Z.ai). 비면 기본 모델(zaiModel)
     @Published var explainTemperature: Double = 0.4          // 해설 LLM 생성 매개변수
     @Published var scriptTemperature: Double = 0.2           // 대본 LLM 생성 매개변수
     @Published var codeImages: [Data] = []       // pasted code screenshots (PNG); needs a vision model
-    // Vision model = the explain model by default; a non-empty value is a remembered override.
-    @Published var explainVisionGeminiModel = ""
-    @Published var explainVisionOllamaModel = ""
-    @Published var explainVisionZAIModel = ""
     var hasImages: Bool { !codeImages.isEmpty }
     @Published var lastExplainedCode = ""        // baseline snapshot for "이어서 해설" (incremental)
     @Published var lastSegment = ""              // the most recently produced commentary (full or appended delta)
@@ -113,86 +89,111 @@ final class AppState: ObservableObject {
     }
     @Published var selectedTab = 0               // RootView TabView selection
 
-    // Per-role provider (Ollama / Gemini can be configured simultaneously; a role
-    // picks any connected model, which determines its provider). Migrated from the
-    // old single normalizeProvider on load so existing setups keep working.
-    @Published var explainProvider: NormalizeProvider = .ollama
-    @Published var scriptProvider: NormalizeProvider = .ollama
-    @Published var visionProvider: NormalizeProvider = .ollama
+    // Per-role endpoint reference + model memory. A role points at an endpoint
+    // (id) and remembers the model last picked for it; an unset role model
+    // inherits the endpoint's defaultModel (구 zaiModel 폴백의 일반화).
+    @Published var explainEndpointID = ""
+    @Published var scriptEndpointID = ""
+    @Published var visionEndpointID = ""
     @Published var visionOverridden = false       // false = vision follows the 해설 model
+    @Published var explainRoleModels: [String: String] = [:]   // endpoint id → model
+    @Published var scriptRoleModels: [String: String] = [:]
+    @Published var visionRoleModels: [String: String] = [:]
 
-    /// A role's Z.ai model: its own field, or the settings-level 기본 모델 when unset.
-    /// EVERY Z.ai call site must go through this — a raw empty role field would be
-    /// sent to the API as `"model": ""`.
-    func zaiEffective(_ roleModel: String) -> String { roleModel.isEmpty ? zaiModel : roleModel }
+    // MARK: Endpoint resolution
+
+    func endpoint(byID id: String) -> CustomEndpoint? {
+        endpoints.first { $0.id.uuidString == id }
+    }
+
+    /// Only ENABLED endpoints resolve for generation/pickers; a disabled one
+    /// behaves like a missing one.
+    func activeEndpoint(byID id: String) -> CustomEndpoint? {
+        endpoints.first { $0.id.uuidString == id && $0.isEnabled }
+    }
+
+    func endpointKey(_ e: CustomEndpoint) -> String {
+        Secrets.endpointKey(e.id) ?? ""
+    }
+
+    /// A role's model on `e`: its own remembered pick, or the endpoint's 기본
+    /// 모델 when unset. Every LLM call must go through this — a raw empty role
+    /// field would be sent to the API as `"model": ""`.
+    func roleModel(_ role: [String: String], _ e: CustomEndpoint) -> String {
+        let m = role[e.id.uuidString] ?? ""
+        return m.isEmpty ? e.defaultModel : m
+    }
 
     /// True when the 기본 모델 is usable: unset, in the fetched list, or not yet
-    /// checkable (no list). Drives the SettingsView warning.
-    var zaiDefaultModelValid: Bool {
-        zaiModel.isEmpty || zaiModels.isEmpty || zaiModels.contains(zaiModel)
+    /// checkable (no list). Drives the per-endpoint SettingsView warning.
+    func endpointDefaultModelValid(_ e: CustomEndpoint) -> Bool {
+        let ms = endpointModels[e.id.uuidString] ?? []
+        return e.defaultModel.isEmpty || ms.isEmpty || ms.contains(e.defaultModel)
     }
 
-    /// Effective model per role (provider's own model field).
+    /// Effective endpoint/model per role (role's own memory → endpoint default).
     var scriptModel: String {
-        switch scriptProvider {
-        case .gemini: return geminiModel
-        case .zai: return zaiEffective(scriptZAIModel)
-        case .ollama: return ollamaModel
-        }
+        guard let e = activeEndpoint(byID: scriptEndpointID) else { return "" }
+        return roleModel(scriptRoleModels, e)
     }
     var explainModel: String {
-        switch explainProvider {
-        case .gemini: return explainGeminiModel
-        case .zai: return zaiEffective(explainZAIModel)
-        case .ollama: return explainOllamaModel
-        }
+        guard let e = activeEndpoint(byID: explainEndpointID) else { return "" }
+        return roleModel(explainRoleModels, e)
     }
-    var visionProviderEff: NormalizeProvider { visionOverridden ? visionProvider : explainProvider }
+    var visionEndpointEff: CustomEndpoint? {
+        visionOverridden ? activeEndpoint(byID: visionEndpointID) : activeEndpoint(byID: explainEndpointID)
+    }
     var visionModelEff: String {
         if !visionOverridden { return explainModel }
-        switch visionProvider {
-        case .gemini: return explainVisionGeminiModel
-        case .zai: return zaiEffective(explainVisionZAIModel)
-        case .ollama: return explainVisionOllamaModel
-        }
+        guard let e = activeEndpoint(byID: visionEndpointID) else { return "" }
+        return roleModel(visionRoleModels, e)
     }
 
-    /// A pick in a model selector: a (provider, model) pair. Identity carries the
-    /// provider so models from different providers never collide.
+    /// A pick in a model selector: an (endpoint, model) pair. Identity carries
+    /// the endpoint so models from different endpoints never collide.
     struct LLMChoice: Hashable, Identifiable {
-        let provider: NormalizeProvider
+        let endpointID: String
+        let endpointName: String
         let model: String
-        var id: String { provider.rawValue + "\u{1F}" + model }
-        var label: String {
-            let p = provider == .gemini ? "Gemini" : (provider == .zai ? "Z.ai" : "Ollama")
-            return "\(model) · \(p)"
+        var id: String { endpointID + "\u{1F}" + model }
+        var label: String { "\(model) · \(endpointName)" }
+    }
+
+    /// Well-known model names for a style, used ONLY to pick a sensible 기본 모델
+    /// out of a freshly fetched list (see refreshEndpointModels) — never shown as
+    /// a standalone picker entry, since these names are provider-specific and an
+    /// arbitrary OpenAI-호환 endpoint (내 vLLM 등) does not serve them.
+    func preferredModels(_ e: CustomEndpoint) -> [String] {
+        switch e.apiStyle {
+        case .gemini: return GeminiNormalizer.models
+        case .openAICompatible: return ZAINormalizer.fallbackModels
+        case .ollama: return []
         }
     }
 
-    /// All models from connected providers (Ollama always; Gemini once a key is set;
-    /// Z.ai likewise).
+    /// All models from enabled endpoints. Before a successful models.list the
+    /// only model we can honestly offer is the endpoint's own 기본 모델 — that
+    /// also makes a keyless/offline endpoint selectable once the user types one.
     var connectedModels: [LLMChoice] {
-        var out = ollamaModels.map { LLMChoice(provider: .ollama, model: $0) }
-        if geminiKeyPresent || !geminiModels.isEmpty {
-            let g = geminiModels.isEmpty ? GeminiNormalizer.models : geminiModels
-            out += g.map { LLMChoice(provider: .gemini, model: $0) }
-        }
-        if zaiKeyPresent || !zaiModels.isEmpty {
-            let z = zaiModels.isEmpty ? ZAINormalizer.fallbackModels : zaiModels
-            out += z.map { LLMChoice(provider: .zai, model: $0) }
+        var out: [LLMChoice] = []
+        for e in endpoints where e.isEnabled {
+            let fetched = endpointModels[e.id.uuidString] ?? []
+            let ms = fetched.isEmpty ? (e.defaultModel.isEmpty ? [] : [e.defaultModel]) : fetched
+            out += ms.map { LLMChoice(endpointID: e.id.uuidString, endpointName: e.name, model: $0) }
         }
         return out
     }
 
     func refreshAllModels() {
-        refreshOllamaModels()
-        if geminiKeyPresent { refreshGeminiModels() }
-        if zaiKeyPresent { refreshZAIModels() }
+        for e in endpoints where e.isEnabled { refreshEndpointModels(e) }
     }
     func refreshAllModelsIfNeeded() {
-        if ollamaModels.isEmpty { refreshOllamaModels() }
-        if geminiModels.isEmpty && geminiKeyPresent { refreshGeminiModels() }
-        if zaiModels.isEmpty && zaiKeyPresent { refreshZAIModels() }
+        for e in endpoints
+        where e.isEnabled && (endpointModels[e.id.uuidString] ?? []).isEmpty {
+            // Fetching a keyed endpoint without a key just errors — wait for the key.
+            if e.apiStyle == .gemini && endpointKey(e).isEmpty { continue }
+            refreshEndpointModels(e)
+        }
     }
 
     // Runtime
@@ -331,7 +332,8 @@ final class AppState: ObservableObject {
                 statusText = "기록할 해설이 없습니다"; return
             }
             e = BacklogEntry(id: UUID().uuidString, createdAt: Date(), tags: finalTags, note: note,
-                             stage: "해설", provider: explainProvider.label, model: explainModel,
+                             stage: "해설", provider: endpoint(byID: explainEndpointID)?.name ?? "-",
+                             model: explainModel,
                              prompt: explainPrompt, hint: explainHint, input: codeText, output: explanationText,
                              images: codeImages.isEmpty ? nil : codeImages)
         case .script:
@@ -339,7 +341,8 @@ final class AppState: ObservableObject {
                 statusText = "기록할 대본이 없습니다"; return
             }
             e = BacklogEntry(id: UUID().uuidString, createdAt: Date(), tags: finalTags, note: note,
-                             stage: "대본", provider: scriptProvider.label, model: scriptModel,
+                             stage: "대본", provider: endpoint(byID: scriptEndpointID)?.name ?? "-",
+                             model: scriptModel,
                              prompt: normalizePrompt, hint: scriptHint, input: inputText, output: scriptText,
                              images: nil)
         }
@@ -502,20 +505,26 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Build the script normalizer from the 대본 role's endpoint, branching on
+    /// its apiStyle — the HTTP implementations (LLM.*) are reused as-is.
     private func makeNormalizer(instruction: String) -> Normalizing? {
-        switch scriptProvider {
+        guard let e = activeEndpoint(byID: scriptEndpointID) else { return nil }
+        let model = roleModel(scriptRoleModels, e)
+        // A role with no pick AND an endpoint with no 기본 모델 would post
+        // `"model": ""` — refuse instead of letting the server 400.
+        guard !model.isEmpty else { return nil }
+        switch e.apiStyle {
         case .gemini:
-            guard let key = Secrets.geminiKey else { return nil }
-            return GeminiNormalizer(baseURL: geminiBaseURL, apiKey: key, model: geminiModel,
+            guard let key = Secrets.endpointKey(e.id) else { return nil }
+            return GeminiNormalizer(baseURL: e.baseURL, apiKey: key, model: model,
                                     instruction: instruction, temperature: scriptTemperature)
-        case .zai:
-            guard let key = Secrets.zaiKey else { return nil }
-            return ZAINormalizer(baseURL: zaiBaseURL, apiKey: key, model: zaiEffective(scriptZAIModel),
+        case .openAICompatible:
+            return ZAINormalizer(baseURL: e.baseURL, apiKey: endpointKey(e), model: model,
                                  instruction: instruction, temperature: scriptTemperature)
         case .ollama:
-            return TextNormalizer(
-                baseURL: URL(string: ollamaURL) ?? URL(string: "http://localhost:11434")!,
-                model: ollamaModel, instruction: instruction, temperature: scriptTemperature)
+            guard let url = URL(string: e.baseURL) else { return nil }
+            return TextNormalizer(baseURL: url, model: model,
+                                  instruction: instruction, temperature: scriptTemperature)
         }
     }
 
@@ -529,41 +538,105 @@ final class AppState: ObservableObject {
             : "[가장 중요한 지시 — 아래 규칙과 충돌하면 이 지시를 최우선으로 따른다]\n\(h)\n\n\(normalizePrompt)"
     }
 
-    func saveGeminiKey(_ key: String) {
-        let k = key.trimmingCharacters(in: .whitespacesAndNewlines)
-        Secrets.writeKey(named: "gemini_key", k)
-        geminiKeyPresent = !k.isEmpty
-        if !k.isEmpty { refreshGeminiModels() }   // populate the combined model list right away
+    // MARK: - Endpoint management (settings UI)
+
+    /// Register a new endpoint; its key (if any) goes to its own <id>.key file.
+    func addEndpoint(name: String, baseURL: String, style: CustomEndpoint.APIStyle,
+                     apiKey: String, defaultModel: String = "") {
+        var e = CustomEndpoint(name: name, baseURL: baseURL, apiStyle: style)
+        e.name = e.name.isEmpty ? style.label : e.name
+        let k = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !k.isEmpty { Secrets.writeEndpointKey(e.id, k) }
+        e.defaultModel = defaultModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        endpoints.append(e)
+        // First endpoint ever → point the roles at it so a fresh setup works.
+        if (endpoints.filter { $0.isEnabled }.count == 1)
+            && !endpoints.contains(where: { $0.id.uuidString == explainEndpointID && $0.isEnabled }) {
+            explainEndpointID = e.id.uuidString
+            if !visionOverridden { visionEndpointID = e.id.uuidString }
+            if scriptEndpointID.isEmpty || !endpoints.contains(where: { $0.id.uuidString == scriptEndpointID && $0.isEnabled }) {
+                scriptEndpointID = e.id.uuidString
+            }
+        }
+        saveSettings()
+        refreshEndpointModels(e)
     }
 
-    func saveZAIKey(_ key: String) {
-        let k = key.trimmingCharacters(in: .whitespacesAndNewlines)
-        Secrets.writeKey(named: "zai_key", k)
-        zaiKeyPresent = !k.isEmpty
-        if !k.isEmpty { refreshZAIModels() }
+    func deleteEndpoint(_ id: UUID) {
+        endpoints.removeAll { $0.id == id }
+        endpointModels[id.uuidString] = nil
+        endpointStatus[id.uuidString] = nil
+        explainRoleModels[id.uuidString] = nil
+        scriptRoleModels[id.uuidString] = nil
+        visionRoleModels[id.uuidString] = nil
+        // Any role still pointing at the deleted endpoint falls back to the
+        // first remaining enabled one (or the first remaining at all).
+        let fallback = endpoints.first(where: { $0.isEnabled })?.id.uuidString
+            ?? endpoints.first?.id.uuidString ?? ""
+        if explainEndpointID == id.uuidString { explainEndpointID = fallback }
+        if scriptEndpointID == id.uuidString { scriptEndpointID = fallback }
+        if visionEndpointID == id.uuidString {
+            // The vision OVERRIDE pointed here. Retargeting it silently would
+            // pin vision to an endpoint the user never chose, so drop back to
+            // 해설 추종 (the documented default) instead.
+            visionEndpointID = fallback
+            visionOverridden = false
+        }
+        saveSettings()
     }
 
-    /// Fetch the endpoint's live models.list (OpenAI-style GET /models) and swap
-    /// it into the picker.
-    func refreshZAIModels() {
-        guard let key = Secrets.zaiKey else { zaiStatus = "키 없음"; return }
-        zaiStatus = "확인 중…"
-        let base = zaiBaseURL
+    func saveEndpointKey(_ id: UUID, _ key: String) {
+        let k = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        Secrets.writeEndpointKey(id, k)
+        guard let e = endpoint(byID: id.uuidString) else { return }
+        if !k.isEmpty || e.apiStyle != .gemini { refreshEndpointModels(e) }
+    }
+
+    /// Fetch the endpoint's live models.list (openAI=`GET /models`,
+    /// gemini=`GET /models`, ollama=`GET /api/tags`) and swap it into the picker.
+    /// Reuses the existing per-style helpers — no new network code.
+    func refreshEndpointModels(_ endpoint: CustomEndpoint) {
+        let e = endpoint
+        let id = e.id.uuidString
+        if e.apiStyle == .gemini && endpointKey(e).isEmpty {
+            endpointStatus[id] = "키 없음"
+            return
+        }
+        endpointStatus[id] = "확인 중…"
+        // Read the endpoint's URL/key HERE, on the main actor, exactly as the old
+        // refreshGemini/ZAIModels did — reading them through `self?` inside the
+        // Task would send an UNAUTHENTICATED request if self had gone away.
+        let base = e.baseURL
+        let key = endpointKey(e)
         Task { [weak self] in
             do {
-                let ms = try await ZAI.models(baseURL: base, apiKey: key)
+                let ms: [String]
+                switch e.apiStyle {
+                case .openAICompatible:
+                    ms = try await ZAI.models(baseURL: base, apiKey: key)
+                case .gemini:
+                    ms = try await Gemini.models(baseURL: base, apiKey: key)
+                case .ollama:
+                    ms = try await Ollama.models(baseURL: URL(string: base) ?? URL(string: "http://localhost:11434")!)
+                }
                 guard let self else { return }
-                self.zaiModels = ms
-                if self.zaiModel.isEmpty {
-                    // 기본 모델 미지정: 목록에서 채운다 (폴백 모델이 목록에 있으면 그것, 없으면 첫 항목).
-                    self.zaiModel = ms.first(where: { ZAINormalizer.fallbackModels.contains($0) }) ?? ms.first ?? ""
-                    self.saveSettings()
+                self.endpointModels[id] = ms
+                // 기본 모델 미지정: 목록에서 채운다 (선호 모델이 목록에 있으면 그것, 없으면 첫 항목).
+                if let idx = self.endpoints.firstIndex(where: { $0.id == e.id }), self.endpoints[idx].defaultModel.isEmpty {
+                    let fallback = self.preferredModels(e).first(where: { ms.contains($0) }) ?? ms.first ?? ""
+                    if !fallback.isEmpty {
+                        self.endpoints[idx].defaultModel = fallback
+                        self.saveSettings()
+                    }
                 }
                 var status = "연결됨 · 모델 \(ms.count)개"
-                if !self.zaiDefaultModelValid { status += " · ⚠️ 기본 모델 ‘\(self.zaiModel)’이 목록에 없음" }
-                self.zaiStatus = status
+                if !self.endpointDefaultModelValid(e) {
+                    let dm = self.endpoint(byID: id)?.defaultModel ?? ""
+                    status += " · ⚠️ 기본 모델 ‘\(dm)’이 목록에 없음"
+                }
+                self.endpointStatus[id] = status
             } catch {
-                self?.zaiStatus = "연결 실패: \(error.localizedDescription)"
+                self?.endpointStatus[id] = "연결 실패: \(error.localizedDescription)"
             }
         }
     }
@@ -571,42 +644,48 @@ final class AppState: ObservableObject {
     // MARK: - Commentary (코드 → 해설)
 
     private func makeExplainer() -> Explaining? {
-        switch explainProvider {
+        guard let e = activeEndpoint(byID: explainEndpointID) else { return nil }
+        let model = roleModel(explainRoleModels, e)
+        guard !model.isEmpty else { return nil }   // never post `"model": ""`
+        switch e.apiStyle {
         case .gemini:
-            guard let key = Secrets.geminiKey else { return nil }
-            return GeminiExplainer(baseURL: geminiBaseURL, apiKey: key, model: explainGeminiModel,
+            guard let key = Secrets.endpointKey(e.id) else { return nil }
+            return GeminiExplainer(baseURL: e.baseURL, apiKey: key, model: model,
                                    instruction: explainPrompt, temperature: explainTemperature)
-        case .zai:
-            guard let key = Secrets.zaiKey else { return nil }
-            return ZAIExplainer(baseURL: zaiBaseURL, apiKey: key, model: zaiEffective(explainZAIModel),
+        case .openAICompatible:
+            return ZAIExplainer(baseURL: e.baseURL, apiKey: endpointKey(e), model: model,
                                 instruction: explainPrompt, temperature: explainTemperature)
         case .ollama:
-            return OllamaExplainer(
-                baseURL: URL(string: ollamaURL) ?? URL(string: "http://localhost:11434")!,
-                model: explainOllamaModel, instruction: explainPrompt, temperature: explainTemperature)
+            guard let url = URL(string: e.baseURL) else { return nil }
+            return OllamaExplainer(baseURL: url, model: model,
+                                   instruction: explainPrompt, temperature: explainTemperature)
         }
     }
 
     /// Single-stage image explain: the 해설 model (== vision model) reads the
     /// screenshot(s) and explains in one streamed call, using the explain prompt.
     private func explainStreamWithImages(code: String, images: [Data]) -> AsyncThrowingStream<String, Error> {
+        guard let e = activeEndpoint(byID: explainEndpointID) else {
+            return AsyncThrowingStream { $0.finish() }
+        }
         let prompt = CodeExplanation.prompt(explainPrompt, code, hint: explainHint)
-        switch explainProvider {
+        let model = roleModel(explainRoleModels, e)
+        guard !model.isEmpty else { return AsyncThrowingStream { $0.finish() } }
+        switch e.apiStyle {
         case .gemini:
-            guard let key = Secrets.geminiKey else {
+            guard let key = Secrets.endpointKey(e.id) else {
                 return AsyncThrowingStream { $0.finish() }
             }
-            return LLM.geminiStream(baseURL: geminiBaseURL, apiKey: key, model: explainGeminiModel,
+            return LLM.geminiStream(baseURL: e.baseURL, apiKey: key, model: model,
                                     prompt: prompt, images: images, temperature: explainTemperature)
-        case .zai:
-            guard let key = Secrets.zaiKey else {
-                return AsyncThrowingStream { $0.finish() }
-            }
-            return LLM.openAIChatStream(baseURL: zaiBaseURL, model: zaiEffective(explainZAIModel), apiKey: key,
+        case .openAICompatible:
+            return LLM.openAIChatStream(baseURL: e.baseURL, model: model, apiKey: endpointKey(e),
                                         prompt: prompt, images: images, temperature: explainTemperature)
         case .ollama:
-            let url = URL(string: ollamaURL) ?? URL(string: "http://localhost:11434")!
-            return LLM.ollamaChatStream(baseURL: url, model: explainOllamaModel,
+            guard let url = URL(string: e.baseURL) else {
+                return AsyncThrowingStream { $0.finish() }
+            }
+            return LLM.ollamaChatStream(baseURL: url, model: model,
                                         prompt: prompt, images: images, temperature: explainTemperature)
         }
     }
@@ -622,10 +701,17 @@ final class AppState: ObservableObject {
     /// text (the code + any relevant screen content). Cached by image digest so a
     /// re-run skips the vision call. The text then feeds the normal explain stage.
     private func transcribeImages(_ imgs: [Data]) async -> String? {
-        let visionProv = visionProviderEff
+        guard let visionProv = visionEndpointEff else {
+            statusText = "비전 엔드포인트 없음 (설정에서 엔드포인트를 확인하세요)"
+            return nil
+        }
         let visionModel = visionModelEff
+        guard !visionModel.isEmpty else {
+            statusText = "\(visionProv.name) 비전 모델 미설정 (기본 모델을 지정하세요)"
+            return nil
+        }
         let tkey = NormalizationCache.key(text: imagesDigest(imgs),
-                                          provider: "vision:" + visionProv.rawValue,
+                                          provider: "vision:" + visionProv.id.uuidString,
                                           model: visionModel, prompt: "transcribe")
         if let cached = normCache.script(forKey: tkey) { return cached }
         let prompt = """
@@ -648,17 +734,19 @@ final class AppState: ObservableObject {
         해설·설명 문장은 쓰지 말고 위 세 섹션 형식으로만 출력합니다.
         """
         let stream: AsyncThrowingStream<String, Error>
-        switch visionProv {
+        switch visionProv.apiStyle {
         case .gemini:
-            guard let key = Secrets.geminiKey else { statusText = "Gemini 키 미설정"; return nil }
-            stream = LLM.geminiStream(baseURL: geminiBaseURL, apiKey: key, model: visionModel,
+            guard let key = Secrets.endpointKey(visionProv.id) else {
+                statusText = "\(visionProv.name) 키 미설정"; return nil
+            }
+            stream = LLM.geminiStream(baseURL: visionProv.baseURL, apiKey: key, model: visionModel,
                                       prompt: prompt, images: imgs, temperature: 0)
-        case .zai:
-            guard let key = Secrets.zaiKey else { statusText = "Z.ai 키 미설정"; return nil }
-            stream = LLM.openAIChatStream(baseURL: zaiBaseURL, model: visionModel, apiKey: key,
+        case .openAICompatible:
+            stream = LLM.openAIChatStream(baseURL: visionProv.baseURL, model: visionModel,
+                                          apiKey: endpointKey(visionProv),
                                           prompt: prompt, images: imgs, temperature: 0)
         case .ollama:
-            let url = URL(string: ollamaURL) ?? URL(string: "http://localhost:11434")!
+            let url = URL(string: visionProv.baseURL) ?? URL(string: "http://localhost:11434")!
             stream = LLM.ollamaChatStream(baseURL: url, model: visionModel,
                                           prompt: prompt, images: imgs, temperature: 0)
         }
@@ -706,8 +794,8 @@ final class AppState: ObservableObject {
         let typed = codeText.trimmingCharacters(in: .whitespacesAndNewlines)
         let imgs = codeImages
         guard !typed.isEmpty || !imgs.isEmpty else { explanationText = ""; return nil }
-        guard let explainer = makeExplainer() else {
-            statusText = explainProvider == .gemini ? "Gemini 키 미설정" : "Ollama 미설정"
+        guard let explainer = makeExplainer(), let ep = activeEndpoint(byID: explainEndpointID) else {
+            statusText = "해설 생성 불가 — 엔드포인트·모델·API 키 중 하나가 미설정입니다 (설정 확인)"
             return nil
         }
         explaining = true
@@ -718,7 +806,7 @@ final class AppState: ObservableObject {
         // the transcribe stage (less loss, faster). Otherwise: vision transcribes,
         // then the text model explains.
         let singleStage = !imgs.isEmpty
-            && visionProviderEff == explainProvider && visionModelEff == explainModel
+            && visionEndpointEff?.id == ep.id && visionModelEff == explainModel
 
         var code = typed
         if !imgs.isEmpty && !singleStage {
@@ -736,7 +824,7 @@ final class AppState: ObservableObject {
         guard !code.isEmpty else { statusText = "해설 생성 실패 (빈 입력)"; return nil }
 
         // Cache key: single-stage feeds the raw image, so fold its digest in.
-        let provider = "explain:" + explainProvider.rawValue
+        let provider = "explain:" + ep.id.uuidString
         let keyText = singleStage ? code + imagesDigest(imgs) : code
         let nk = NormalizationCache.key(text: keyText, provider: provider, model: explainModel,
                                         prompt: explainPrompt + "\u{1F}" + explainHint)
@@ -780,11 +868,11 @@ final class AppState: ObservableObject {
         let current = codeText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !current.isEmpty else { return nil }
         guard canContinueExplain else { return await runExplain(force: force) }
-        guard let explainer = makeExplainer() else {
-            statusText = explainProvider == .gemini ? "Gemini 키 미설정" : "Ollama 미설정"
+        guard let explainer = makeExplainer(), let ep = activeEndpoint(byID: explainEndpointID) else {
+            statusText = "해설 생성 불가 — 엔드포인트·모델·API 키 중 하나가 미설정입니다 (설정 확인)"
             return nil
         }
-        let provider = "explain-cont:" + explainProvider.rawValue
+        let provider = "explain-cont:" + ep.id.uuidString
         let keyText = lastExplainedCode + "\u{1F}" + current
         let nk = NormalizationCache.key(text: keyText, provider: provider, model: explainModel,
                                         prompt: "continue\u{1F}" + explainHint)
@@ -928,7 +1016,7 @@ final class AppState: ObservableObject {
         let instruction = scriptInstruction()
         guard normalizeEnabled, !src.isEmpty,
               let norm = makeNormalizer(instruction: instruction) else { return text }
-        let nk = NormalizationCache.key(text: src, provider: scriptProvider.rawValue,
+        let nk = NormalizationCache.key(text: src, provider: scriptEndpointID,
                                         model: scriptModel, prompt: instruction)
         if let cached = normCache.script(forKey: nk) { return cached }
         normalizing = true
@@ -987,10 +1075,15 @@ final class AppState: ObservableObject {
         guard !src.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { scriptText = ""; return "" }
         let instruction = scriptInstruction()
         guard normalizeEnabled, let norm = makeNormalizer(instruction: instruction) else {
+            // 정규화가 켜져 있는데 normalizer를 못 만들면(엔드포인트 비활성·모델 미지정)
+            // 조용히 원문을 흘려보내지 말고 이유를 알린다.
+            if normalizeEnabled {
+                statusText = "대본 엔드포인트·모델 미설정 — 원문을 그대로 사용합니다"
+            }
             scriptText = src; markScriptFresh(); return src
         }
 
-        let provider = scriptProvider.rawValue
+        let provider = scriptEndpointID
         let model = scriptModel
         // Normalize the WHOLE 대본 in one call so the model has full context —
         // per-paragraph calls applied instructions unevenly (the hint landed on
@@ -1063,7 +1156,7 @@ final class AppState: ObservableObject {
         let current = scriptText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !current.isEmpty else { return nil }
         guard let norm = makeNormalizer(instruction: refineInstruction()) else {
-            statusText = scriptProvider == .gemini ? "Gemini 키 미설정" : "Ollama 미설정"
+            statusText = "다듬기 불가 — 엔드포인트·모델·API 키 중 하나가 미설정입니다 (설정 확인)"
             return nil
         }
         let combined = "[원본]\n\(inputText)\n\n[현재 대본]\n\(current)"
@@ -1136,6 +1229,20 @@ final class AppState: ObservableObject {
 
     func stop() { cancelActiveWork(); finish() }
 
+    /// 생성 중단 (사용자 요청 버튼): cancel the in-flight 해설/대본 LLM streams only —
+    /// playback keeps running. Both stream loops already honor cancellation:
+    /// 대본 keeps the partial text (stale flag shows), 해설 keeps the streamed
+    /// raw acc per the existing CancellationError conventions.
+    func cancelGeneration() {
+        explainTask?.cancel()
+        scriptTask?.cancel()
+        statusText = "생성 중단됨"
+        // A command that was still PRE-playback (e.g. Services 읽기: phase was
+        // set to .synthesizing before its scriptTask) must not strand the HUD;
+        // anything already .playing keeps playing (this is not the transport 중지).
+        if phase == .synthesizing { phase = .idle }
+    }
+
     /// Cancel every in-flight command (LLM streams + synthesis + playback) so a
     /// new command supersedes prior ones IMMEDIATELY — rapid or mis-clicked
     /// TTS/해설 commands don't queue up and run in sequence; only the last runs.
@@ -1195,37 +1302,6 @@ final class AppState: ObservableObject {
         }
     }
 
-    func refreshGeminiModels() {
-        guard let key = Secrets.geminiKey else { geminiStatus = "키 없음"; return }
-        geminiStatus = "확인 중…"
-        let base = geminiBaseURL
-        Task { [weak self] in
-            do {
-                let ms = try await Gemini.models(baseURL: base, apiKey: key)
-                guard let self else { return }
-                self.geminiModels = ms
-                self.geminiStatus = "연결됨 · 모델 \(ms.count)개"
-            } catch {
-                self?.geminiStatus = "연결 실패: \(error.localizedDescription)"
-            }
-        }
-    }
-
-    func refreshOllamaModels() {
-        let url = URL(string: ollamaURL) ?? URL(string: "http://localhost:11434")!
-        ollamaStatus = "확인 중…"
-        Task { [weak self] in
-            do {
-                let ms = try await Ollama.models(baseURL: url)
-                guard let self else { return }
-                self.ollamaModels = ms
-                self.ollamaStatus = "연결됨 · 모델 \(ms.count)개"
-            } catch {
-                self?.ollamaStatus = "연결 실패: \(error.localizedDescription)"
-            }
-        }
-    }
-
     // MARK: - HUD placement & subtitle size
 
     /// Display ID of the screen containing a global (Cocoa) point, if any.
@@ -1279,22 +1355,26 @@ final class AppState: ObservableObject {
             "subtitleFontSize": subtitleFontSize,
             "hudPositions": Dictionary(uniqueKeysWithValues:
                 hudPositions.map { (String($0.key), [$0.value.x, $0.value.y]) }),
-            "normalize": normalizeEnabled, "ollamaModel": ollamaModel, "ollamaURL": ollamaURL,
-            "normalizeProvider": normalizeProvider.rawValue, "geminiModel": geminiModel,
-            "explainProvider": explainProvider.rawValue, "scriptProvider": scriptProvider.rawValue,
-            "visionProvider": visionProvider.rawValue, "visionOverridden": visionOverridden,
-            "geminiBaseURL": geminiBaseURL,
-            "zaiBaseURL": zaiBaseURL, "zaiModel": zaiModel, "scriptZAIModel": scriptZAIModel,
-            "explainGeminiModel": explainGeminiModel, "explainOllamaModel": explainOllamaModel,
-            "explainZAIModel": explainZAIModel,
-            "explainVisionGeminiModel": explainVisionGeminiModel,
-            "explainVisionOllamaModel": explainVisionOllamaModel,
-            "explainVisionZAIModel": explainVisionZAIModel,
+            "normalize": normalizeEnabled,
             "explainTemperature": explainTemperature, "scriptTemperature": scriptTemperature,
             "explainAutoPlay": explainAutoPlay,
             "stability": voiceSettings.stability, "similarity": voiceSettings.similarityBoost,
             "style": voiceSettings.style, "speakerBoost": voiceSettings.useSpeakerBoost,
+            // Endpoints are the single source of truth for LLM providers (the old
+            // gemini*/zai*/ollama* keys are consumed as seed data on load only).
+            "explainEndpointID": explainEndpointID, "scriptEndpointID": scriptEndpointID,
+            "visionEndpointID": visionEndpointID, "visionOverridden": visionOverridden,
+            "explainRoleModels": explainRoleModels,
+            "scriptRoleModels": scriptRoleModels,
+            "visionRoleModels": visionRoleModels,
         ]
+        // Endpoints: encode via Codable. CustomEndpoint has no apiKey property at
+        // all (keys live in <id>.key files), so settings.json CANNOT hold a
+        // plaintext key — no scrub step to forget.
+        if let data = try? JSONEncoder().encode(endpoints),
+           let arr = try? JSONSerialization.jsonObject(with: data) {
+            dict["endpoints"] = arr
+        }
         // Only persist the prompt if the user customized it, so default-prompt
         // updates auto-apply for everyone who didn't.
         if normalizePrompt != TextNormalizer.defaultInstruction {
@@ -1310,7 +1390,13 @@ final class AppState: ObservableObject {
 
     private func loadSettings() {
         guard let d = try? Data(contentsOf: settingsURL),
-              let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return }
+              let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else {
+            // No settings yet (fresh install): still seed the 3 standard
+            // endpoints so the app works out of the box, then persist them.
+            seedEndpoints(from: [:])
+            saveSettings()
+            return
+        }
         voiceId = o["voiceId"] as? String ?? voiceId
         voiceName = o["voiceName"] as? String ?? voiceName
         modelId = o["modelId"] as? String ?? modelId
@@ -1328,33 +1414,8 @@ final class AppState: ObservableObject {
             })
         }
         normalizeEnabled = o["normalize"] as? Bool ?? normalizeEnabled
-        ollamaModel = o["ollamaModel"] as? String ?? ollamaModel
-        ollamaURL = o["ollamaURL"] as? String ?? ollamaURL
         normalizePrompt = o["normalizePrompt"] as? String ?? normalizePrompt
         explainPrompt = o["explainPrompt"] as? String ?? explainPrompt
-        normalizeProvider = NormalizeProvider(rawValue: o["normalizeProvider"] as? String ?? "") ?? normalizeProvider
-        // Per-role providers default from the old single normalizeProvider (migration),
-        // so an existing Ollama/gemma4 setup keeps running with no user action.
-        explainProvider = NormalizeProvider(rawValue: o["explainProvider"] as? String ?? "") ?? normalizeProvider
-        scriptProvider = NormalizeProvider(rawValue: o["scriptProvider"] as? String ?? "") ?? normalizeProvider
-        visionProvider = NormalizeProvider(rawValue: o["visionProvider"] as? String ?? "") ?? explainProvider
-        visionOverridden = o["visionOverridden"] as? Bool ?? false
-        geminiModel = o["geminiModel"] as? String ?? geminiModel
-        geminiBaseURL = o["geminiBaseURL"] as? String ?? geminiBaseURL
-        zaiBaseURL = o["zaiBaseURL"] as? String ?? zaiBaseURL
-        zaiModel = o["zaiModel"] as? String ?? zaiModel
-        scriptZAIModel = o["scriptZAIModel"] as? String ?? scriptZAIModel
-        explainGeminiModel = o["explainGeminiModel"] as? String ?? explainGeminiModel
-        explainOllamaModel = o["explainOllamaModel"] as? String ?? explainOllamaModel
-        // Migration: the 해설 role used to ship a hardcoded default equal to the
-        // fallback model, saved unconditionally. Left as-is it would read as a pinned
-        // override and the settings-level 기본 모델 would never reach the picker, so an
-        // untouched value is treated as unset (inherit the default).
-        explainZAIModel = o["explainZAIModel"] as? String ?? explainZAIModel
-        if explainZAIModel == ZAINormalizer.fallbackModels.first { explainZAIModel = "" }
-        explainVisionGeminiModel = o["explainVisionGeminiModel"] as? String ?? explainVisionGeminiModel
-        explainVisionOllamaModel = o["explainVisionOllamaModel"] as? String ?? explainVisionOllamaModel
-        explainVisionZAIModel = o["explainVisionZAIModel"] as? String ?? explainVisionZAIModel
         explainTemperature = o["explainTemperature"] as? Double ?? explainTemperature
         explainAutoPlay = o["explainAutoPlay"] as? Bool ?? explainAutoPlay
         scriptTemperature = o["scriptTemperature"] as? Double ?? scriptTemperature
@@ -1362,5 +1423,105 @@ final class AppState: ObservableObject {
         voiceSettings.similarityBoost = o["similarity"] as? Double ?? voiceSettings.similarityBoost
         voiceSettings.style = o["style"] as? Double ?? voiceSettings.style
         voiceSettings.useSpeakerBoost = o["speakerBoost"] as? Bool ?? voiceSettings.useSpeakerBoost
+
+        // --- LLM endpoints ---
+        // The PRESENCE of the "endpoints" key means this file was written by a
+        // migrated build — an EMPTY array then means "the user deleted them all"
+        // and must be honored, not re-seeded (or deletion would never stick).
+        var didSeed = false
+        if let arr = o["endpoints"] as? [[String: Any]],
+           let data = try? JSONSerialization.data(withJSONObject: arr),
+           let list = try? JSONDecoder().decode([CustomEndpoint].self, from: data) {
+            endpoints = list        // may be [] — the user deleted them all
+        } else {
+            // First run after the endpoints migration (or an unreadable list):
+            // turn the legacy gemini/zai/ollama settings keys into the 3 seeds.
+            seedEndpoints(from: o)
+            didSeed = true
+        }
+        // Role → endpoint references (ids saved by this version; legacy role
+        // rawValues were mapped to seed ids in seedEndpoints).
+        explainEndpointID = o["explainEndpointID"] as? String ?? explainEndpointID
+        scriptEndpointID = o["scriptEndpointID"] as? String ?? scriptEndpointID
+        visionEndpointID = o["visionEndpointID"] as? String ?? visionEndpointID
+        visionOverridden = o["visionOverridden"] as? Bool ?? false
+        explainRoleModels = o["explainRoleModels"] as? [String: String] ?? explainRoleModels
+        scriptRoleModels = o["scriptRoleModels"] as? [String: String] ?? scriptRoleModels
+        visionRoleModels = o["visionRoleModels"] as? [String: String] ?? visionRoleModels
+        // A saved role pointing at a deleted endpoint falls back to the first
+        // enabled one so generation never resolves to nil after manual edits.
+        let fallbackID = endpoints.first(where: { $0.isEnabled })?.id.uuidString ?? ""
+        func resolve(_ id: String) -> String {
+            endpoints.contains(where: { $0.id.uuidString == id }) ? id : fallbackID
+        }
+        explainEndpointID = resolve(explainEndpointID)
+        scriptEndpointID = resolve(scriptEndpointID)
+        visionEndpointID = resolve(visionEndpointID)
+
+        // Persist the migration only AFTER every field is loaded — saving inside
+        // the branch above wrote the pre-load defaults for anything read below it
+        // (visionOverridden in particular).
+        if didSeed { saveSettings() }
+    }
+
+    /// Legacy → endpoints migration. Reads the old settings keys (URLs, 기본
+    /// 모델, per-role models) as SEED DATA only and builds the 3 standard
+    /// endpoints with fixed ids (so old role rawValues map deterministically).
+    /// Legacy gemini/zai key files are copied to their seed <id>.key names; the
+    /// originals stay in place. Afterwards saving is endpoints-based only.
+    private func seedEndpoints(from o: [String: Any]) {
+        func str(_ key: String, _ def: String) -> String { o[key] as? String ?? def }
+
+        if let k = Secrets.geminiKey { Secrets.writeEndpointKey(CustomEndpoint.geminiSeedID, k) }
+        if let k = Secrets.zaiKey { Secrets.writeEndpointKey(CustomEndpoint.zaiSeedID, k) }
+
+        let gemini = CustomEndpoint(id: CustomEndpoint.geminiSeedID, name: "Gemini",
+                                    baseURL: str("geminiBaseURL", GeminiNormalizer.defaultBaseURL),
+                                    apiStyle: .gemini,
+                                    defaultModel: str("geminiModel", "gemini-2.0-flash"))
+        let zai = CustomEndpoint(id: CustomEndpoint.zaiSeedID, name: "Z.ai",
+                                 baseURL: str("zaiBaseURL", ZAINormalizer.defaultBaseURL),
+                                 apiStyle: .openAICompatible,
+                                 defaultModel: str("zaiModel", ZAINormalizer.fallbackModels.first ?? ""))
+        let ollama = CustomEndpoint(id: CustomEndpoint.ollamaSeedID, name: "Ollama",
+                                    baseURL: str("ollamaURL", "http://localhost:11434"),
+                                    apiStyle: .ollama,
+                                    defaultModel: str("ollamaModel", "gemma4:31b-cloud"))
+        endpoints = [ollama, gemini, zai]
+
+        // Per-role model memories. A legacy value equal to the endpoint default
+        // stays unset — it inherits the default (구 zaiEffective 폴백과 동일).
+        // The untouched explainZAIModel quirk (old default saved unconditionally)
+        // is treated as unset, same as the old loader did.
+        let legacyExplainZAI = { () -> String in
+            let v = str("explainZAIModel", "")
+            return v == ZAINormalizer.fallbackModels.first ? "" : v
+        }()
+        let legacyExplainGemini = str("explainGeminiModel", gemini.defaultModel)
+        let legacyExplainOllama = str("explainOllamaModel", ollama.defaultModel)
+        explainRoleModels = [
+            gemini.id.uuidString: legacyExplainGemini == gemini.defaultModel ? "" : legacyExplainGemini,
+            zai.id.uuidString: legacyExplainZAI,
+            ollama.id.uuidString: legacyExplainOllama == ollama.defaultModel ? "" : legacyExplainOllama,
+        ]
+        scriptRoleModels = [zai.id.uuidString: str("scriptZAIModel", "")]  // gemini/ollama 대본 모델 == 기본 모델
+        visionRoleModels = [
+            gemini.id.uuidString: str("explainVisionGeminiModel", ""),
+            zai.id.uuidString: str("explainVisionZAIModel", ""),
+            ollama.id.uuidString: str("explainVisionOllamaModel", ""),
+        ]
+
+        func seedID(forLegacy raw: String?, _ fallback: String) -> String {
+            switch raw {
+            case "gemini": return CustomEndpoint.geminiSeedID.uuidString
+            case "zai": return CustomEndpoint.zaiSeedID.uuidString
+            case "ollama": return CustomEndpoint.ollamaSeedID.uuidString
+            default: return fallback
+            }
+        }
+        let ollamaID = CustomEndpoint.ollamaSeedID.uuidString
+        explainEndpointID = seedID(forLegacy: o["explainProvider"] as? String, ollamaID)
+        scriptEndpointID = seedID(forLegacy: o["scriptProvider"] as? String, ollamaID)
+        visionEndpointID = seedID(forLegacy: o["visionProvider"] as? String, explainEndpointID)
     }
 }

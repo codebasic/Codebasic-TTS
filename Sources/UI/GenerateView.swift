@@ -72,14 +72,17 @@ struct GenerateView: View {
                 if app.normalizing {
                     ProgressView().controlSize(.small)
                     Text("대본 생성 중…").font(.caption).foregroundStyle(.secondary)
+                    Button { app.cancelGeneration() } label: {
+                        Image(systemName: "stop.fill")
+                    }
+                    .controlSize(.small)
+                    .help("대본 생성을 중단합니다 (지금까지 스트림된 부분은 유지)")
                 }
                 Spacer()
                 if app.normalizeEnabled {
                     LLMModelPicker(label: "대본 모델",
-                                   provider: $app.scriptProvider,
-                                   geminiModel: $app.geminiModel,
-                                   ollamaModel: $app.ollamaModel,
-                                   zaiModel: $app.scriptZAIModel,
+                                   endpointID: $app.scriptEndpointID,
+                                   roleModels: $app.scriptRoleModels,
                                    onChange: { app.saveSettings() })
                 } else {
                     Text("정규화 꺼짐 (설정)").font(.caption).foregroundStyle(.secondary)

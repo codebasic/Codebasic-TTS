@@ -23,4 +23,9 @@ enum Secrets {
         let path = (appSupportDir as NSString).appendingPathComponent(name)
         try? value.write(toFile: path, atomically: true, encoding: .utf8)
     }
+
+    // Custom endpoints keep their key in its own file named after the endpoint
+    // id (`<endpoint_id>.key`), never inside settings.json.
+    static func endpointKey(_ id: UUID) -> String? { key(named: id.uuidString + ".key") }
+    static func writeEndpointKey(_ id: UUID, _ value: String) { writeKey(named: id.uuidString + ".key", value) }
 }
