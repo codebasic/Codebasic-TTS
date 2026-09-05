@@ -77,7 +77,7 @@ private extension AppState.NormalizeProvider {
     func model(_ app: AppState, _ gemini: String, _ zai: String, _ ollama: String) -> String {
         switch self {
         case .gemini: return gemini
-        case .zai: return zai.isEmpty ? app.zaiModel : zai
+        case .zai: return app.zaiEffective(zai)   // 역할 미지정이면 설정의 Z.ai 기본 모델
         case .ollama: return ollama
         }
     }

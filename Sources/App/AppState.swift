@@ -57,8 +57,11 @@ final class AppState: ObservableObject {
     @Published var geminiStatus = ""
     @Published var geminiKeyPresent = Secrets.geminiKey != nil
     @Published var zaiBaseURL = ZAINormalizer.defaultBaseURL
-    @Published var zaiModel = "glm-5.3"               // 대본(정규화)용 (Z.ai)
-    @Published var zaiModels: [String] = []           // static list; no public models.list endpoint
+    /// 설정에서 지정한 Z.ai 기본 모델 (역할별 미지정 시 폴백). 해설/대본/비전 피커의 기본 선택값이며,
+    /// 피커에서 다른 모델을 고르면 그 역할의 필드가 채워져 이 값을 덮어쓴다.
+    @Published var zaiModel = ZAINormalizer.fallbackModels.first ?? ""
+    @Published var zaiModels: [String] = []           // live GET /models list (no hardcoded list)
+    @Published var scriptZAIModel = ""                // 대본용 (Z.ai). 비면 zaiModel(기본 모델)을 따름
     @Published var zaiStatus = ""
     @Published var zaiKeyPresent = Secrets.zaiKey != nil
     @Published var ollamaModel = "gemma4:31b-cloud"   // 대본(정규화)용. 3B local models garble Korean numbers; a strong model is needed
@@ -91,7 +94,7 @@ final class AppState: ObservableObject {
     var onRequestReview: (() -> Void)?
     @Published var explainGeminiModel = "gemini-2.0-flash"   // 해설용
     @Published var explainOllamaModel = "gemma4:31b-cloud"   // 해설용
-    @Published var explainZAIModel = "glm-5.3"               // 해설용 (Z.ai)
+    @Published var explainZAIModel = ""                      // 해설용 (Z.ai). 비면 기본 모델(zaiModel)
     @Published var explainTemperature: Double = 0.4          // 해설 LLM 생성 매개변수
     @Published var scriptTemperature: Double = 0.2           // 대본 LLM 생성 매개변수
     @Published var codeImages: [Data] = []       // pasted code screenshots (PNG); needs a vision model
@@ -118,18 +121,29 @@ final class AppState: ObservableObject {
     @Published var visionProvider: NormalizeProvider = .ollama
     @Published var visionOverridden = false       // false = vision follows the 해설 model
 
+    /// A role's Z.ai model: its own field, or the settings-level 기본 모델 when unset.
+    /// EVERY Z.ai call site must go through this — a raw empty role field would be
+    /// sent to the API as `"model": ""`.
+    func zaiEffective(_ roleModel: String) -> String { roleModel.isEmpty ? zaiModel : roleModel }
+
+    /// True when the 기본 모델 is usable: unset, in the fetched list, or not yet
+    /// checkable (no list). Drives the SettingsView warning.
+    var zaiDefaultModelValid: Bool {
+        zaiModel.isEmpty || zaiModels.isEmpty || zaiModels.contains(zaiModel)
+    }
+
     /// Effective model per role (provider's own model field).
     var scriptModel: String {
         switch scriptProvider {
         case .gemini: return geminiModel
-        case .zai: return zaiModel
+        case .zai: return zaiEffective(scriptZAIModel)
         case .ollama: return ollamaModel
         }
     }
     var explainModel: String {
         switch explainProvider {
         case .gemini: return explainGeminiModel
-        case .zai: return explainZAIModel
+        case .zai: return zaiEffective(explainZAIModel)
         case .ollama: return explainOllamaModel
         }
     }
@@ -138,7 +152,7 @@ final class AppState: ObservableObject {
         if !visionOverridden { return explainModel }
         switch visionProvider {
         case .gemini: return explainVisionGeminiModel
-        case .zai: return explainVisionZAIModel
+        case .zai: return zaiEffective(explainVisionZAIModel)
         case .ollama: return explainVisionOllamaModel
         }
     }
@@ -496,7 +510,7 @@ final class AppState: ObservableObject {
                                     instruction: instruction, temperature: scriptTemperature)
         case .zai:
             guard let key = Secrets.zaiKey else { return nil }
-            return ZAINormalizer(baseURL: zaiBaseURL, apiKey: key, model: zaiModel,
+            return ZAINormalizer(baseURL: zaiBaseURL, apiKey: key, model: zaiEffective(scriptZAIModel),
                                  instruction: instruction, temperature: scriptTemperature)
         case .ollama:
             return TextNormalizer(
@@ -540,7 +554,14 @@ final class AppState: ObservableObject {
                 let ms = try await ZAI.models(baseURL: base, apiKey: key)
                 guard let self else { return }
                 self.zaiModels = ms
-                self.zaiStatus = "연결됨 · 모델 \(ms.count)개"
+                if self.zaiModel.isEmpty {
+                    // 기본 모델 미지정: 목록에서 채운다 (폴백 모델이 목록에 있으면 그것, 없으면 첫 항목).
+                    self.zaiModel = ms.first(where: { ZAINormalizer.fallbackModels.contains($0) }) ?? ms.first ?? ""
+                    self.saveSettings()
+                }
+                var status = "연결됨 · 모델 \(ms.count)개"
+                if !self.zaiDefaultModelValid { status += " · ⚠️ 기본 모델 ‘\(self.zaiModel)’이 목록에 없음" }
+                self.zaiStatus = status
             } catch {
                 self?.zaiStatus = "연결 실패: \(error.localizedDescription)"
             }
@@ -557,7 +578,7 @@ final class AppState: ObservableObject {
                                    instruction: explainPrompt, temperature: explainTemperature)
         case .zai:
             guard let key = Secrets.zaiKey else { return nil }
-            return ZAIExplainer(baseURL: zaiBaseURL, apiKey: key, model: explainZAIModel,
+            return ZAIExplainer(baseURL: zaiBaseURL, apiKey: key, model: zaiEffective(explainZAIModel),
                                 instruction: explainPrompt, temperature: explainTemperature)
         case .ollama:
             return OllamaExplainer(
@@ -581,7 +602,7 @@ final class AppState: ObservableObject {
             guard let key = Secrets.zaiKey else {
                 return AsyncThrowingStream { $0.finish() }
             }
-            return LLM.openAIChatStream(baseURL: zaiBaseURL, model: explainZAIModel, apiKey: key,
+            return LLM.openAIChatStream(baseURL: zaiBaseURL, model: zaiEffective(explainZAIModel), apiKey: key,
                                         prompt: prompt, images: images, temperature: explainTemperature)
         case .ollama:
             let url = URL(string: ollamaURL) ?? URL(string: "http://localhost:11434")!
@@ -1263,7 +1284,7 @@ final class AppState: ObservableObject {
             "explainProvider": explainProvider.rawValue, "scriptProvider": scriptProvider.rawValue,
             "visionProvider": visionProvider.rawValue, "visionOverridden": visionOverridden,
             "geminiBaseURL": geminiBaseURL,
-            "zaiBaseURL": zaiBaseURL, "zaiModel": zaiModel,
+            "zaiBaseURL": zaiBaseURL, "zaiModel": zaiModel, "scriptZAIModel": scriptZAIModel,
             "explainGeminiModel": explainGeminiModel, "explainOllamaModel": explainOllamaModel,
             "explainZAIModel": explainZAIModel,
             "explainVisionGeminiModel": explainVisionGeminiModel,
@@ -1322,9 +1343,15 @@ final class AppState: ObservableObject {
         geminiBaseURL = o["geminiBaseURL"] as? String ?? geminiBaseURL
         zaiBaseURL = o["zaiBaseURL"] as? String ?? zaiBaseURL
         zaiModel = o["zaiModel"] as? String ?? zaiModel
+        scriptZAIModel = o["scriptZAIModel"] as? String ?? scriptZAIModel
         explainGeminiModel = o["explainGeminiModel"] as? String ?? explainGeminiModel
         explainOllamaModel = o["explainOllamaModel"] as? String ?? explainOllamaModel
+        // Migration: the 해설 role used to ship a hardcoded default equal to the
+        // fallback model, saved unconditionally. Left as-is it would read as a pinned
+        // override and the settings-level 기본 모델 would never reach the picker, so an
+        // untouched value is treated as unset (inherit the default).
         explainZAIModel = o["explainZAIModel"] as? String ?? explainZAIModel
+        if explainZAIModel == ZAINormalizer.fallbackModels.first { explainZAIModel = "" }
         explainVisionGeminiModel = o["explainVisionGeminiModel"] as? String ?? explainVisionGeminiModel
         explainVisionOllamaModel = o["explainVisionOllamaModel"] as? String ?? explainVisionOllamaModel
         explainVisionZAIModel = o["explainVisionZAIModel"] as? String ?? explainVisionZAIModel

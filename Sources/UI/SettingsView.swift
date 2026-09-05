@@ -17,6 +17,10 @@ struct SettingsView: View {
             .onAppear { prefillKeyInputs() }
             .onDisappear { app.saveSettings() }
             .onChange(of: settingsSaveKeys) { _, _ in app.saveSettings() }
+            // settingsSaveKeys is a short-circuiting && chain whose first term is
+            // false at defaults, so it never observes anything past it — the 기본 모델
+            // needs its own trigger to persist without closing the window.
+            .onChange(of: app.zaiModel) { _, _ in app.saveSettings() }
             .onChange(of: app.voiceId) { _, newID in
                 if let v = app.voices.first(where: { $0.id == newID }) { app.voiceName = v.name }
                 app.saveSettings()
@@ -194,6 +198,12 @@ struct SettingsView: View {
                          hint: "OpenAI 호환 API 루트. 끝에 /chat/completions 가 붙습니다. 예) https://api.z.ai/api/coding/paas/v4")
             KeyField(label: "API 키", text: $zaiKeyInput,
                      hint: app.zaiKeyPresent ? "현재: 설정됨 (App Support)" : "현재: 없음 — 키를 넣으면 모델 목록에 Z.ai 모델이 함께 표시됩니다")
+            labeledField("기본 모델", placeholder: ZAINormalizer.fallbackModels.first ?? "",
+                         text: $app.zaiModel,
+                         hint: "모델 피커의 기본 선택값. 목록에서 고르지 않아도 이 모델을 사용합니다.")
+            if !app.zaiDefaultModelValid {
+                Text("⚠️ 연결된 목록에 없는 모델입니다").font(.caption).foregroundStyle(.orange)
+            }
             HStack {
                 Button("키 저장") { app.saveZAIKey(zaiKeyInput) }
                     .disabled(zaiKeyInput.trimmingCharacters(in: .whitespaces).isEmpty)
