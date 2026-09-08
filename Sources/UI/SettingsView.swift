@@ -192,7 +192,7 @@ struct SettingsView: View {
                 Text("등록된 서비스").font(.headline)
                 Spacer()
                 Button("서비스 추가", systemImage: "plus") {
-                    editingService = CustomEndpoint(name: "", baseURL: "", apiStyle: .openAICompatible)
+                    editingService = CustomEndpoint(name: "OpenAI", baseURL: CustomEndpoint.Provider.openAI.baseURL, apiStyle: .openAICompatible, provider: .openAI)
                 }
             }
             if app.endpoints.isEmpty {
@@ -204,6 +204,7 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                     VStack(alignment: .leading, spacing: 4) {
                         Text(endpoint.name).font(.headline)
+                        Text("\(endpoint.resolvedProvider.label) · \(endpoint.connectionLabel)").font(.caption).foregroundStyle(.secondary)
                         Text(endpoint.isEnabled ? (app.endpointStatus[endpoint.id.uuidString] ?? "확인 안 됨") : "비활성")
                             .font(.caption).foregroundStyle(.secondary)
                     }

@@ -1,0 +1,245 @@
+import Foundation
+import Combine
+import AppKit
+
+func connectionError(_ message: String) -> NSError {
+    NSError(domain: "ServiceConnection", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+}
+
+/// Owns an official app-server process. Tokens stay in Codex's own auth storage.
+/// A dedicated home avoids importing the user's project tools, MCP servers or API configuration.
+@MainActor
+final class CodexPlanRPC {
+    private let process = Process()
+    private let input = Pipe()
+    private let output = Pipe()
+    private var buffer = Data()
+    private var nextID = 0
+    private var pending: [Int: CheckedContinuation<[String: Any], Error>] = [:]
+    var notification: ((String, [String: Any]) -> Void)?
+    var disconnected: (() -> Void)?
+    private var closed = false
+
+    static var executable: URL? {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let paths = ["\(home)/.local/bin/codex", "/opt/homebrew/bin/codex", "/usr/local/bin/codex"]
+        return paths.first(where: { FileManager.default.isExecutableFile(atPath: $0) }).map { URL(fileURLWithPath: $0) }
+    }
+
+    init(executable suppliedExecutable: URL? = nil, home suppliedHome: URL? = nil) throws {
+        guard let executable = suppliedExecutable ?? Self.executable else { throw connectionError("Codex CLI가 필요합니다. 설치 안내를 확인하세요.") }
+        let home = suppliedHome ?? URL(fileURLWithPath: Secrets.appSupportDir).appendingPathComponent("codex-plan", isDirectory: true)
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        process.executableURL = executable
+        process.arguments = ["app-server", "--listen", "stdio://", "-c", "model_provider=\"openai\"",
+                             "-c", "features.shell_tool=false", "-c", "features.apply_patch_freeform=false",
+                             "-c", "features.code_mode=false", "-c", "web_search=\"disabled\""]
+        // Minimal environment: no inherited API credentials or provider overrides.
+        process.environment = ["HOME": FileManager.default.homeDirectoryForCurrentUser.path,
+                               "CODEX_HOME": home.path, "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+                               "TMPDIR": NSTemporaryDirectory()]
+        process.currentDirectoryURL = home
+        process.standardInput = input
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        output.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            Task { @MainActor in
+                guard let self else { return }
+                if data.isEmpty { self.stop(); return }
+                self.receive(data)
+            }
+        }
+        process.terminationHandler = { [weak self] _ in Task { @MainActor in self?.stop() } }
+        try process.run()
+    }
+
+    func initialize() async throws {
+        _ = try await request("initialize", ["clientInfo": ["name": "codebasic_tts", "version": "1.0"],
+                                             "capabilities": ["experimentalApi": false]])
+        try send(["method": "initialized", "params": [:]])
+    }
+
+    func request(_ method: String, _ params: [String: Any] = [:]) async throws -> [String: Any] {
+        guard !closed else { throw connectionError("연결이 종료되었습니다.") }
+        nextID += 1
+        let id = nextID
+        return try await withCheckedThrowingContinuation { continuation in
+            pending[id] = continuation
+            do { try send(["id": id, "method": method, "params": params]) }
+            catch { pending.removeValue(forKey: id)?.resume(throwing: error) }
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(30))
+                self?.pending.removeValue(forKey: id)?.resume(throwing: connectionError("연결 응답 시간이 초과되었습니다."))
+            }
+        }
+    }
+
+    private func send(_ object: [String: Any]) throws {
+        var data = try JSONSerialization.data(withJSONObject: object)
+        data.append(10)
+        try input.fileHandleForWriting.write(contentsOf: data)
+    }
+
+    private func receive(_ data: Data) {
+        buffer.append(data)
+        while let end = buffer.firstIndex(of: 10) {
+            let line = buffer.subdata(in: buffer.startIndex..<end)
+            buffer.removeSubrange(buffer.startIndex...end)
+            guard let object = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any] else { continue }
+            if let method = object["method"] as? String {
+                if let id = object["id"] {
+                    // This text-only integration never approves tool use or external actions.
+                    try? send(["id": id, "error": ["code": -32601, "message": "Tools are unavailable in this client"]])
+                } else { notification?(method, object["params"] as? [String: Any] ?? [:]) }
+            } else if let id = object["id"] as? Int, let continuation = pending.removeValue(forKey: id) {
+                if let error = object["error"] as? [String: Any] {
+                    continuation.resume(throwing: connectionError(error["message"] as? String ?? "연결 오류"))
+                } else { continuation.resume(returning: object["result"] as? [String: Any] ?? [:]) }
+            }
+        }
+    }
+
+    func requirePlan() async throws -> [String: Any] {
+        let result = try await request("account/read", ["refreshToken": false])
+        guard let account = result["account"] as? [String: Any], account["type"] as? String == "chatgpt" else {
+            throw connectionError("기존 플랜을 사용하려면 설정에서 ChatGPT로 로그인하세요.")
+        }
+        return account
+    }
+
+    func stop() {
+        guard !closed else { return }
+        closed = true
+        notification = nil
+        output.fileHandleForReading.readabilityHandler = nil
+        try? input.fileHandleForWriting.close()
+        if process.isRunning { process.terminate() }
+        let requests = pending.values
+        pending.removeAll()
+        for continuation in requests { continuation.resume(throwing: connectionError("연결이 종료되었습니다.")) }
+        disconnected?()
+        disconnected = nil
+    }
+}
+
+@MainActor
+final class CodexPlanLogin: ObservableObject {
+    @Published var status = "ChatGPT 구독으로 연결합니다."
+    @Published var busy = false
+    private var rpc: CodexPlanRPC?
+    private var timeout: Task<Void, Never>?
+    private var loginTask: Task<Void, Never>?
+
+    func login() {
+        cancel()
+        busy = true
+        status = "로그인 준비 중…"
+        loginTask = Task {
+            do {
+                try Task.checkCancellation()
+                let client = try CodexPlanRPC()
+                rpc = client
+                client.notification = { [weak self] method, params in
+                    guard method == "account/login/completed" else { return }
+                    self?.status = params["success"] as? Bool == true ? "로그인 완료 · 저장 및 연결 확인을 눌러 주세요." : "로그인 실패. 다시 시도하세요."
+                    self?.busy = false
+                    self?.timeout?.cancel()
+                    client.stop()
+                }
+                try await client.initialize()
+                try Task.checkCancellation()
+                let result = try await client.request("account/login/start", ["type": "chatgpt"])
+                try Task.checkCancellation()
+                guard let raw = result["authUrl"] as? String, let url = URL(string: raw),
+                      url.scheme == "https", let host = url.host,
+                      host == "auth.openai.com" || host == "auth0.openai.com" || host == "chatgpt.com" else {
+                    throw connectionError("공식 로그인 주소를 받지 못했습니다.")
+                }
+                guard NSWorkspace.shared.open(url) else { throw connectionError("로그인 브라우저를 열 수 없습니다.") }
+                status = "브라우저에서 ChatGPT 로그인을 완료하세요."
+                timeout = Task { [weak self] in
+                    do { try await Task.sleep(for: .seconds(180)) } catch { return }
+                    self?.cancel()
+                    self?.status = "로그인 시간이 초과되었습니다. 다시 시도하세요."
+                }
+            } catch {
+                guard !Task.isCancelled else { return }
+                status = error.localizedDescription; busy = false; rpc?.stop()
+            }
+        }
+    }
+
+    func cancel() { loginTask?.cancel(); loginTask = nil; timeout?.cancel(); timeout = nil; rpc?.stop(); rpc = nil; busy = false }
+}
+
+enum CodexPlan {
+    @MainActor static func models() async throws -> [String] {
+        let rpc = try CodexPlanRPC()
+        defer { rpc.stop() }
+        try await rpc.initialize()
+        _ = try await rpc.requirePlan()
+        var models: [String] = []
+        var cursor: String?
+        repeat {
+            var params: [String: Any] = ["limit": 100, "includeHidden": false]
+            if let cursor { params["cursor"] = cursor }
+            let result = try await rpc.request("model/list", params)
+            models += (result["data"] as? [[String: Any]] ?? []).compactMap { $0["model"] as? String }
+            cursor = result["nextCursor"] as? String
+        } while cursor != nil
+        return models
+    }
+
+    static func stream(prompt: String, model: String, images: [Data], reasoning: ReasoningLevel) -> AsyncThrowingStream<String, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task { @MainActor in
+                var rpc: CodexPlanRPC?
+                do {
+                    try Task.checkCancellation()
+                    let client = try CodexPlanRPC()
+                    rpc = client
+                    defer { client.stop() }
+                    try await client.initialize()
+                    _ = try await client.requirePlan()
+                    try Task.checkCancellation()
+                    let thread = try await client.request("thread/start", ["ephemeral": true, "model": model,
+                        "modelProvider": "openai", "sandbox": "read-only", "approvalPolicy": "never",
+                        "baseInstructions": "Return only the requested text. Do not use tools, access files, or perform actions.",
+                        "config": ["features.shell_tool": false, "features.apply_patch_freeform": false,
+                                   "features.code_mode": false, "web_search": "disabled"]])
+                    guard let info = thread["thread"] as? [String: Any], let id = info["id"] as? String else {
+                        throw connectionError("생성 세션을 시작하지 못했습니다.")
+                    }
+                    let (events, eventContinuation) = AsyncStream<(String, [String: Any])>.makeStream()
+                    client.notification = { eventContinuation.yield(($0, $1)) }
+                    client.disconnected = { eventContinuation.finish() }
+                    var input: [[String: Any]] = [["type": "text", "text": prompt, "text_elements": []]]
+                    input += images.map { ["type": "image", "url": "data:image/png;base64,\($0.base64EncodedString())"] }
+                    var params: [String: Any] = ["threadId": id, "input": input]
+                    if !reasoning.isProviderDefault { params["effort"] = reasoning.rawValue }
+                    _ = try await client.request("turn/start", params)
+                    let deadline = Task { @MainActor in
+                        do { try await Task.sleep(for: .seconds(180)) } catch { return }
+                        eventContinuation.finish()
+                    }
+                    defer { deadline.cancel() }
+                    for await (method, params) in events {
+                        try Task.checkCancellation()
+                        if method == "item/agentMessage/delta", let delta = params["delta"] as? String { continuation.yield(delta) }
+                        if method == "turn/completed" {
+                            let turn = params["turn"] as? [String: Any] ?? [:]
+                            guard turn["status"] as? String == "completed" else {
+                                let error = turn["error"] as? [String: Any]
+                                throw connectionError(error?["message"] as? String ?? "생성이 완료되지 않았습니다. API로 자동 전환하지 않습니다.")
+                            }
+                            continuation.finish(); return
+                        }
+                    }
+                    throw connectionError("생성 연결이 종료되었거나 시간이 초과되었습니다.")
+                } catch { rpc?.stop(); continuation.finish(throwing: error) }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+}

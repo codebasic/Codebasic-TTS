@@ -68,11 +68,36 @@ macOS용 TTS 앱: **텍스트를 선택하고 단축키 한 번으로 AI 음성 
 로컬 엔진은 레퍼런스 음성(수 초 길이 녹음)으로 **voice cloning**을 지원합니다.
 설정에서 레퍼런스 오디오/전사 텍스트를 지정하세요.
 
-**텍스트 생성(LLM)** — 코드 해설(⌃⌥⌘E)과 스크립트 다듬기에는 OpenAI 호환 API,
-Gemini, Ollama 등 **사용자가 직접 등록한 엔드포인트**를 사용합니다. 기본 제공
-엔드포인트는 없으며, 설정 → 텍스트 생성에서 베이스 URL·모델·API 키를 추가하면 됩니다.
-API 키는 macOS 키체인이 아닌 앱 전용 Application Support 디렉토리에 저장되고
-네트워크로 전송되지 않습니다(요청 대상 엔드포인트 제외).
+**텍스트 생성(LLM)** — 설정 → AI 서비스에서 OpenAI, Anthropic, Google, Ollama,
+OpenAI 호환 중 공급자를 선택합니다. 프리셋은 서버 주소를 채워 주며, 사용자 지정
+주소는 고급 연결 설정에서 편집할 수 있습니다.
+
+OpenAI의 **연결 방식**에서는 API 키 또는 기존 ChatGPT 플랜을 선택할 수 있습니다.
+기존 플랜은 공식 Codex CLI의 App Server를 사용합니다. CLI 설치 후 앱에서
+「ChatGPT로 로그인」을 누르고 브라우저 인증을 완료한 다음 「저장 및 연결 확인」으로
+모델을 조회하세요. 앱 전용 Codex 인증 저장소를 사용하므로 기존 CLI 로그인과 별도로
+한 번 로그인해야 합니다. 플랜 경로는 API 키를 사용하지 않으며 한도·인증 오류 시
+유료 API로 자동 전환하지 않습니다. 플랜 경로에는 온도 설정이 적용되지 않습니다.
+Google도 **API 키 / 기존 플랜**을 선택할 수 있습니다. 기존 플랜은 공식
+[Antigravity CLI](https://antigravity.google/docs/cli/install/)를 사용합니다.
+`~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin`의 `agy`를 찾습니다.
+**Google로 로그인…**으로 열린 터미널에서 로그인한 뒤 **저장 및 연결 확인**을 누르세요.
+`agy models`로 계정의 모델을 조회하며, 이전 Gemini `auto` 선택은 새 기본 모델로 전환됩니다.
+설정은 앱 전용 `antigravity-plan` 폴더에 격리하고 인증은 공식 CLI의 OS 키체인으로
+관리합니다. 키체인 계정은 Antigravity와 공유될 수 있으며 앱은 토큰을 읽거나 복사하지 않습니다.
+Gemini CLI의 기존 OAuth 파일은 사용하지 않습니다. API 키 환경을 전달하지 않고
+추가 AI 크레딧 사용(`useG1Credits`)도 끕니다. 모델의 파일·명령·웹·MCP 작업은 차단합니다.
+현재 공식 headless 스트림 입력이 텍스트 블록만 지원하므로 이 연결은 **텍스트 전용**입니다.
+이미지 요청은 명확한 오류를 표시하며 API로 자동 전환하지 않습니다. 응답 조각은 도착하는 즉시 표시되며, 마지막 완료 응답은 중복 표시하지 않습니다.
+Anthropic은 현재 API 키 연결만 제공합니다.
+
+연결 방식을 바꿔도 기존 API 키는 유지됩니다. API 키는 macOS 키체인이 아닌 앱 전용
+Application Support 디렉토리에 저장되며 요청 대상 공급자에게만 전달됩니다.
+ChatGPT 로그인 토큰은 공식 Codex가 앱 전용 `codex-plan` 디렉토리에서 관리합니다.
+
+연동 참고: [Codex App Server](https://developers.openai.com/codex/app-server),
+[Anthropic Messages API](https://platform.claude.com/docs/en/api/messages),
+[Anthropic Models API](https://platform.claude.com/docs/en/api/models/list).
 
 ## 빌드 (소스에서)
 

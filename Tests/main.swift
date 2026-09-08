@@ -62,4 +62,28 @@ eq("past right → pinned", CrawlLayout.clampOrigin(CGPoint(x: 450, y: 50), size
 eq("below origin → pinned", CrawlLayout.clampOrigin(CGPoint(x: -10, y: -10), size: panel, in: screen), CGPoint(x: 0, y: 0))
 eq("wider than screen → pinned to minX", CrawlLayout.clampOrigin(CGPoint(x: 30, y: 30), size: CGSize(width: 600, height: 100), in: screen), CGPoint(x: 0, y: 30))
 
+print("Service settings — migration and connection selection")
+let legacyJSON = #"{"id":"A1B2C3D4-0001-4A11-8001-ABCDEF000001","name":"Existing","baseURL":"https://generativelanguage.googleapis.com/v1beta","apiStyle":"gemini","isEnabled":true,"defaultModel":"test-model"}"#
+do {
+    let legacy = try JSONDecoder().decode(CustomEndpoint.self, from: Data(legacyJSON.utf8))
+    eq("legacy defaults to API", legacy.connectionMethod, .apiKey)
+    eq("legacy Gemini maps to Google", legacy.resolvedProvider, .google)
+    eq("legacy identity retained", legacy.id, CustomEndpoint.geminiSeedID)
+    var endpoint = CustomEndpoint(name: "OpenAI", baseURL: "https://api.openai.com/v1", apiStyle: .openAICompatible)
+    eq("existing OpenAI inferred", endpoint.resolvedProvider, .openAI)
+    endpoint.connection = .plan
+    endpoint.provider = .openAI
+    let data = try JSONEncoder().encode(endpoint)
+    let restored = try JSONDecoder().decode(CustomEndpoint.self, from: data)
+    eq("plan survives restart", restored.connectionMethod, .plan)
+    check("plan routing explicit", restored.usesPlan)
+    endpoint.connection = .apiKey
+    check("API selection disables plan", !endpoint.usesPlan)
+    endpoint.provider = nil
+    endpoint.baseURL = "https://api.openai.com.example.org/v1"
+    eq("lookalike host stays compatible", endpoint.resolvedProvider, .compatible)
+    eq("five provider presets", CustomEndpoint.Provider.allCases.count, 5)
+    eq("Anthropic uses native protocol", CustomEndpoint.Provider.anthropic.apiStyle, .anthropic)
+} catch { check("settings decode", false, error.localizedDescription) }
+
 if failures == 0 { print("\nAll tests passed.") } else { print("\n\(failures) test(s) FAILED."); exit(1) }

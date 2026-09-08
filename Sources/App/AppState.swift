@@ -190,9 +190,11 @@ final class AppState: ObservableObject {
     /// a standalone picker entry, since these names are provider-specific and an
     /// arbitrary OpenAI-호환 endpoint (내 vLLM 등) does not serve them.
     func preferredModels(_ e: CustomEndpoint) -> [String] {
+        if e.usesPlan { return [] }
         switch e.apiStyle {
+        case .anthropic: return []
         case .gemini: return GeminiNormalizer.models
-        case .openAICompatible: return ZAINormalizer.fallbackModels
+        case .openAICompatible: return e.resolvedProvider == .openAI ? ["gpt-4.1-mini", "gpt-4.1", "gpt-4o"] : ZAINormalizer.fallbackModels
         case .ollama: return []
         }
     }
@@ -211,7 +213,8 @@ final class AppState: ObservableObject {
     }
 
     func models(for endpoint: CustomEndpoint) -> [String] {
-        endpointModels[endpoint.id.uuidString] ?? []
+        guard let stored = self.endpoint(byID: endpoint.id.uuidString), stored.cacheIdentity == endpoint.cacheIdentity else { return [] }
+        return endpointModels[endpoint.id.uuidString] ?? []
     }
 
     func refreshAllModels() {
@@ -221,7 +224,7 @@ final class AppState: ObservableObject {
         for e in endpoints
         where e.isEnabled && (endpointModels[e.id.uuidString] ?? []).isEmpty {
             // Fetching a keyed endpoint without a key just errors — wait for the key.
-            if e.apiStyle == .gemini && endpointKey(e).isEmpty { continue }
+            if !e.usesPlan && (e.apiStyle == .gemini || e.apiStyle == .anthropic) && endpointKey(e).isEmpty { continue }
             refreshEndpointModels(e)
         }
     }
@@ -543,22 +546,8 @@ final class AppState: ObservableObject {
         // A role with no pick AND an endpoint with no 기본 모델 would post
         // `"model": ""` — refuse instead of letting the server 400.
         guard !model.isEmpty else { return nil }
-        switch e.apiStyle {
-        case .gemini:
-            guard let key = Secrets.endpointKey(e.id) else { return nil }
-            return GeminiNormalizer(baseURL: e.baseURL, apiKey: key, model: model,
-                                    instruction: instruction, temperature: scriptTemperature,
-                                    reasoningLevel: scriptReasoningLevel)
-        case .openAICompatible:
-            return ZAINormalizer(baseURL: e.baseURL, apiKey: endpointKey(e), model: model,
-                                 instruction: instruction, temperature: scriptTemperature,
-                                 reasoningLevel: scriptReasoningLevel)
-        case .ollama:
-            guard let url = URL(string: e.baseURL) else { return nil }
-            return TextNormalizer(baseURL: url, model: model,
-                                  instruction: instruction, temperature: scriptTemperature,
-                                  reasoningLevel: scriptReasoningLevel)
-        }
+        return EndpointGenerator(endpoint: e, apiKey: endpointKey(e), model: model,
+                                 instruction: instruction, temperature: scriptTemperature, reasoningLevel: scriptReasoningLevel)
     }
 
     /// few-shot 용어 발음 사전 섹션. term 순(알파벳/가나다)으로 정렬해 결정적
@@ -601,9 +590,12 @@ final class AppState: ObservableObject {
 
     /// Register a new endpoint; its key (if any) goes to its own <id>.key file.
     func addEndpoint(name: String, baseURL: String, style: CustomEndpoint.APIStyle,
-                     apiKey: String, defaultModel: String = "", isEnabled: Bool = true) {
+                     apiKey: String, defaultModel: String = "", isEnabled: Bool = true,
+                     provider: CustomEndpoint.Provider? = nil, connection: CustomEndpoint.Connection? = nil) {
         var e = CustomEndpoint(name: name, baseURL: baseURL, apiStyle: style)
         e.isEnabled = isEnabled
+        e.provider = provider
+        e.connection = connection
         e.name = e.name.isEmpty ? style.label : e.name
         let k = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         if !k.isEmpty { Secrets.writeEndpointKey(e.id, k) }
@@ -620,6 +612,21 @@ final class AppState: ObservableObject {
         }
         saveSettings()
         refreshEndpointModels(e)
+    }
+
+    func updateEndpoint(_ endpoint: CustomEndpoint) {
+        guard let index = endpoints.firstIndex(where: { $0.id == endpoint.id }) else { return }
+        let old = endpoints[index]
+        if old.connectionMethod != endpoint.connectionMethod || old.apiStyle != endpoint.apiStyle || old.baseURL != endpoint.baseURL {
+            let id = endpoint.id.uuidString
+            endpointModels[id] = nil
+            endpointStatus[id] = nil
+            explainRoleModels[id] = nil
+            scriptRoleModels[id] = nil
+            visionRoleModels[id] = nil
+        }
+        endpoints[index] = endpoint
+        saveSettings()
     }
 
     func deleteEndpoint(_ id: UUID) {
@@ -658,7 +665,7 @@ final class AppState: ObservableObject {
     func refreshEndpointModels(_ endpoint: CustomEndpoint) {
         let e = endpoint
         let id = e.id.uuidString
-        if e.apiStyle == .gemini && endpointKey(e).isEmpty {
+        if !e.usesPlan && (e.apiStyle == .gemini || e.apiStyle == .anthropic) && endpointKey(e).isEmpty {
             endpointStatus[id] = "키 없음"
             return
         }
@@ -671,7 +678,16 @@ final class AppState: ObservableObject {
         Task { [weak self] in
             do {
                 let ms: [String]
-                switch e.apiStyle {
+                if e.usesPlan {
+                    if e.resolvedProvider == .google {
+                        ms = try await AntigravityPlan.models()
+                    } else {
+                        guard e.resolvedProvider == .openAI else { throw connectionError("이 공급자의 플랜 연결은 지원하지 않습니다.") }
+                        ms = try await CodexPlan.models()
+                    }
+                } else { switch e.apiStyle {
+                case .anthropic:
+                    ms = try await AnthropicAPI.models(baseURL: base, key: key)
                 case .openAICompatible:
                     ms = try await ZAI.models(baseURL: base, apiKey: key)
                 case .gemini:
@@ -679,10 +695,11 @@ final class AppState: ObservableObject {
                 case .ollama:
                     ms = try await Ollama.models(baseURL: URL(string: base) ?? URL(string: "http://localhost:11434")!)
                 }
-                guard let self else { return }
+                }
+                guard let self, self.endpoints.contains(where: { $0 == e }) else { return }
                 self.endpointModels[id] = ms
                 // 기본 모델 미지정: 목록에서 채운다 (선호 모델이 목록에 있으면 그것, 없으면 첫 항목).
-                if let idx = self.endpoints.firstIndex(where: { $0.id == e.id }), self.endpoints[idx].defaultModel.isEmpty {
+                if let idx = self.endpoints.firstIndex(where: { $0.id == e.id }), (self.endpoints[idx].defaultModel.isEmpty || (e.usesPlan && e.resolvedProvider == .google && self.endpoints[idx].defaultModel == "auto")) {
                     let fallback = self.preferredModels(e).first(where: { ms.contains($0) }) ?? ms.first ?? ""
                     if !fallback.isEmpty {
                         self.endpoints[idx].defaultModel = fallback
@@ -696,7 +713,8 @@ final class AppState: ObservableObject {
                 }
                 self.endpointStatus[id] = status
             } catch {
-                self?.endpointStatus[id] = "연결 실패: \(error.localizedDescription)"
+                guard let self, self.endpoints.contains(where: { $0 == e }) else { return }
+                self.endpointStatus[id] = "연결 실패: \(error.localizedDescription)"
             }
         }
     }
@@ -707,22 +725,8 @@ final class AppState: ObservableObject {
         guard let e = activeEndpoint(byID: explainEndpointID) else { return nil }
         let model = roleModel(explainRoleModels, e)
         guard !model.isEmpty else { return nil }   // never post `"model": ""`
-        switch e.apiStyle {
-        case .gemini:
-            guard let key = Secrets.endpointKey(e.id) else { return nil }
-            return GeminiExplainer(baseURL: e.baseURL, apiKey: key, model: model,
-                                   instruction: explainPrompt, temperature: explainTemperature,
-                                   reasoningLevel: explainReasoningLevel)
-        case .openAICompatible:
-            return ZAIExplainer(baseURL: e.baseURL, apiKey: endpointKey(e), model: model,
-                                instruction: explainPrompt, temperature: explainTemperature,
-                                reasoningLevel: explainReasoningLevel)
-        case .ollama:
-            guard let url = URL(string: e.baseURL) else { return nil }
-            return OllamaExplainer(baseURL: url, model: model,
-                                   instruction: explainPrompt, temperature: explainTemperature,
-                                   reasoningLevel: explainReasoningLevel)
-        }
+        return EndpointGenerator(endpoint: e, apiKey: endpointKey(e), model: model,
+                                 instruction: explainPrompt, temperature: explainTemperature, reasoningLevel: explainReasoningLevel)
     }
 
     /// Single-stage image explain: the 해설 model (== vision model) reads the
@@ -734,26 +738,9 @@ final class AppState: ObservableObject {
         let prompt = CodeExplanation.prompt(explainPrompt, code, hint: explainHint)
         let model = roleModel(explainRoleModels, e)
         guard !model.isEmpty else { return AsyncThrowingStream { $0.finish() } }
-        switch e.apiStyle {
-        case .gemini:
-            guard let key = Secrets.endpointKey(e.id) else {
-                return AsyncThrowingStream { $0.finish() }
-            }
-            return LLM.geminiStream(baseURL: e.baseURL, apiKey: key, model: model,
-                                    prompt: prompt, images: images, temperature: explainTemperature,
-                                    reasoningLevel: explainReasoningLevel)
-        case .openAICompatible:
-            return LLM.openAIChatStream(baseURL: e.baseURL, model: model, apiKey: endpointKey(e),
-                                        prompt: prompt, images: images, temperature: explainTemperature,
-                                        reasoningLevel: explainReasoningLevel)
-        case .ollama:
-            guard let url = URL(string: e.baseURL) else {
-                return AsyncThrowingStream { $0.finish() }
-            }
-            return LLM.ollamaChatStream(baseURL: url, model: model,
-                                        prompt: prompt, images: images, temperature: explainTemperature,
-                                        reasoningLevel: explainReasoningLevel)
-        }
+        return EndpointGenerator(endpoint: e, apiKey: endpointKey(e), model: model,
+                                 instruction: explainPrompt, temperature: explainTemperature, reasoningLevel: explainReasoningLevel)
+            .generate(prompt, images: images)
     }
 
     /// Stable digest of the attached screenshots, for caching the transcription.
@@ -777,7 +764,7 @@ final class AppState: ObservableObject {
             return nil
         }
         let tkey = NormalizationCache.key(text: imagesDigest(imgs),
-                                          provider: "vision:" + visionProv.id.uuidString,
+                                          provider: "vision:" + visionProv.cacheIdentity,
                                           model: visionModel,
                                           prompt: "transcribe" + visionReasoningLevel.cacheSuffix)
         if let cached = normCache.script(forKey: tkey) { return cached }
@@ -800,26 +787,9 @@ final class AppState: ObservableObject {
 
         해설·설명 문장은 쓰지 말고 위 세 섹션 형식으로만 출력합니다.
         """
-        let stream: AsyncThrowingStream<String, Error>
-        switch visionProv.apiStyle {
-        case .gemini:
-            guard let key = Secrets.endpointKey(visionProv.id) else {
-                statusText = "\(visionProv.name) 키 미설정"; return nil
-            }
-            stream = LLM.geminiStream(baseURL: visionProv.baseURL, apiKey: key, model: visionModel,
-                                      prompt: prompt, images: imgs, temperature: 0,
-                                      reasoningLevel: visionReasoningLevel)
-        case .openAICompatible:
-            stream = LLM.openAIChatStream(baseURL: visionProv.baseURL, model: visionModel,
-                                          apiKey: endpointKey(visionProv),
-                                          prompt: prompt, images: imgs, temperature: 0,
-                                          reasoningLevel: visionReasoningLevel)
-        case .ollama:
-            let url = URL(string: visionProv.baseURL) ?? URL(string: "http://localhost:11434")!
-            stream = LLM.ollamaChatStream(baseURL: url, model: visionModel,
-                                          prompt: prompt, images: imgs, temperature: 0,
-                                          reasoningLevel: visionReasoningLevel)
-        }
+        let stream = EndpointGenerator(endpoint: visionProv, apiKey: endpointKey(visionProv), model: visionModel,
+                                       instruction: "", temperature: 0, reasoningLevel: visionReasoningLevel)
+            .generate(prompt, images: imgs)
         var acc = ""
         do {
             for try await delta in stream { try Task.checkCancellation(); acc += delta }
@@ -894,7 +864,7 @@ final class AppState: ObservableObject {
         guard !code.isEmpty else { statusText = "해설 생성 실패 (빈 입력)"; return nil }
 
         // Cache key: single-stage feeds the raw image, so fold its digest in.
-        let provider = "explain:" + ep.id.uuidString
+        let provider = "explain:" + ep.cacheIdentity
         let keyText = singleStage ? code + imagesDigest(imgs) : code
         let nk = NormalizationCache.key(text: keyText, provider: provider, model: explainModel,
                                         prompt: explainPrompt + "\u{1F}" + explainHint
@@ -943,7 +913,7 @@ final class AppState: ObservableObject {
             statusText = "해설 생성 불가 — 엔드포인트·모델·API 키 중 하나가 미설정입니다 (설정 확인)"
             return nil
         }
-        let provider = "explain-cont:" + ep.id.uuidString
+        let provider = "explain-cont:" + ep.cacheIdentity
         let keyText = lastExplainedCode + "\u{1F}" + current
         let nk = NormalizationCache.key(text: keyText, provider: provider, model: explainModel,
                                         prompt: "continue\u{1F}" + explainHint
@@ -1088,7 +1058,7 @@ final class AppState: ObservableObject {
         let instruction = scriptInstruction()
         guard normalizeEnabled, !src.isEmpty,
               let norm = makeNormalizer(instruction: instruction) else { return text }
-        let nk = NormalizationCache.key(text: src, provider: scriptEndpointID,
+        let nk = NormalizationCache.key(text: src, provider: endpoint(byID: scriptEndpointID)?.cacheIdentity ?? scriptEndpointID,
                                         model: scriptModel,
                                         prompt: instruction + scriptReasoningLevel.cacheSuffix)
         if let cached = normCache.script(forKey: nk) { return cached }
@@ -1156,7 +1126,7 @@ final class AppState: ObservableObject {
             scriptText = src; markScriptFresh(); return src
         }
 
-        let provider = scriptEndpointID
+        let provider = endpoint(byID: scriptEndpointID)?.cacheIdentity ?? scriptEndpointID
         let model = scriptModel
         // Normalize the WHOLE 대본 in one call so the model has full context —
         // per-paragraph calls applied instructions unevenly (the hint landed on

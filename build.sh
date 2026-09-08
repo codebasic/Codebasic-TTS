@@ -118,7 +118,12 @@ case "${1:-install}" in
     echo "==> Compiling + running unit tests"
     mkdir -p "$BUILD_DIR"
     swiftc -O "$HERE/Sources/Core/TextSplitter.swift" "$HERE/Sources/Core/CrawlLayout.swift" \
-      "$HERE/Tests/main.swift" -o "$BUILD_DIR/tests" && "$BUILD_DIR/tests"
+      "$HERE/Sources/App/Endpoints.swift" "$HERE/Tests/main.swift" -o "$BUILD_DIR/tests"
+    "$BUILD_DIR/tests"
+    swiftc -O "$HERE/Sources/App/CodexPlan.swift" "$HERE/Sources/App/AntigravityPlan.swift" "$HERE/Sources/App/Secrets.swift" \
+      "$HERE/Sources/TTS/TextNormalizer.swift" "$HERE/Tests/ConnectionTests.swift" \
+      -framework AppKit -o "$BUILD_DIR/connection-tests"
+    "$BUILD_DIR/connection-tests" "$HERE/Tests/Fixtures/fake-codex.py"
     ;;
   clean) rm -rf "$BUILD_DIR"; echo "cleaned" ;;
   install|"") build; install_and_register ;;

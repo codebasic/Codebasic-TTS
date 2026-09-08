@@ -149,7 +149,7 @@ enum LLM {
     static func openAIChatStream(baseURL: String, model: String, apiKey: String,
                                  prompt: String, images: [Data] = [],
                                  temperature: Double = 0.2,
-                                 reasoningLevel: ReasoningLevel = .medium) -> AsyncThrowingStream<String, Error> {
+                                 reasoningLevel: ReasoningLevel = .medium, omitTemperature: Bool = false) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             let work = Task {
                 do {
@@ -181,8 +181,8 @@ enum LLM {
                         "model": model,
                         "messages": [["role": "user", "content": content]],
                         "stream": true,
-                        "temperature": temperature,
                     ]
+                    if !omitTemperature { payload["temperature"] = temperature }
                     if model.lowercased().contains("glm") {
                         if let on = reasoningLevel.glmThinkingEnabled {
                             payload["thinking"] = ["type": on ? "enabled" : "disabled"]
