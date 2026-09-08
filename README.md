@@ -12,6 +12,9 @@
 
 macOS용 TTS 앱: **텍스트를 선택하고 단축키 한 번으로 AI 음성 읽기 + LLM 코드 해설**까지.
 
+> 💖 **Codebasic TTS는 무료·오픈소스입니다.** 앱이 유용하다면 후원으로 개발을 응원해 주세요
+> → [**GitHub Sponsors로 후원하기**](https://github.com/sponsors/codebasic) (금액·주기 자유)
+
 - 아무 앱에서 텍스트 선택 → **⌃⌥⌘R** (또는 우클릭 → Services → "Codebasic TTS") → 곧바로 음성 재생
 - 코드 선택 → **⌃⌥⌘E** → 연결된 LLM이 코드를 해설하고, 그 해설을 음성으로 읽어줌
 - ElevenLabs(클라우드)와 로컬 Qwen3-TTS(MLX, 음성 클론) 중 선택해서 사용
