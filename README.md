@@ -24,7 +24,7 @@ macOS용 TTS 앱: **텍스트를 선택하고 단축키 한 번으로 AI 음성 
 | | |
 |---|---|
 | 플랫폼 | macOS 13.0+ (Apple Silicon 최적화, Intel 미검증) |
-| 요구사항 | 없음 — Xcode/Python 사전 설치 불필요 (릴리스 앱 기준) |
+| 요구사항 | 릴리스 앱은 Xcode 불필요. 기존 플랜 연결은 Codex CLI 또는 Antigravity CLI, 로컬 음성은 Qwen3-TTS 서버 필요 |
 | 라이선스 | MIT |
 | 다운로드 | [Releases](../../releases/latest) 에서 `Codebasic-TTS.app.zip` |
 
@@ -37,12 +37,11 @@ macOS용 TTS 앱: **텍스트를 선택하고 단축키 한 번으로 AI 음성 
 3. 첫 실행: **우클릭 → "열기"** (개발자 서명이 없어 Gatekeeper 경고가 뜹니다 —
    브릿지 경고 없이 열리면 재부팅 후에도 다시 묻지 않습니다. 자세한 설명은 아래
    [보안 경고](#보안-경고-gatekeeper) 참고)
-4. 메뉴 막대의 🔊 아이콘 → **설정**에서 사용할 엔진과 API 키 입력:
-   - **ElevenLabs**: [elevenlabs.io](https://elevenlabs.io) 에서 발급한 API 키
-     (무료 티어로도 충분히 써볼 수 있습니다)
-   - **로컬 Qwen3-TTS**(선택): "로컬 엔진 설정" 버튼 — 첫 실행 시 Apple Silicon에
-     Qwen3-TTS(1.7B, 6bit 양자화) 모델을 내려받고 Python 가상환경을 자동 구성합니다.
-     인터넷 연결과 수 GB 디스크 여유가 필요하며, 이후에는 완전 오프라인 동작
+4. 관리 창의 **설정 → 음성**에서 엔진 연결:
+   - **ElevenLabs**: [elevenlabs.io](https://elevenlabs.io)에서 발급한 API 키를 입력하고
+     **저장 및 연결 확인** → 보이스와 합성 모델 선택 → **미리 듣기**
+   - **로컬 Qwen3-TTS**(선택): [로컬 서버](#로컬-tts-사이드카-고급)를 실행한 뒤
+     서버 주소를 입력하고 **연결 확인**. 서버에 등록된 참조 음성으로 재생합니다.
 5. (전역 단축키를 쓸 경우) **시스템 설정 → 개인정보 보호 및 보안 → 손쉬운 사용**에서
    `Codebasic TTS` 허용 — 앱이 이 화면을 자동으로 열어줍니다
 6. 텍스트 선택 → **⌃⌥⌘R** → 재생 🎧
@@ -58,42 +57,104 @@ macOS용 TTS 앱: **텍스트를 선택하고 단축키 한 번으로 AI 음성 
 | 일시정지 / 정지 | 재생 HUD 또는 메뉴 막대 아이콘 메뉴 |
 | 스크립트 편집 · 해설 보기 | 메뉴 막대 아이콘 클릭 → 관리 창 |
 
-**음성 엔진**
+## 설정
+
+관리 창의 **설정**을 열고 왼쪽에서 항목을 선택합니다.
+
+| 항목 | 설정 내용 |
+|---|---|
+| **음성** | 합성 엔진 연결, 보이스·모델 선택, 미리 듣기, 고급 음성 설정 |
+| **AI 서비스** | 해설·대본 생성에 사용할 공급자, 연결 방식, 기본 모델 |
+| **대본·발음** | 대본 다듬기, 발음 사전 |
+| **재생·자막** | 재생 자막, 음성 캐시, 긴 대본의 합성 분할 기준 |
+| **단축키** | 선택 텍스트 읽기·해설 단축키 안내, 손쉬운 사용 권한 확인 |
+
+일반 설정은 자동 저장됩니다. API 키 입력과 AI 서비스 추가·편집은
+**저장 및 연결 확인**을 눌러 반영합니다. 서비스 편집 중 **취소**하면 저장 전 변경은
+반영되지 않으며, 삭제할 때는 별도 확인을 거칩니다.
+
+### 음성 연결과 미리 듣기
 
 | 엔진 | 특징 | 준비물 |
 |---|---|---|
-| ElevenLabs | 고품질 클라우드 합성, 스트리밍 | API 키 |
-| 로컬 Qwen3-TTS (MLX) | 오프라인, 내 목소리 클론 재생, 무료 | Apple Silicon, 최초 1회 모델 다운로드 |
+| ElevenLabs | 클라우드 음성 합성, 스트리밍 | API 키 |
+| 로컬 Qwen3-TTS (MLX) | 오프라인 합성, 음성 클론 | Apple Silicon, 로컬 서버·모델 |
 
-로컬 엔진은 레퍼런스 음성(수 초 길이 녹음)으로 **voice cloning**을 지원합니다.
-설정에서 레퍼런스 오디오/전사 텍스트를 지정하세요.
+ElevenLabs는 연결 확인 후 **보이스**와 **합성 모델**을 선택합니다. 저장된 API 키는
+**변경**으로 수정할 수 있으며, 안정성·유사도·스타일은 **고급 음성 설정**에 있습니다.
+로컬 엔진의 참조 오디오와 전사 텍스트는 [사이드카 설정](#로컬-tts-사이드카-고급)에서 지정합니다.
 
-**텍스트 생성(LLM)** — 설정 → AI 서비스에서 OpenAI, Anthropic, Google, Ollama,
-OpenAI 호환 중 공급자를 선택합니다. 프리셋은 서버 주소를 채워 주며, 사용자 지정
-주소는 고급 연결 설정에서 편집할 수 있습니다.
+**미리 듣기**에 최대 300자의 문장을 입력해 현재 음성을 확인하세요.
+미리 듣기는 원문과 히스토리를 변경하지 않으며, ElevenLabs 사용 시 API 사용량이 발생합니다.
 
-OpenAI의 **연결 방식**에서는 API 키 또는 기존 ChatGPT 플랜을 선택할 수 있습니다.
-기존 플랜은 공식 Codex CLI의 App Server를 사용합니다. CLI 설치 후 앱에서
-「ChatGPT로 로그인」을 누르고 브라우저 인증을 완료한 다음 「저장 및 연결 확인」으로
-모델을 조회하세요. 앱 전용 Codex 인증 저장소를 사용하므로 기존 CLI 로그인과 별도로
-한 번 로그인해야 합니다. 플랜 경로는 API 키를 사용하지 않으며 한도·인증 오류 시
-유료 API로 자동 전환하지 않습니다. 플랜 경로에는 온도 설정이 적용되지 않습니다.
-Google도 **API 키 / 기존 플랜**을 선택할 수 있습니다. 기존 플랜은 공식
-[Antigravity CLI](https://antigravity.google/docs/cli/install/)를 사용합니다.
-`~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin`의 `agy`를 찾습니다.
-**Google로 로그인…**으로 열린 터미널에서 로그인한 뒤 **저장 및 연결 확인**을 누르세요.
-`agy models`로 계정의 모델을 조회하며, 이전 Gemini `auto` 선택은 새 기본 모델로 전환됩니다.
-설정은 앱 전용 `antigravity-plan` 폴더에 격리하고 인증은 공식 CLI의 OS 키체인으로
-관리합니다. 키체인 계정은 Antigravity와 공유될 수 있으며 앱은 토큰을 읽거나 복사하지 않습니다.
-Gemini CLI의 기존 OAuth 파일은 사용하지 않습니다. API 키 환경을 전달하지 않고
-추가 AI 크레딧 사용(`useG1Credits`)도 끕니다. 모델의 파일·명령·웹·MCP 작업은 차단합니다.
-현재 공식 headless 스트림 입력이 텍스트 블록만 지원하므로 이 연결은 **텍스트 전용**입니다.
-이미지 요청은 명확한 오류를 표시하며 API로 자동 전환하지 않습니다. 응답 조각은 도착하는 즉시 표시되며, 마지막 완료 응답은 중복 표시하지 않습니다.
-Anthropic은 현재 API 키 연결만 제공합니다.
+### AI 서비스 등록
 
-연결 방식을 바꿔도 기존 API 키는 유지됩니다. API 키는 macOS 키체인이 아닌 앱 전용
-Application Support 디렉토리에 저장되며 요청 대상 공급자에게만 전달됩니다.
-ChatGPT 로그인 토큰은 공식 Codex가 앱 전용 `codex-plan` 디렉토리에서 관리합니다.
+1. **설정 → AI 서비스 → 서비스 추가**에서 공급자와 이름을 선택합니다.
+2. API 키를 입력하거나, 지원되는 공급자는 **연결 방식 → 기존 플랜**을 선택합니다.
+3. **저장 및 연결 확인**으로 서비스를 저장하고 모델을 조회합니다.
+4. 필요하면 **조회한 모델에서 선택**으로 기본 모델을 지정하고 다시 저장합니다.
+   실제 사용할 모델은 TTS·해설 화면에서도 선택할 수 있습니다.
+
+| 공급자 프리셋 | 연결 방식 | 준비물 |
+|---|---|---|
+| OpenAI | API 키 / 기존 플랜 | OpenAI API 키 또는 Codex CLI와 사용 가능한 ChatGPT 계정 |
+| Anthropic | API 키 | Anthropic API 키 |
+| Google | API 키 / 기존 플랜 | Google API 키 또는 Antigravity CLI와 사용 가능한 Google 계정 |
+| Ollama | 로컬 서버 | 실행 중인 Ollama 서버 주소, API 키는 선택 |
+| OpenAI 호환 | 호환 API | 서버 주소와 해당 서비스의 인증 정보 |
+
+프리셋은 기본 서버 주소를 채워 줍니다. OpenAI·Anthropic·Google의 API 주소는
+**고급 연결 설정**에서, Ollama·OpenAI 호환 주소는 연결 정보에서 바로 편집합니다.
+등록한 서비스는 **편집**에서 변경하거나 **이 서비스 사용**을 꺼 비활성화할 수 있습니다.
+연결 방식을 바꿔도 저장된 API 키는 유지됩니다.
+
+### 기존 플랜 연결
+
+**OpenAI / ChatGPT**
+
+1. [Codex CLI](https://developers.openai.com/codex/cli)를 설치합니다.
+2. OpenAI 서비스의 **기존 플랜 → ChatGPT로 로그인**을 누르고 브라우저 인증을 완료합니다.
+3. **저장 및 연결 확인**을 눌러 모델을 조회합니다.
+
+공식 Codex App Server를 사용하며, 앱 전용 인증 저장소를 쓰므로 기존 CLI 로그인과
+별도로 한 번 로그인해야 합니다.
+
+**Google / Antigravity**
+
+1. [Antigravity CLI](https://antigravity.google/docs/cli/install/)를 설치합니다.
+   앱은 `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin`의 `agy`를 찾습니다.
+2. Google 서비스에서 **기존 플랜**을 선택하면 기존 로그인 상태를 확인합니다.
+   연결이 필요하면 **Google 계정 연결**을 누르고 열린 터미널에서 로그인합니다.
+3. 로그인 후 설정 화면으로 돌아오면 상태와 모델 목록이 자동 갱신됩니다.
+   **연결 다시 확인**으로 재확인하거나, 확인 중에는 **확인 중지**를 누를 수 있습니다.
+4. 연결 완료 후 로그인 터미널은 닫아도 됩니다. **저장 및 연결 확인**으로 서비스를 저장합니다.
+
+Google 플랜 연결은 Gemini CLI가 아닌 **Antigravity CLI**를 사용합니다.
+응답은 생성되는 대로 스트리밍 표시됩니다. 두 공급자의 플랜 연결 모두 구독 한도를 사용하며
+인증·한도 오류가 나도 API로 자동 전환하지 않습니다. Google의 추가 AI 크레딧 사용도
+비활성화합니다. 플랜 연결에는 온도 설정이 적용되지 않습니다.
+
+### 이미지와 모델 선택
+
+해설 화면에서는 **해설 모델**과 **비전 모델**을 각각 선택할 수 있습니다.
+
+- **OpenAI 기존 플랜**: 이미지 입력을 지원합니다. 이미지 처리가 가능한 모델을 선택하세요.
+- **Google 기존 플랜**: 현재 Antigravity CLI의 자동화 입력은 **텍스트 전용**이므로
+  이미지를 처리할 수 없습니다. 이미지 요청은 오류를 표시하며 API로 자동 전환하지 않습니다.
+- **API 연결**: 해당 공급자·모델이 이미지 입력을 지원해야 합니다.
+
+예를 들어 해설 모델은 Google 플랜으로, 비전 모델은 OpenAI 플랜 또는 이미지 지원 API로
+지정해 사용할 수 있습니다.
+
+### 인증 정보 저장
+
+API 키는 macOS 키체인이 아닌 앱 전용 Application Support 디렉토리에 저장되며
+요청 대상 공급자에게만 전달됩니다. ChatGPT 로그인 정보는 공식 Codex가 앱 전용
+`codex-plan` 디렉토리에서 관리합니다.
+
+Google 연결 설정은 앱 전용 `antigravity-plan` 디렉토리에 저장하고 인증은 공식 CLI의
+OS 키체인으로 관리합니다. 키체인 계정은 Antigravity와 공유될 수 있으며 앱은 토큰을
+읽거나 복사하지 않습니다. 기존 Gemini CLI의 OAuth 파일은 사용하지 않습니다.
 
 연동 참고: [Codex App Server](https://developers.openai.com/codex/app-server),
 [Anthropic Messages API](https://platform.claude.com/docs/en/api/messages),
@@ -110,7 +171,7 @@ cd Codebasic-TTS
 ./build.sh          # 빌드 → ~/Applications 설치 → Services 등록 → 실행
 ./build.sh build    # ./build 에만 빌드 (설치·등록 안 함)
 ./build.sh dev      # 빌드 후 이 터미널에서 포그라운드 실행 (로그 직접 출력)
-./build.sh test     # 단위 테스트 (TextSplitter, 자막 정렬)
+./build.sh test     # 테스트 (텍스트 분할, 자막 정렬, AI 연결·스트리밍)
 ./build.sh logs     # 앱 통합 로그 스트리밍
 ./build.sh clean    # ./build 삭제
 ```
@@ -224,8 +285,8 @@ Codebasic-TTS/
 │   ├── Service/ServiceProvider.swift  # NSServices 핸들러 (read/explain)
 │   ├── Core/                       # 문장 분할, 캐시, 큐 재생, 원문 정규화
 │   ├── TTS/                        # TTSBackend 프로토콜 + ElevenLabs/로컬 Qwen3 백엔드
-│   ├── UI/                         # 관리 창, 설정, 스크립트 편집기, 플레이어 오버레이
-│   └── Tests/main.swift            # 단위 테스트
+│   └── UI/                         # 관리 창, 설정, 스크립트 편집기, 플레이어 오버레이
+├── Tests/                          # 단위 테스트, AI 연결·스트리밍 테스트와 CLI 픽스처
 └── Sidecar/                        # 로컬 Qwen3-TTS(MLX) FastAPI 사이드카
 ```
 
