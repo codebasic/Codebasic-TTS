@@ -201,6 +201,17 @@ Codebasic-TTS/
 └── Sidecar/                        # 로컬 Qwen3-TTS(MLX) FastAPI 사이드카
 ```
 
+## 후원 💖
+
+Codebasic TTS는 무료·오픈소스(MIT)로, 꾸준한 유지보수와 기능 개발로 계속 발전합니다.
+앱이 유용하다면 후원으로 개발을 응원해 주세요 — 후원 금액·주기는 자유입니다.
+
+<p align="center">
+  <a href="https://github.com/sponsors/codebasic">
+    <img alt="GitHub Sponsors로 후원하기" src="https://img.shields.io/badge/%E2%9D%A4%20GitHub%20Sponsors%EB%A1%9C%20%ED%9B%84%EC%9B%90%ED%95%98%EA%B8%B0-ea4aaa?style=for-the-badge&logo=githubsponsors&logoColor=white">
+  </a>
+</p>
+
 ## 라이선스
 
 [MIT](LICENSE) © Codebasic
