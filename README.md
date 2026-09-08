@@ -1,7 +1,7 @@
 # Codebasic TTS
 
 <p align="center">
-  <a href="https://github.com/sponsors/lseongjoo">
+  <a href="https://github.com/sponsors/codebasic">
     <img alt="Sponsor" src="https://img.shields.io/badge/Sponsor-%E2%9D%A4-ea4aaa?logo=githubsponsors&logoColor=white" valign="middle">
   </a>
   <a href="https://github.com/codebasic/Codebasic-TTS/releases/latest">
