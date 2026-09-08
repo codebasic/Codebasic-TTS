@@ -210,6 +210,10 @@ final class AppState: ObservableObject {
         return out
     }
 
+    func models(for endpoint: CustomEndpoint) -> [String] {
+        endpointModels[endpoint.id.uuidString] ?? []
+    }
+
     func refreshAllModels() {
         for e in endpoints where e.isEnabled { refreshEndpointModels(e) }
     }
@@ -597,15 +601,16 @@ final class AppState: ObservableObject {
 
     /// Register a new endpoint; its key (if any) goes to its own <id>.key file.
     func addEndpoint(name: String, baseURL: String, style: CustomEndpoint.APIStyle,
-                     apiKey: String, defaultModel: String = "") {
+                     apiKey: String, defaultModel: String = "", isEnabled: Bool = true) {
         var e = CustomEndpoint(name: name, baseURL: baseURL, apiStyle: style)
+        e.isEnabled = isEnabled
         e.name = e.name.isEmpty ? style.label : e.name
         let k = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         if !k.isEmpty { Secrets.writeEndpointKey(e.id, k) }
         e.defaultModel = defaultModel.trimmingCharacters(in: .whitespacesAndNewlines)
         endpoints.append(e)
         // First endpoint ever → point the roles at it so a fresh setup works.
-        if (endpoints.filter { $0.isEnabled }.count == 1)
+        if e.isEnabled && (endpoints.filter { $0.isEnabled }.count == 1)
             && !endpoints.contains(where: { $0.id.uuidString == explainEndpointID && $0.isEnabled }) {
             explainEndpointID = e.id.uuidString
             if !visionOverridden { visionEndpointID = e.id.uuidString }
