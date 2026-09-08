@@ -1,5 +1,15 @@
 # Codebasic TTS
 
+<p align="center">
+  <a href="https://github.com/sponsors/lseongjoo">
+    <img alt="Sponsor" src="https://img.shields.io/badge/Sponsor-%E2%9D%A4-ea4aaa?logo=githubsponsors&logoColor=white" valign="middle">
+  </a>
+  <a href="https://github.com/codebasic/Codebasic-TTS/releases/latest">
+    <img alt="Download" src="https://img.shields.io/badge/Download-v0.1.0-blue?logo=apple&logoColor=white" valign="middle">
+  </a>
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-yellow.svg" valign="middle"></a>
+</p>
+
 macOS용 TTS 앱: **텍스트를 선택하고 단축키 한 번으로 AI 음성 읽기 + LLM 코드 해설**까지.
 
 - 아무 앱에서 텍스트 선택 → **⌃⌥⌘R** (또는 우클릭 → Services → "Codebasic TTS") → 곧바로 음성 재생
