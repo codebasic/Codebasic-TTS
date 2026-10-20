@@ -1,5 +1,12 @@
 import SwiftUI
 
+private struct OverlayControlBoundsKey: PreferenceKey {
+    static let defaultValue: [Anchor<CGRect>] = []
+    static func reduce(value: inout [Anchor<CGRect>], nextValue: () -> [Anchor<CGRect>]) {
+        value.append(contentsOf: nextValue())
+    }
+}
+
 /// Compact floating transport shown while synthesizing / playing. Shows WHAT is
 /// playing (TTS vs 해설) rather than the script text, with standard paragraph
 /// navigation.
@@ -65,15 +72,14 @@ struct PlayerOverlay: View {
                     .padding(.horizontal, 8).padding(.vertical, 3)
                     .background(tint.opacity(0.18), in: Capsule())
                     .foregroundStyle(tint)
-                    .overlay(OverlayDragHandle())
                 if app.chunkCount > 1 {
                     Text("문단 \(app.chunkIndex)/\(app.chunkCount)")
                         .font(.caption).foregroundStyle(.secondary)
-                        .overlay(OverlayDragHandle())
                 }
-                Spacer().overlay(OverlayDragHandle())
+                Spacer()
                 if app.phase == .synthesizing {
                     ProgressView().controlSize(.small)
+                        .anchorPreference(key: OverlayControlBoundsKey.self, value: .bounds) { [$0] }
                     Text("합성 중…").font(.caption).foregroundStyle(.secondary)
                 } else {
                     HStack(spacing: 10) {
@@ -95,6 +101,7 @@ struct PlayerOverlay: View {
                     }
                     .buttonStyle(.plain)
                     .font(.caption.weight(.semibold))
+                    .anchorPreference(key: OverlayControlBoundsKey.self, value: .bounds) { [$0] }
                 }
             }
 
@@ -129,7 +136,6 @@ struct PlayerOverlay: View {
                 .frame(height: subtitleViewportHeight, alignment: .top)         // fixed viewport the text scrolls through
                 .clipped()
                 .mask(crawlFadeMask)
-                .overlay(OverlayDragHandle())
             }
 
             // Transport + progress are one fixed-size, centered cluster, so the
@@ -153,13 +159,19 @@ struct PlayerOverlay: View {
                 Button { app.stop() } label: { Image(systemName: "stop.fill") }
                     .foregroundStyle(.secondary).help("중지")
             }
-            .frame(maxWidth: .infinity)   // center the cluster in the (possibly wide) panel
             .buttonStyle(.plain)
             .font(.system(size: 14, weight: .semibold))
+            .anchorPreference(key: OverlayControlBoundsKey.self, value: .bounds) { [$0] }
+            .frame(maxWidth: .infinity)   // keep whitespace outside the controls draggable
         }
         .padding(.horizontal, 16).padding(.vertical, 12)
         .frame(width: hudWidth)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
         .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(.white.opacity(0.08)))
+        .overlayPreferenceValue(OverlayControlBoundsKey.self) { anchors in
+            GeometryReader { geometry in
+                OverlayDragHandle(excludedRects: anchors.map { geometry[$0] })
+            }
+        }
     }
 }

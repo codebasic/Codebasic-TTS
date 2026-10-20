@@ -10,15 +10,31 @@ final class NonKeyPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
-/// Explicit drag surface for non-interactive HUD content. SwiftUI descendants
-/// need not forward background mouse events to NSWindow for this path to work.
+/// One explicit drag surface for the HUD, with holes for its controls. Keeping
+/// this above the SwiftUI content also covers padding and transparent text areas.
 struct OverlayDragHandle: NSViewRepresentable {
+    var excludedRects: [CGRect] = []
+
     final class DragView: NSView {
+        var excludedRects: [CGRect] = []
         private var dragStart: (pointer: NSPoint, origin: NSPoint)?
+
+        // SwiftUI geometry is top-left based. Do not let AppKit start a second,
+        // implicit window drag instead of delivering our mouseDragged events.
+        override var isFlipped: Bool { true }
+        override var mouseDownCanMoveWindow: Bool { false }
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            let local = convert(point, from: superview)
+            guard !excludedRects.contains(where: { $0.contains(local) }) else { return nil }
+            return super.hitTest(point)
+        }
 
         override func mouseDown(with event: NSEvent) {
             guard let window else { return }
             dragStart = (window.convertPoint(toScreen: event.locationInWindow), window.frame.origin)
+            Log.app.info("[HUD-DRAG] begin origin=\(String(describing: window.frame.origin), privacy: .public)")
         }
 
         override func mouseDragged(with event: NSEvent) {
@@ -28,11 +44,24 @@ struct OverlayDragHandle: NSViewRepresentable {
                                           y: start.origin.y + pointer.y - start.pointer.y))
         }
 
-        override func mouseUp(with event: NSEvent) { dragStart = nil }
+        override func mouseUp(with event: NSEvent) {
+            if let start = dragStart, let window {
+                let delta = NSPoint(x: window.frame.minX - start.origin.x,
+                                    y: window.frame.minY - start.origin.y)
+                Log.app.info("[HUD-DRAG] end delta=\(String(describing: delta), privacy: .public) origin=\(String(describing: window.frame.origin), privacy: .public)")
+            }
+            dragStart = nil
+        }
     }
 
-    func makeNSView(context: Context) -> DragView { DragView() }
-    func updateNSView(_ nsView: DragView, context: Context) {}
+    func makeNSView(context: Context) -> DragView {
+        let view = DragView()
+        view.excludedRects = excludedRects
+        return view
+    }
+    func updateNSView(_ nsView: DragView, context: Context) {
+        nsView.excludedRects = excludedRects
+    }
 }
 
 /// A borderless, floating, non-activating HUD panel that hosts PlayerOverlay.
@@ -88,7 +117,7 @@ final class OverlayWindow {
         p.isOpaque = false
         p.backgroundColor = .clear
         p.hasShadow = true
-        p.isMovableByWindowBackground = true
+        p.isMovableByWindowBackground = false   // OverlayDragHandle owns every drag
         p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         p.contentView = h
         host = h
