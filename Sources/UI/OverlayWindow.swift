@@ -10,6 +10,31 @@ final class NonKeyPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+/// Explicit drag surface for non-interactive HUD content. SwiftUI descendants
+/// need not forward background mouse events to NSWindow for this path to work.
+struct OverlayDragHandle: NSViewRepresentable {
+    final class DragView: NSView {
+        private var dragStart: (pointer: NSPoint, origin: NSPoint)?
+
+        override func mouseDown(with event: NSEvent) {
+            guard let window else { return }
+            dragStart = (window.convertPoint(toScreen: event.locationInWindow), window.frame.origin)
+        }
+
+        override func mouseDragged(with event: NSEvent) {
+            guard let window, let start = dragStart else { return }
+            let pointer = window.convertPoint(toScreen: event.locationInWindow)
+            window.setFrameOrigin(NSPoint(x: start.origin.x + pointer.x - start.pointer.x,
+                                          y: start.origin.y + pointer.y - start.pointer.y))
+        }
+
+        override func mouseUp(with event: NSEvent) { dragStart = nil }
+    }
+
+    func makeNSView(context: Context) -> DragView { DragView() }
+    func updateNSView(_ nsView: DragView, context: Context) {}
+}
+
 /// A borderless, floating, non-activating HUD panel that hosts PlayerOverlay.
 /// Appears over whatever app the user is in while audio is synthesizing/playing,
 /// WITHOUT stealing focus.
@@ -26,6 +51,8 @@ final class NonKeyPanel: NSPanel {
 ///   upward and the saved position is preserved across resizes.
 @MainActor
 final class OverlayWindow {
+    private let diagnosticID = MemoryDiagnostics.begin("overlay.instance")
+    deinit { MemoryDiagnostics.end(diagnosticID) }
     private var panel: NSPanel?
     private var host: NSHostingView<PlayerOverlay>?
     private let app: AppState

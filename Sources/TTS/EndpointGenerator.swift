@@ -18,35 +18,35 @@ struct EndpointGenerator: Normalizing, Explaining {
     func streamContinuing(previous: String, current: String, hint: String) -> AsyncThrowingStream<String, Error> {
         generate(CodeExplanation.continuePrompt(previous: previous, current: current, hint: hint))
     }
-    func generate(_ prompt: String, images: [Data] = []) -> AsyncThrowingStream<String, Error> {
+    func generate(_ prompt: String, images: [Data] = [], conversation: ExplanationConversation? = nil) -> AsyncThrowingStream<String, Error> {
         if endpoint.usesPlan {
             if endpoint.resolvedProvider == .google {
-                return AntigravityPlan.stream(prompt: prompt, model: model, images: images)
+                return AntigravityPlan.stream(prompt: prompt, model: model, images: images, conversation: conversation)
             }
             guard endpoint.resolvedProvider == .openAI else {
                 return AsyncThrowingStream { $0.finish(throwing: connectionError("이 공급자의 플랜 연결은 지원하지 않습니다.")) }
             }
-            return CodexPlan.stream(prompt: prompt, model: model, images: images, reasoning: reasoningLevel)
+            return CodexPlan.stream(prompt: prompt, model: model, images: images, reasoning: reasoningLevel, conversation: conversation)
         }
         switch endpoint.apiStyle {
         case .anthropic:
-            return AnthropicAPI.stream(baseURL: endpoint.baseURL, key: apiKey, model: model, prompt: prompt, images: images)
+            return AnthropicAPI.stream(baseURL: endpoint.baseURL, key: apiKey, model: model, prompt: prompt, images: images, conversation: conversation)
         case .gemini:
             return LLM.geminiStream(baseURL: endpoint.baseURL, apiKey: apiKey, model: model, prompt: prompt,
-                                    images: images, temperature: temperature, reasoningLevel: reasoningLevel)
+                                    images: images, temperature: temperature, reasoningLevel: reasoningLevel, conversation: conversation)
         case .openAICompatible:
             return LLM.openAIChatStream(baseURL: endpoint.baseURL, model: model, apiKey: apiKey, prompt: prompt,
                                         images: images, temperature: temperature, reasoningLevel: reasoningLevel,
-                                        omitTemperature: endpoint.resolvedProvider == .openAI && !model.hasPrefix("gpt-4") && !model.hasPrefix("gpt-3.5"))
+                                        omitTemperature: endpoint.resolvedProvider == .openAI && !model.hasPrefix("gpt-4") && !model.hasPrefix("gpt-3.5"), conversation: conversation)
         case .ollama:
             guard let url = URL(string: endpoint.baseURL) else {
                 return AsyncThrowingStream { $0.finish(throwing: connectionError("서버 주소를 확인하세요.")) }
             }
-            if images.isEmpty {
+            if images.isEmpty && conversation == nil {
                 return LLM.ollamaStream(baseURL: url, model: model, prompt: prompt, temperature: temperature, reasoningLevel: reasoningLevel)
             }
             return LLM.ollamaChatStream(baseURL: url, model: model, prompt: prompt, images: images,
-                                        temperature: temperature, reasoningLevel: reasoningLevel)
+                                        temperature: temperature, reasoningLevel: reasoningLevel, conversation: conversation)
         }
     }
 }
@@ -84,9 +84,11 @@ enum AnthropicAPI {
         return models
     }
 
-    static func stream(baseURL: String, key: String, model: String, prompt: String, images: [Data]) -> AsyncThrowingStream<String, Error> {
+    static func stream(baseURL: String, key: String, model: String, prompt: String, images: [Data], conversation: ExplanationConversation? = nil) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
+                let activityID = MemoryDiagnostics.begin("EndpointGenerator.anthropicStream")
+                defer { MemoryDiagnostics.end(activityID) }
                 do {
                     var req = try request(baseURL: baseURL, path: "messages", key: key)
                     req.httpMethod = "POST"
@@ -94,8 +96,17 @@ enum AnthropicAPI {
                         ["type": "image", "source": ["type": "base64", "media_type": "image/png", "data": $0.base64EncodedString()]]
                     }
                     content.append(["type": "text", "text": prompt])
-                    req.httpBody = try JSONSerialization.data(withJSONObject: ["model": model, "max_tokens": 8192,
-                        "stream": true, "messages": [["role": "user", "content": content]]])
+                    var payload: [String: Any] = ["model": model, "max_tokens": 8192,
+                        "stream": true, "messages": [["role": "user", "content": content]]]
+                    if let conversation {
+                        payload["system"] = conversation.system
+                        payload["messages"] = conversation.anthropicMessages
+                        // Official API automatic caching; do not impose this extension on third-party proxies.
+                        if URL(string: baseURL)?.host == "api.anthropic.com" {
+                            payload["cache_control"] = ["type": "ephemeral"]
+                        }
+                    }
+                    req.httpBody = try JSONSerialization.data(withJSONObject: payload)
                     let (bytes, response) = try await URLSession.shared.bytes(for: req)
                     guard (response as? HTTPURLResponse)?.statusCode == 200 else {
                         throw connectionError("Anthropic 생성 실패 (HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0))")

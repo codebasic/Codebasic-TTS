@@ -153,8 +153,17 @@ struct SettingsView: View {
                     }
                 }
                 Picker("합성 모델", selection: saved(\.modelId)) {
-                    ForEach(app.backendKind.ttsModels, id: \.id) { Text($0.label).tag($0.id) }
+                    if !app.elevenModels.contains(where: { $0.id == app.modelId }) {
+                        Text("현재 모델: \(app.modelId) (목록에 없음)").tag(app.modelId)
+                    }
+                    ForEach(app.elevenModels) { Text($0.name).tag($0.id) }
                 }.disabled(!app.keyPresent)
+                HStack {
+                    Text(app.modelStatus).font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("모델 새로고침") { app.refreshModels() }
+                        .disabled(!app.keyPresent || app.refreshingModels)
+                }
             }
         }
         Section("미리 듣기") {
@@ -180,7 +189,11 @@ struct SettingsView: View {
                     tuning("안정성", hint: "높을수록 목소리 변화가 줄어듭니다.", value: saved(\.voiceSettings.stability))
                     tuning("유사도", hint: "원래 목소리를 얼마나 가깝게 재현할지 조절합니다.", value: saved(\.voiceSettings.similarityBoost))
                     tuning("스타일", hint: "말투와 표현의 강도를 조절합니다.", value: saved(\.voiceSettings.style))
+                        .disabled(app.elevenModels.first(where: { $0.id == app.modelId })?.canUseStyle != true)
                     Toggle("목소리 유사도 강화", isOn: saved(\.voiceSettings.useSpeakerBoost))
+                        .disabled(app.elevenModels.first(where: { $0.id == app.modelId })?.canUseSpeakerBoost != true)
+                    Text("선택한 모델이 지원하는 고급 설정만 적용됩니다. 모델 목록을 새로고침해 지원 여부를 확인하세요.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
             }
         }

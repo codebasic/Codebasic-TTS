@@ -33,7 +33,9 @@ struct LLMModelPicker: View {
     }
     /// Models grouped per endpoint (in registration order), sorted by name within each.
     private var grouped: [Group] {
-        app.endpoints.compactMap { e -> Group? in
+        let started = ProcessInfo.processInfo.systemUptime
+        defer { InputDiagnostics.shared.recordWork("modelPicker.grouped", since: started) }
+        return app.endpoints.compactMap { e -> Group? in
             guard e.isEnabled else { return nil }
             let id = e.id.uuidString
             let ms = options.filter { $0.endpointID == id }

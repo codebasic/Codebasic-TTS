@@ -67,6 +67,8 @@ enum AntigravityPlan {
         process.standardError = FileHandle.nullDevice
         try Task.checkCancellation()
         try process.run()
+        MemoryDiagnostics.sample("agy.process.started", details: "childPID=\(process.processIdentifier)")
+        defer { MemoryDiagnostics.sample("agy.scope.end", details: "childPID=\(process.processIdentifier) running=\(process.isRunning)") }
         let deadline = Date().addingTimeInterval(timeout)
         while process.isRunning {
             try Task.checkCancellation()
@@ -113,18 +115,20 @@ enum AntigravityPlan {
         return response
     }
     static func stream(prompt: String, model: String, images: [Data], executable: URL? = AntigravityPlan.executable,
-                       home: URL = AntigravityPlan.home) -> AsyncThrowingStream<String, Error> {
+                       home: URL = AntigravityPlan.home, conversation: ExplanationConversation? = nil) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             let task = Task { @MainActor in
+                let activityID = MemoryDiagnostics.begin("AntigravityPlan.generation")
+                defer { MemoryDiagnostics.end(activityID) }
                 do {
                     // The documented stream input protocol supports text blocks only.
-                    guard images.isEmpty else { throw connectionError("Antigravity CLI의 자동 연결은 텍스트 입력만 지원합니다. 이미지 인식에는 API 키 연결을 선택하세요.") }
+                    guard images.isEmpty && conversation?.hasImages != true else { throw connectionError("Antigravity CLI의 자동 연결은 텍스트 입력만 지원합니다. 이미지 인식에는 API 키 연결을 선택하세요.") }
                     var args = ["--input-format", "stream-json", "--output-format", "stream-json",
                                 "--disable-slash-commands", "--print-timeout", "3m"]
                     // Migrate the former Gemini auto sentinel to the CLI's default selection.
                     if !model.isEmpty && model != "auto" { args += ["--model", model] }
                     var decoder = AntigravityDeltaDecoder()
-                    let (data, code) = try await run(arguments: args, input: inputData(prompt), executable: executable, home: home) { bytes in
+                    let (data, code) = try await run(arguments: args, input: inputData(conversation?.transcript ?? prompt), executable: executable, home: home) { bytes in
                         for delta in try decoder.append(bytes) { continuation.yield(delta) }
                     }
                     let response = try decodeResponse(data, exitCode: code)
@@ -161,6 +165,8 @@ enum AntigravityPlan {
         busy = true
         status = "Google 계정 확인 중…"
         task = Task { [weak self] in
+            let activityID = MemoryDiagnostics.begin("AntigravityPlan.connectionCheck")
+            defer { MemoryDiagnostics.end(activityID) }
             guard let self else { return }
             do {
                 do {

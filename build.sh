@@ -120,10 +120,19 @@ case "${1:-install}" in
     swiftc -O "$HERE/Sources/Core/TextSplitter.swift" "$HERE/Sources/Core/CrawlLayout.swift" \
       "$HERE/Sources/App/Endpoints.swift" "$HERE/Tests/main.swift" -o "$BUILD_DIR/tests"
     "$BUILD_DIR/tests"
+    swiftc -O "$HERE/Sources/Core/ElevenModelCatalog.swift" "$HERE/Tests/ElevenModelCatalogTests.swift" \
+      -o "$BUILD_DIR/model-tests"
+    "$BUILD_DIR/model-tests"
+    swiftc -O "$HERE/Sources/Core/Logging.swift" "$HERE/Sources/Core/MemoryDiagnostics.swift" \
+      "$HERE/Tests/MemoryDiagnosticsTests.swift" -o "$BUILD_DIR/memory-tests"
+    "$BUILD_DIR/memory-tests"
     swiftc -O "$HERE/Sources/App/CodexPlan.swift" "$HERE/Sources/App/AntigravityPlan.swift" "$HERE/Sources/App/Secrets.swift" \
-      "$HERE/Sources/TTS/TextNormalizer.swift" "$HERE/Tests/ConnectionTests.swift" \
+      "$HERE/Sources/TTS/TextNormalizer.swift" "$HERE/Sources/Core/ExplanationConversation.swift" "$HERE/Sources/Core/Logging.swift" "$HERE/Sources/Core/MemoryDiagnostics.swift" "$HERE/Tests/ConnectionTests.swift" \
       -framework AppKit -o "$BUILD_DIR/connection-tests"
     "$BUILD_DIR/connection-tests" "$HERE/Tests/Fixtures/fake-codex.py"
+    swiftc -O "$HERE/Sources/Core/ExplanationConversation.swift" "$HERE/Tests/ExplanationConversationTests.swift" \
+      -o "$BUILD_DIR/conversation-tests"
+    "$BUILD_DIR/conversation-tests"
     ;;
   clean) rm -rf "$BUILD_DIR"; echo "cleaned" ;;
   install|"") build; install_and_register ;;

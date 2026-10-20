@@ -48,6 +48,32 @@ import Foundation
         print("✓ First delta delivered before CLI exit; final response not duplicated")
         print("✓ Antigravity model lookup and structured stdin subprocess round trip")
         print("✓ API/credit fallback disabled; non-success responses and images rejected")
+        let conversation = ExplanationConversation(system: "current test rules", messages: [
+            ConversationMessage(role: .user, text: "old test input"),
+            ConversationMessage(role: .assistant, text: "old test answer"),
+            ConversationMessage(role: .user, text: "current test input")])
+        let codexFixture = fixture.deletingLastPathComponent().appendingPathComponent("fake-codex-conversation.py")
+        var codexOutput = ""
+        for try await text in CodexPlan.stream(prompt: "unused", model: "fixture", images: [], reasoning: .medium,
+                                               conversation: conversation, executable: codexFixture, home: home) {
+            codexOutput += text
+        }
+        precondition(codexOutput == "fixture answer")
+        let records = try String(contentsOf: home.appendingPathComponent("conversation-requests.jsonl"), encoding: .utf8)
+            .split(separator: "\n").map { try JSONSerialization.jsonObject(with: Data($0.utf8)) as! [String: Any] }
+        precondition(records.compactMap { $0["method"] as? String } == ["initialize", "initialized", "account/read", "thread/start", "thread/injectItems", "turn/start"])
+        var agyTranscript = ""
+        for try await text in AntigravityPlan.stream(prompt: "unused", model: "auto", images: [], executable: fixtureAGY,
+                                                     home: home, conversation: conversation) { agyTranscript += text }
+        precondition(agyTranscript == conversation.transcript)
+        let system = CodeExplanation.conversationSystem("current custom instruction")
+        precondition(system.hasPrefix("current custom instruction") && system.contains("현재 지시는 과거 지시보다 우선"))
+        let currentInput = CodeExplanation.conversationInput("fixture code", hint: "latest hint")
+        precondition(currentInput.contains("fixture code") && currentInput.contains("latest hint") && !currentInput.contains("old test answer"))
+        precondition(CodeExplanation.continuePrompt(previous: "previous code", current: "current code").contains("[이전 코드"))
+        precondition(!normalizationPrompt("script rule", "script source").contains("old test answer"))
+        print("✓ Codex new ephemeral thread receives explicit native user/assistant history before current input")
+        print("✓ Antigravity transcript preserves roles; current instructions win; legacy continuation/script paths unchanged")
         print("Connection tests passed.")
     }
 }

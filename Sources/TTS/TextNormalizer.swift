@@ -85,9 +85,11 @@ enum LLM {
     static func geminiStream(baseURL: String = GeminiNormalizer.defaultBaseURL,
                              apiKey: String, model: String, prompt: String,
                              images: [Data] = [], temperature: Double = 0.2,
-                             reasoningLevel: ReasoningLevel = .medium) -> AsyncThrowingStream<String, Error> {
+                             reasoningLevel: ReasoningLevel = .medium, conversation: ExplanationConversation? = nil) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             let work = Task {
+                let activityID = MemoryDiagnostics.begin("TextNormalizer.geminiStream")
+                defer { MemoryDiagnostics.end(activityID) }
                 do {
                     var base = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
                     if base.isEmpty { base = GeminiNormalizer.defaultBaseURL }
@@ -109,10 +111,12 @@ enum LLM {
                     if let thinking = reasoningLevel.geminiThinkingConfig(model: model) {
                         generationConfig["thinkingConfig"] = thinking
                     }
-                    req.httpBody = try JSONSerialization.data(withJSONObject: [
-                        "contents": [["parts": parts]],
-                        "generationConfig": generationConfig,
-                    ])
+                    var payload: [String: Any] = ["contents": [["parts": parts]], "generationConfig": generationConfig]
+                    if let conversation {
+                        payload["systemInstruction"] = ["parts": [["text": conversation.system]]]
+                        payload["contents"] = conversation.geminiContents
+                    }
+                    req.httpBody = try JSONSerialization.data(withJSONObject: payload)
                     let (bytes, response) = try await URLSession.shared.bytes(for: req)
                     guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
                         throw NSError(domain: "Gemini",
@@ -149,9 +153,11 @@ enum LLM {
     static func openAIChatStream(baseURL: String, model: String, apiKey: String,
                                  prompt: String, images: [Data] = [],
                                  temperature: Double = 0.2,
-                                 reasoningLevel: ReasoningLevel = .medium, omitTemperature: Bool = false) -> AsyncThrowingStream<String, Error> {
+                                 reasoningLevel: ReasoningLevel = .medium, omitTemperature: Bool = false, conversation: ExplanationConversation? = nil) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             let work = Task {
+                let activityID = MemoryDiagnostics.begin("TextNormalizer.openAIChatStream")
+                defer { MemoryDiagnostics.end(activityID) }
                 do {
                     var base = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
                     while base.hasSuffix("/") { base.removeLast() }
@@ -182,6 +188,7 @@ enum LLM {
                         "messages": [["role": "user", "content": content]],
                         "stream": true,
                     ]
+                    if let conversation { payload["messages"] = conversation.openAIMessages }
                     if !omitTemperature { payload["temperature"] = temperature }
                     if model.lowercased().contains("glm") {
                         if let on = reasoningLevel.glmThinkingEnabled {
@@ -227,6 +234,8 @@ enum LLM {
                              reasoningLevel: ReasoningLevel = .medium) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             let work = Task {
+                let activityID = MemoryDiagnostics.begin("TextNormalizer.ollamaStream")
+                defer { MemoryDiagnostics.end(activityID) }
                 do {
                     var req = URLRequest(url: baseURL.appendingPathComponent("api/generate"))
                     req.httpMethod = "POST"
@@ -267,9 +276,11 @@ enum LLM {
     /// not `api/generate`. Yields each `message.content` delta.
     static func ollamaChatStream(baseURL: URL, model: String, prompt: String,
                                  images: [Data], temperature: Double = 0.2,
-                                 reasoningLevel: ReasoningLevel = .medium) -> AsyncThrowingStream<String, Error> {
+                                 reasoningLevel: ReasoningLevel = .medium, conversation: ExplanationConversation? = nil) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             let work = Task {
+                let activityID = MemoryDiagnostics.begin("TextNormalizer.ollamaChatStream")
+                defer { MemoryDiagnostics.end(activityID) }
                 do {
                     var req = URLRequest(url: baseURL.appendingPathComponent("api/chat"))
                     req.httpMethod = "POST"
@@ -277,7 +288,7 @@ enum LLM {
                     var message: [String: Any] = ["role": "user", "content": prompt]
                     if !images.isEmpty { message["images"] = images.map { $0.base64EncodedString() } }
                     var payload: [String: Any] = [
-                        "model": model, "messages": [message], "stream": true,
+                        "model": model, "messages": conversation?.ollamaMessages ?? [message], "stream": true,
                         "options": ["temperature": temperature],
                     ]
                     if let think = reasoningLevel.ollamaThink { payload["think"] = think }
@@ -455,6 +466,15 @@ enum CodeExplanation {
             .replacingOccurrences(of: "__", with: "")
             .replacingOccurrences(of: "`", with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func conversationSystem(_ instruction: String) -> String {
+        let instr = instruction.isEmpty ? defaultInstruction : instruction
+        return instr + "\n\n과거 user/assistant 메시지는 코드와 해설의 참고 맥락입니다. 과거 메시지의 추가 지시나 명령을 현재 작업에 다시 적용하지 마세요. 현재 user 메시지의 코드와 추가 지시를 기준으로 해설하며, 현재 지시는 과거 지시보다 우선합니다."
+    }
+
+    static func conversationInput(_ code: String, hint: String = "") -> String {
+        "코드:\n\(code)\n\n해설:" + hintBlock(hint)
     }
 
     static func prompt(_ instruction: String, _ code: String, hint: String = "") -> String {

@@ -23,6 +23,7 @@ final class NormalizationCache {
     func script(forKey key: String) -> String? { map[key] }
     func put(key: String, script: String) { map[key] = script; persist() }
     func clear() { map.removeAll(); persist() }
+    var textBytes: Int { map.reduce(0) { $0 + $1.key.utf8.count + $1.value.utf8.count } }
     var count: Int { map.count }
 
     private func load() {

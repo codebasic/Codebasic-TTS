@@ -108,7 +108,7 @@ struct CommentaryView: View {
                     Label("해설 생성", systemImage: "wand.and.stars")
                 }
                 .disabled((codeEmpty && !app.hasImages) || app.explaining)
-                .help("코드(텍스트·스크린샷)를 처음부터 해설합니다 (기존 해설을 대체)")
+                .help("이전 코드·해설을 참고해 현재 입력을 해설합니다. 대화 기록은 비우기로 초기화합니다.")
 
                 Button {
                     app.continueExplanation()
@@ -172,7 +172,7 @@ struct CommentaryView: View {
                 Button { app.clearCommentary() } label: { Label("비우기", systemImage: "trash") }
                     .controlSize(.small)
                     .disabled(explanationEmpty && !app.canContinueExplain)
-                    .help("해설·이어쓰기 기준을 비우고 처음부터 시작")
+                    .help("해설·대화 기록·이어쓰기 기준을 비웁니다")
             }
 
             TextEditor(text: $app.explanationText)

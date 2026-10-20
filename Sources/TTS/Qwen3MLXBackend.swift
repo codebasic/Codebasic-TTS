@@ -21,6 +21,8 @@ struct Qwen3MLXBackend: TTSBackend {
     func stream(segment: String, voice: VoiceConfig) -> AsyncThrowingStream<Data, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
+                let activityID = MemoryDiagnostics.begin("Qwen3MLXBackend.audioStream")
+                defer { MemoryDiagnostics.end(activityID) }
                 do {
                     var req = URLRequest(url: baseURL.appendingPathComponent("tts"))
                     req.httpMethod = "POST"

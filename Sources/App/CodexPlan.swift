@@ -10,12 +10,17 @@ func connectionError(_ message: String) -> NSError {
 /// A dedicated home avoids importing the user's project tools, MCP servers or API configuration.
 @MainActor
 final class CodexPlanRPC {
+    private let diagnosticID = MemoryDiagnostics.begin("codexRPC.instance")
+    deinit { MemoryDiagnostics.end(diagnosticID) }
+    private func updateMemoryMetrics() {
+        MemoryDiagnostics.update(diagnosticID, values: ["rpcBufferBytes": buffer.count, "rpcPending": pending.count])
+    }
     private let process = Process()
     private let input = Pipe()
     private let output = Pipe()
-    private var buffer = Data()
+    private var buffer = Data() { didSet { updateMemoryMetrics() } }
     private var nextID = 0
-    private var pending: [Int: CheckedContinuation<[String: Any], Error>] = [:]
+    private var pending: [Int: CheckedContinuation<[String: Any], Error>] = [:] { didSet { updateMemoryMetrics() } }
     var notification: ((String, [String: Any]) -> Void)?
     var disconnected: (() -> Void)?
     private var closed = false
@@ -45,6 +50,8 @@ final class CodexPlanRPC {
         output.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             Task { @MainActor in
+                let activityID = MemoryDiagnostics.begin("CodexPlan.rpcRead")
+                defer { MemoryDiagnostics.end(activityID) }
                 guard let self else { return }
                 if data.isEmpty { self.stop(); return }
                 self.receive(data)
@@ -52,11 +59,12 @@ final class CodexPlanRPC {
         }
         process.terminationHandler = { [weak self] _ in Task { @MainActor in self?.stop() } }
         try process.run()
+        MemoryDiagnostics.sample("codex.process.started", details: "childPID=\(process.processIdentifier)")
     }
 
-    func initialize() async throws {
+    func initialize(experimental: Bool = false) async throws {
         _ = try await request("initialize", ["clientInfo": ["name": "codebasic_tts", "version": "1.0"],
-                                             "capabilities": ["experimentalApi": false]])
+                                             "capabilities": ["experimentalApi": experimental]])
         try send(["method": "initialized", "params": [:]])
     }
 
@@ -69,6 +77,8 @@ final class CodexPlanRPC {
             do { try send(["id": id, "method": method, "params": params]) }
             catch { pending.removeValue(forKey: id)?.resume(throwing: error) }
             Task { [weak self] in
+                let activityID = MemoryDiagnostics.begin("CodexPlan.rpcDeadline")
+                defer { MemoryDiagnostics.end(activityID) }
                 try? await Task.sleep(for: .seconds(30))
                 self?.pending.removeValue(forKey: id)?.resume(throwing: connectionError("연결 응답 시간이 초과되었습니다."))
             }
@@ -111,6 +121,7 @@ final class CodexPlanRPC {
     func stop() {
         guard !closed else { return }
         closed = true
+        MemoryDiagnostics.sample("codex.stop.requested", details: "childPID=\(process.processIdentifier) running=\(process.isRunning)")
         notification = nil
         output.fileHandleForReading.readabilityHandler = nil
         try? input.fileHandleForWriting.close()
@@ -136,6 +147,8 @@ final class CodexPlanLogin: ObservableObject {
         busy = true
         status = "로그인 준비 중…"
         loginTask = Task {
+            let activityID = MemoryDiagnostics.begin("CodexPlan.login")
+            defer { MemoryDiagnostics.end(activityID) }
             do {
                 try Task.checkCancellation()
                 let client = try CodexPlanRPC()
@@ -159,6 +172,8 @@ final class CodexPlanLogin: ObservableObject {
                 guard NSWorkspace.shared.open(url) else { throw connectionError("로그인 브라우저를 열 수 없습니다.") }
                 status = "브라우저에서 ChatGPT 로그인을 완료하세요."
                 timeout = Task { [weak self] in
+                    let activityID = MemoryDiagnostics.begin("CodexPlan.loginDeadline")
+                    defer { MemoryDiagnostics.end(activityID) }
                     do { try await Task.sleep(for: .seconds(180)) } catch { return }
                     self?.cancel()
                     self?.status = "로그인 시간이 초과되었습니다. 다시 시도하세요."
@@ -191,35 +206,45 @@ enum CodexPlan {
         return models
     }
 
-    static func stream(prompt: String, model: String, images: [Data], reasoning: ReasoningLevel) -> AsyncThrowingStream<String, Error> {
+    static func stream(prompt: String, model: String, images: [Data], reasoning: ReasoningLevel,
+                       conversation: ExplanationConversation? = nil, executable: URL? = nil, home: URL? = nil) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             let task = Task { @MainActor in
+                let activityID = MemoryDiagnostics.begin("CodexPlan.generation")
+                defer { MemoryDiagnostics.end(activityID) }
                 var rpc: CodexPlanRPC?
                 do {
                     try Task.checkCancellation()
-                    let client = try CodexPlanRPC()
+                    let client = try CodexPlanRPC(executable: executable, home: home)
                     rpc = client
                     defer { client.stop() }
-                    try await client.initialize()
+                    try await client.initialize(experimental: conversation != nil)
                     _ = try await client.requirePlan()
                     try Task.checkCancellation()
                     let thread = try await client.request("thread/start", ["ephemeral": true, "model": model,
                         "modelProvider": "openai", "sandbox": "read-only", "approvalPolicy": "never",
-                        "baseInstructions": "Return only the requested text. Do not use tools, access files, or perform actions.",
+                        "baseInstructions": "Return only the requested text. Do not use tools, access files, or perform actions."
+                            + (conversation.map { "\n\n" + $0.system } ?? ""),
                         "config": ["features.shell_tool": false, "features.apply_patch_freeform": false,
                                    "features.code_mode": false, "web_search": "disabled"]])
                     guard let info = thread["thread"] as? [String: Any], let id = info["id"] as? String else {
                         throw connectionError("생성 세션을 시작하지 못했습니다.")
                     }
+                    if let conversation, !conversation.codexHistoryItems.isEmpty {
+                        _ = try await client.request("thread/injectItems", ["threadId": id, "items": conversation.codexHistoryItems])
+                    }
                     let (events, eventContinuation) = AsyncStream<(String, [String: Any])>.makeStream()
                     client.notification = { eventContinuation.yield(($0, $1)) }
                     client.disconnected = { eventContinuation.finish() }
-                    var input: [[String: Any]] = [["type": "text", "text": prompt, "text_elements": []]]
-                    input += images.map { ["type": "image", "url": "data:image/png;base64,\($0.base64EncodedString())"] }
+                    let current = conversation?.messages.last
+                    var input: [[String: Any]] = [["type": "text", "text": current?.text ?? prompt, "text_elements": []]]
+                    input += (current?.images ?? images).map { ["type": "image", "url": "data:image/png;base64,\($0.base64EncodedString())"] }
                     var params: [String: Any] = ["threadId": id, "input": input]
                     if !reasoning.isProviderDefault { params["effort"] = reasoning.rawValue }
                     _ = try await client.request("turn/start", params)
                     let deadline = Task { @MainActor in
+                        let activityID = MemoryDiagnostics.begin("CodexPlan.generationDeadline")
+                        defer { MemoryDiagnostics.end(activityID) }
                         do { try await Task.sleep(for: .seconds(180)) } catch { return }
                         eventContinuation.finish()
                     }

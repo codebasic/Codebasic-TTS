@@ -290,6 +290,10 @@ Codebasic-TTS/
 └── Sidecar/                        # 로컬 Qwen3-TTS(MLX) FastAPI 사이드카
 ```
 
+## 진단 문서
+
+[메모리 및 입력 지연 진단](docs/performance-diagnostics.md)
+
 ## 후원 💖
 
 Codebasic TTS는 무료·오픈소스(MIT)로, 꾸준한 유지보수와 기능 개발로 계속 발전합니다.

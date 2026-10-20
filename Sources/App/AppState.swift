@@ -32,10 +32,7 @@ final class AppState: ObservableObject {
         var hasVoiceList: Bool { self == .elevenlabs }
         /// Engine reaches a local sidecar at a configurable base URL.
         var usesLocalSidecar: Bool { self == .local }
-        /// Selectable synthesis models (empty = single/fixed model).
-        var ttsModels: [(id: String, label: String)] {
-            self == .elevenlabs ? ElevenLabs.koreanModels : []
-        }
+
     }
 
     // Connection
@@ -43,6 +40,12 @@ final class AppState: ObservableObject {
     @Published var backendKind: BackendKind = .elevenlabs
     @Published var voices: [ElevenVoice] = []
     @Published var connectionStatus = ""
+    @Published private(set) var elevenModels: [ElevenModel] = []
+    @Published private(set) var modelStatus = ""
+    @Published private(set) var refreshingModels = false
+    private static var modelCatalogURL: URL {
+        URL(fileURLWithPath: Secrets.appSupportDir).appendingPathComponent("eleven_models.json")
+    }
 
     // Settings
     @Published var voiceId = "Yp1WZJMrN7OSdP8PG9sm"   // 성주 (cloned)
@@ -103,8 +106,9 @@ final class AppState: ObservableObject {
     @Published var explainReasoningLevel: ReasoningLevel = .medium   // 해설 (+single-stage 해설)
     @Published var scriptReasoningLevel: ReasoningLevel = .medium    // 대본 정규화
     @Published var visionReasoningLevel: ReasoningLevel = .medium    // 스크린샷 전사 (비전)
-    @Published var codeImages: [Data] = []       // pasted code screenshots (PNG); needs a vision model
+    @Published var codeImages: [Data] = [] { didSet { logMemory("images.changed") } }       // pasted code screenshots (PNG); needs a vision model
     var hasImages: Bool { !codeImages.isEmpty }
+    private var explanationHistory = ExplanationHistory()
     @Published var lastExplainedCode = ""        // baseline snapshot for "이어서 해설" (incremental)
     @Published var lastSegment = ""              // the most recently produced commentary (full or appended delta)
     var canContinueExplain: Bool {
@@ -203,6 +207,8 @@ final class AppState: ObservableObject {
     /// only model we can honestly offer is the endpoint's own 기본 모델 — that
     /// also makes a keyless/offline endpoint selectable once the user types one.
     var connectedModels: [LLMChoice] {
+        let started = ProcessInfo.processInfo.systemUptime
+        defer { InputDiagnostics.shared.recordWork("connectedModels", since: started) }
         var out: [LLMChoice] = []
         for e in endpoints where e.isEnabled {
             let fetched = endpointModels[e.id.uuidString] ?? []
@@ -341,12 +347,48 @@ final class AppState: ObservableObject {
     private var task: Task<Void, Never>?         // audio synthesis/playback
     private var explainTask: Task<Void, Never>?  // long-lived 해설 LLM stream
     private var scriptTask: Task<Void, Never>?   // long-lived 대본 정규화 stream
+    private var memoryTimer: Timer?
+    private var activeMemoryOperations = 0
+    private var memoryOperationSequence = 0
+
+    func logMemory(_ event: String) {
+        let imageBytes = codeImages.reduce(0) { $0 + $1.count }
+        let backlogBytes = backlog.reduce(0) { total, entry in
+            total + (entry.images ?? []).reduce(0) { $0 + $1.count }
+        }
+        MemoryDiagnostics.sample(event, details:
+            "images=\(codeImages.count) imageBytes=\(imageBytes) backlogImageBytes=\(backlogBytes) activeGenerations=\(activeMemoryOperations) subtitleUTF8=\(subtitleText.utf8.count) cachedSentences=\(sentenceCache.count) subtitleVisible=\(showSubtitle) phase=\(phase) playbackTimer=\(timer != nil) normEntries=\(normCache.count) normTextBytes=\(normCache.textBytes) backlogEntries=\(backlog.count) spokenChunks=\(spokenChunks.count) timingValues=\(chunkSentenceTimes.reduce(0) { $0 + $1.count }) textUTF8=\([inputText, scriptText, codeText, explanationText].reduce(0) { $0 + $1.utf8.count }) endpoints=\(endpoints.count) models=\(endpointModels.values.reduce(0) { $0 + $1.count }) windows=\(NSApp.windows.count) visibleWindows=\(NSApp.windows.filter { $0.isVisible }.count) urlCacheBytes=\(URLCache.shared.currentMemoryUsage) \(player.memorySummary)")
+    }
+
+    private func beginMemoryOperation(_ name: String) -> Int {
+        memoryOperationSequence += 1
+        activeMemoryOperations += 1
+        logMemory("\(name).begin.\(memoryOperationSequence)")
+        return memoryOperationSequence
+    }
+
+    private func endMemoryOperation(_ name: String, _ id: Int) {
+        activeMemoryOperations -= 1
+        logMemory("\(name).end.\(id)")
+    }
+
     private var timer: Timer?
 
     init() {
         loadSettings()
+        elevenModels = ElevenModelCatalog.load(from: Self.modelCatalogURL)
         backlog = backlogStore.entries
         player.onFinish = { [weak self] in self?.finish() }
+        InputDiagnostics.shared.start()
+        logMemory("startup")
+        memoryTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] timer in
+            guard let self else { timer.invalidate(); return }
+            MainActor.assumeIsolated {
+                self.logMemory("periodic")
+                InputDiagnostics.shared.flush()
+            }
+        }
+        memoryTimer?.tolerance = 3
     }
 
     // MARK: - Backlog (flag a generation case for later analysis)
@@ -390,6 +432,7 @@ final class AppState: ObservableObject {
     var backlogTags: [String] { backlogStore.allTags }
 
     private func finish() {
+        defer { logMemory("playback.finished") }
         stopTimer()
         phase = .idle; telemetry.reset(); statusText = ""; chunkIndex = 0; chunkCount = 0
     }
@@ -430,7 +473,7 @@ final class AppState: ObservableObject {
         switch backendKind {
         case .elevenlabs:
             guard let key = Secrets.elevenLabsKey else { return nil }
-            return ElevenLabsBackend(apiKey: key, settings: voiceSettings)
+            return ElevenLabsBackend(apiKey: key, settings: voiceSettings, models: elevenModels)
         case .local:
             return Qwen3MLXBackend(identity: backendIdentity,
                                    baseURL: URL(string: localBaseURL) ?? URL(string: "http://127.0.0.1:8765")!)
@@ -469,6 +512,8 @@ final class AppState: ObservableObject {
         let voice = VoiceConfig(voiceId: vid, modelId: mid, settingsHash: sHash)
 
         task = Task { [weak self] in
+            let activityID = MemoryDiagnostics.begin("AppState.audioPipeline")
+            defer { MemoryDiagnostics.end(activityID) }
             guard let self else { return }
             var backend: TTSBackend?
             var startedPlaying = false           // ⏳ only before the first audio plays
@@ -502,6 +547,7 @@ final class AppState: ObservableObject {
                                 try Task.checkCancellation(); data.append(c)
                             }
                         }
+                        MemoryDiagnostics.sample("audio.ready", details: "audioBytes=\(data.count) timingValues=\(times.count)")
                         self.chunkSentenceTimes[ci] = times
                         if self.useCache {
                             let e = self.cache.save(key: key, text: chunk, backend: ident, voiceId: vid,
@@ -676,6 +722,8 @@ final class AppState: ObservableObject {
         let base = e.baseURL
         let key = endpointKey(e)
         Task { [weak self] in
+            let activityID = MemoryDiagnostics.begin("AppState.modelRefresh")
+            defer { MemoryDiagnostics.end(activityID) }
             do {
                 let ms: [String]
                 if e.usesPlan {
@@ -721,26 +769,12 @@ final class AppState: ObservableObject {
 
     // MARK: - Commentary (코드 → 해설)
 
-    private func makeExplainer() -> Explaining? {
+    private func makeExplainer() -> EndpointGenerator? {
         guard let e = activeEndpoint(byID: explainEndpointID) else { return nil }
         let model = roleModel(explainRoleModels, e)
         guard !model.isEmpty else { return nil }   // never post `"model": ""`
         return EndpointGenerator(endpoint: e, apiKey: endpointKey(e), model: model,
                                  instruction: explainPrompt, temperature: explainTemperature, reasoningLevel: explainReasoningLevel)
-    }
-
-    /// Single-stage image explain: the 해설 model (== vision model) reads the
-    /// screenshot(s) and explains in one streamed call, using the explain prompt.
-    private func explainStreamWithImages(code: String, images: [Data]) -> AsyncThrowingStream<String, Error> {
-        guard let e = activeEndpoint(byID: explainEndpointID) else {
-            return AsyncThrowingStream { $0.finish() }
-        }
-        let prompt = CodeExplanation.prompt(explainPrompt, code, hint: explainHint)
-        let model = roleModel(explainRoleModels, e)
-        guard !model.isEmpty else { return AsyncThrowingStream { $0.finish() } }
-        return EndpointGenerator(endpoint: e, apiKey: endpointKey(e), model: model,
-                                 instruction: explainPrompt, temperature: explainTemperature, reasoningLevel: explainReasoningLevel)
-            .generate(prompt, images: images)
     }
 
     /// Stable digest of the attached screenshots, for caching the transcription.
@@ -754,6 +788,8 @@ final class AppState: ObservableObject {
     /// text (the code + any relevant screen content). Cached by image digest so a
     /// re-run skips the vision call. The text then feeds the normal explain stage.
     private func transcribeImages(_ imgs: [Data]) async -> String? {
+        let memoryID = beginMemoryOperation("vision")
+        defer { endMemoryOperation("vision", memoryID) }
         guard let visionProv = visionEndpointEff else {
             statusText = "비전 엔드포인트 없음 (설정에서 엔드포인트를 확인하세요)"
             return nil
@@ -831,8 +867,11 @@ final class AppState: ObservableObject {
     /// text, or nil on failure/cancel. Code is sent verbatim (no cleanInput).
     @discardableResult
     private func runExplain(force: Bool) async -> String? {
+        let memoryID = beginMemoryOperation("explain")
+        defer { endMemoryOperation("explain", memoryID) }
         let typed = codeText.trimmingCharacters(in: .whitespacesAndNewlines)
         let imgs = codeImages
+        let hint = explainHint
         guard !typed.isEmpty || !imgs.isEmpty else { explanationText = ""; return nil }
         guard let explainer = makeExplainer(), let ep = activeEndpoint(byID: explainEndpointID) else {
             statusText = "해설 생성 불가 — 엔드포인트·모델·API 키 중 하나가 미설정입니다 (설정 확인)"
@@ -846,7 +885,7 @@ final class AppState: ObservableObject {
         // the transcribe stage (less loss, faster). Otherwise: vision transcribes,
         // then the text model explains.
         let singleStage = !imgs.isEmpty
-            && visionEndpointEff?.id == ep.id && visionModelEff == explainModel
+            && visionEndpointEff?.id == ep.id && visionModelEff == explainer.model
 
         var code = typed
         if !imgs.isEmpty && !singleStage {
@@ -863,22 +902,24 @@ final class AppState: ObservableObject {
         }
         guard !code.isEmpty else { statusText = "해설 생성 실패 (빈 입력)"; return nil }
 
-        // Cache key: single-stage feeds the raw image, so fold its digest in.
-        let provider = "explain:" + ep.cacheIdentity
-        let keyText = singleStage ? code + imagesDigest(imgs) : code
-        let nk = NormalizationCache.key(text: keyText, provider: provider, model: explainModel,
-                                        prompt: explainPrompt + "\u{1F}" + explainHint
-                                                + explainReasoningLevel.cacheSuffix)
+        guard !Task.isCancelled else { return nil }
+        let user = ConversationMessage(role: .user, text: CodeExplanation.conversationInput(code, hint: hint),
+                                       images: singleStage ? imgs : [])
+        let sourceID = NormalizationCache.key(text: typed, provider: "explain-source", model: "", prompt: imagesDigest(imgs))
+        let request = explanationHistory.prepare(system: CodeExplanation.conversationSystem(explainer.instruction),
+                                                 user: user, sourceID: sourceID)
+        // Include the EXACT selected conversation and all generation settings. Old stateless keys never collide.
+        let nk = request.conversation.resultCacheKey(endpointIdentity: ep.cacheIdentity, model: explainer.model,
+                                                     temperature: explainer.temperature, reasoning: explainer.reasoningLevel.rawValue)
         if !force, let cached = normCache.script(forKey: nk) {
+            guard !Task.isCancelled, explanationHistory.commit(request, output: cached) else { return nil }
             explanationText = cached; lastExplainedCode = code; lastSegment = cached; return cached
         }
         explanationText = ""
         statusText = "해설 생성 중…"
         var acc = ""
         do {
-            let stream = singleStage
-                ? explainStreamWithImages(code: code, images: imgs)
-                : explainer.stream(code, hint: explainHint)
+            let stream = explainer.generate("", conversation: request.conversation)
             for try await delta in stream {
                 try Task.checkCancellation()
                 acc += delta
@@ -893,6 +934,7 @@ final class AppState: ObservableObject {
         guard !Task.isCancelled else { return nil }   // superseded just as the stream ended
         let out = CodeExplanation.stripMarkdown(acc)
         guard !out.isEmpty else { statusText = "해설 생성 실패 (빈 응답)"; return nil }
+        guard explanationHistory.commit(request, output: out) else { return nil }
         normCache.put(key: nk, script: out)
         explanationText = out          // finalize (stripped)
         lastExplainedCode = code       // baseline for "이어서 해설"
@@ -906,6 +948,8 @@ final class AppState: ObservableObject {
     /// "변경 없음" sentinel or cancel, rolls the streamed text back to the original.
     @discardableResult
     private func runContinue(force: Bool) async -> String? {
+        let memoryID = beginMemoryOperation("continue")
+        defer { endMemoryOperation("continue", memoryID) }
         let current = codeText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !current.isEmpty else { return nil }
         guard canContinueExplain else { return await runExplain(force: force) }
@@ -977,6 +1021,7 @@ final class AppState: ObservableObject {
     /// Start a fresh narration: clear the commentary and baseline.
     func clearCommentary() {
         explainTask?.cancel()
+        explanationHistory.clear()
         explanationText = ""
         lastExplainedCode = ""
         lastSegment = ""
@@ -1013,6 +1058,8 @@ final class AppState: ObservableObject {
         phase = .synthesizing
         let reading = TextSplitter.cleanInput(seg)
         scriptTask = Task { [weak self] in
+            let activityID = MemoryDiagnostics.begin("AppState.continuePlayback")
+            defer { MemoryDiagnostics.end(activityID) }
             guard let self else { return }
             let tts = await self.ttsScript(for: reading)   // 음성용 대본은 내부에서만
             guard !Task.isCancelled else { return }
@@ -1039,6 +1086,8 @@ final class AppState: ObservableObject {
         playbackMode = .explain
         phase = .synthesizing
         scriptTask = Task { [weak self] in
+            let activityID = MemoryDiagnostics.begin("AppState.explanationPlayback")
+            defer { MemoryDiagnostics.end(activityID) }
             guard let self else { return }
             let tts = await self.ttsScript(for: text)   // 음성용 대본은 내부에서만
             guard !Task.isCancelled else { return }
@@ -1054,6 +1103,8 @@ final class AppState: ObservableObject {
     /// 정규화 is enabled, normalize it for TTS (spell numbers/symbols); else read
     /// the prose as-is. Cached by content. On cancel/error, falls back to `text`.
     private func ttsScript(for text: String) async -> String {
+        let diagnosticID = MemoryDiagnostics.begin("ttsScript")
+        defer { MemoryDiagnostics.end(diagnosticID) }
         let src = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let instruction = scriptInstruction()
         guard normalizeEnabled, !src.isEmpty,
@@ -1083,6 +1134,8 @@ final class AppState: ObservableObject {
         phase = .synthesizing
         statusText = "해설 생성 중…"
         explainTask = Task { [weak self] in
+            let activityID = MemoryDiagnostics.begin("AppState.explainAndPlay")
+            defer { MemoryDiagnostics.end(activityID) }
             guard let self else { return }
             guard let explanation = await self.runExplain(force: false), !Task.isCancelled else {
                 self.phase = .idle
@@ -1113,6 +1166,8 @@ final class AppState: ObservableObject {
     /// straight into `scriptText`. Audio synthesis chunks by paragraph downstream.
     @discardableResult
     func prepareScript(force: Bool = false) async -> String {
+        let diagnosticID = MemoryDiagnostics.begin("prepareScript")
+        defer { MemoryDiagnostics.end(diagnosticID) }
         inputText = TextSplitter.cleanInput(inputText)   // tidy pasted markdown/math in the source panel
         let src = inputText
         guard !src.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { scriptText = ""; return "" }
@@ -1173,6 +1228,8 @@ final class AppState: ObservableObject {
     func regenerateScript() {
         cancelActiveWork()
         scriptTask = Task { [weak self] in
+            let activityID = MemoryDiagnostics.begin("AppState.scriptRefinement")
+            defer { MemoryDiagnostics.end(activityID) }
             guard let self else { return }
             if self.scriptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 _ = await self.prepareScript(force: true)
@@ -1197,6 +1254,8 @@ final class AppState: ObservableObject {
     /// target). On cancel/error, restores the pre-refine 대본.
     @discardableResult
     private func runRefineScript() async -> String? {
+        let diagnosticID = MemoryDiagnostics.begin("refineScript")
+        defer { MemoryDiagnostics.end(diagnosticID) }
         let current = scriptText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !current.isEmpty else { return nil }
         guard let norm = makeNormalizer(instruction: refineInstruction()) else {
@@ -1250,6 +1309,8 @@ final class AppState: ObservableObject {
         phase = .synthesizing
         statusText = normalizeEnabled ? "대본 생성 중…" : "합성 중…"
         scriptTask = Task { [weak self] in
+            let activityID = MemoryDiagnostics.begin("AppState.scriptPlayback")
+            defer { MemoryDiagnostics.end(activityID) }
             guard let self else { return }
             let script = await self.prepareScript()
             guard !Task.isCancelled else { return }
@@ -1271,7 +1332,7 @@ final class AppState: ObservableObject {
         phase = .playing; statusText = "캐시에서 재생"; startTimer()
     }
 
-    func stop() { cancelActiveWork(); finish() }
+    func stop() { cancelActiveWork(); finish(); logMemory("stop") }
 
     /// 생성 중단 (사용자 요청 버튼): cancel the in-flight 해설/대본 LLM streams only —
     /// playback keeps running. Both stream loops already honor cancellation:
@@ -1331,9 +1392,12 @@ final class AppState: ObservableObject {
     }
 
     func refreshVoices() {
+        refreshModels()
         guard let key = Secrets.elevenLabsKey else { connectionStatus = "키 없음"; return }
         connectionStatus = "연결 확인 중…"
         Task { [weak self] in
+            let activityID = MemoryDiagnostics.begin("AppState.voiceRefresh")
+            defer { MemoryDiagnostics.end(activityID) }
             do {
                 let vs = try await ElevenLabs.voices(apiKey: key)
                 guard let self else { return }
@@ -1342,6 +1406,28 @@ final class AppState: ObservableObject {
                 if let v = vs.first(where: { $0.id == self.voiceId }) { self.voiceName = v.name }
             } catch {
                 self?.connectionStatus = "연결 실패: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    /// Keep the last successful catalog and selected model through all failures.
+    func refreshModels() {
+        guard !refreshingModels else { return }
+        guard let key = Secrets.elevenLabsKey else { modelStatus = "모델 조회: 키 없음"; return }
+        refreshingModels = true
+        modelStatus = "모델 목록 조회 중…"
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.refreshingModels = false }
+            do {
+                let models = try await ElevenModelCatalog.fetch(apiKey: key)
+                guard Secrets.elevenLabsKey == key else { self.modelStatus = "키가 변경되어 모델 새로고침이 필요합니다."; return }
+                self.elevenModels = models
+                self.modelStatus = "한국어 합성 모델 \(models.count)개"
+                do { try ElevenModelCatalog.save(models, to: Self.modelCatalogURL) }
+                catch { self.modelStatus += " · 목록 저장 실패: \(error.localizedDescription)" }
+            } catch {
+                self.modelStatus = "모델 조회 실패: \(error.localizedDescription) · 기존 목록 유지"
             }
         }
     }
@@ -1374,6 +1460,7 @@ final class AppState: ObservableObject {
 
     /// Flip the subtitle for the current playback mode (TTS vs 해설) and persist.
     func toggleSubtitle() {
+        defer { logMemory("subtitle.toggle") }
         if playbackMode == .tts { subtitleTTS.toggle() } else { subtitleExplain.toggle() }
         saveSettings()
     }
@@ -1391,6 +1478,8 @@ final class AppState: ObservableObject {
     }
 
     func saveSettings() {
+        let started = ProcessInfo.processInfo.systemUptime
+        defer { InputDiagnostics.shared.recordWork("saveSettings", since: started) }
         var dict: [String: Any] = [
             "voiceId": voiceId, "voiceName": voiceName, "modelId": modelId,
             "backend": backendKind.rawValue, "useCache": useCache, "localBaseURL": localBaseURL,

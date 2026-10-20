@@ -7,6 +7,8 @@ import AVFoundation
 /// paragraph (rebuilding the queue when jumping back). Small gaps between items
 /// fall on paragraph boundaries (natural pauses).
 final class QueuePlayer {
+    private let diagnosticID = MemoryDiagnostics.begin("queuePlayer.instance")
+    deinit { MemoryDiagnostics.end(diagnosticID) }
     private let player = AVQueuePlayer()
     var onFinish: (() -> Void)?
 
@@ -16,6 +18,10 @@ final class QueuePlayer {
     private var observers: [NSObjectProtocol] = []
 
     init() { player.actionAtItemEnd = .advance }
+
+    var memorySummary: String {
+        "audioURLs=\(urls.count) audioItems=\(player.items().count) audioObservers=\(observers.count) audioExpected=\(expected)"
+    }
 
     var isPlaying: Bool { player.rate != 0 }
     var finishedCount: Int { playIndex }

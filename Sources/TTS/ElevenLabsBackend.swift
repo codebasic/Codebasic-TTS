@@ -32,10 +32,19 @@ struct ElevenLabsBackend: TTSBackend {
     let identity = "elevenlabs"
     let apiKey: String
     var settings: ElevenVoiceSettings? = nil
+    var models: [ElevenModel] = []
+
+    private func settingsJSON(for modelID: String, settings s: ElevenVoiceSettings) -> [String: Any] {
+        guard let model = models.first(where: { $0.id == modelID }) else { return s.json }
+        return model.voiceSettingsJSON(stability: s.stability, similarityBoost: s.similarityBoost,
+                                       style: s.style, useSpeakerBoost: s.useSpeakerBoost)
+    }
 
     func stream(segment: String, voice: VoiceConfig) -> AsyncThrowingStream<Data, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
+                let activityID = MemoryDiagnostics.begin("ElevenLabsBackend.audioStream")
+                defer { MemoryDiagnostics.end(activityID) }
                 do {
                     let url = URL(string:
                         "https://api.elevenlabs.io/v1/text-to-speech/\(voice.voiceId)/stream"
@@ -45,7 +54,7 @@ struct ElevenLabsBackend: TTSBackend {
                     req.setValue(apiKey, forHTTPHeaderField: "xi-api-key")
                     req.setValue("application/json", forHTTPHeaderField: "Content-Type")
                     var body: [String: Any] = ["text": segment, "model_id": voice.modelId]
-                    if let s = settings { body["voice_settings"] = s.json }
+                    if let s = settings { body["voice_settings"] = settingsJSON(for: voice.modelId, settings: s) }
                     req.httpBody = try JSONSerialization.data(withJSONObject: body)
 
                     let (bytes, response) = try await URLSession.shared.bytes(for: req)
@@ -73,6 +82,8 @@ struct ElevenLabsBackend: TTSBackend {
     /// (seconds) for exact subtitle sync. One JSON response (no streaming) — the
     /// streaming path already buffers the whole chunk, so latency is unchanged.
     func synthesizeTimed(segment: String, voice: VoiceConfig) async throws -> (data: Data, charStarts: [Double])? {
+        let diagnosticID = MemoryDiagnostics.begin("elevenlabs.timedAudio")
+        defer { MemoryDiagnostics.end(diagnosticID) }
         let url = URL(string:
             "https://api.elevenlabs.io/v1/text-to-speech/\(voice.voiceId)/with-timestamps"
             + "?output_format=mp3_44100_128")!
@@ -81,7 +92,7 @@ struct ElevenLabsBackend: TTSBackend {
         req.setValue(apiKey, forHTTPHeaderField: "xi-api-key")
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         var body: [String: Any] = ["text": segment, "model_id": voice.modelId]
-        if let s = settings { body["voice_settings"] = s.json }
+        if let s = settings { body["voice_settings"] = settingsJSON(for: voice.modelId, settings: s) }
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         let (data, response) = try await URLSession.shared.data(for: req)
@@ -120,11 +131,4 @@ enum ElevenLabs {
         }
     }
 
-    /// Korean-capable models, newest/most useful first.
-    static let koreanModels: [(id: String, label: String)] = [
-        ("eleven_flash_v2_5", "Flash v2.5 (저지연)"),
-        ("eleven_multilingual_v2", "Multilingual v2 (품질)"),
-        ("eleven_turbo_v2_5", "Turbo v2.5"),
-        ("eleven_v3", "v3 (표현력)"),
-    ]
 }

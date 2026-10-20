@@ -4,6 +4,8 @@ import Combine
 /// A short, cancellable audition, independent of the document, queue and history.
 @MainActor
 final class VoicePreview: NSObject, ObservableObject, AVAudioPlayerDelegate {
+    private let diagnosticID = MemoryDiagnostics.begin("voicePreview.instance")
+    deinit { MemoryDiagnostics.end(diagnosticID) }
     @Published private(set) var busy = false
     @Published private(set) var status = ""
     private var task: Task<Void, Never>?
@@ -15,7 +17,7 @@ final class VoicePreview: NSObject, ObservableObject, AVAudioPlayerDelegate {
         let backend: TTSBackend
         if app.backendKind == .elevenlabs {
             guard let key = Secrets.elevenLabsKey else { status = "먼저 API 키를 저장하세요."; return }
-            backend = ElevenLabsBackend(apiKey: key, settings: app.voiceSettings)
+            backend = ElevenLabsBackend(apiKey: key, settings: app.voiceSettings, models: app.elevenModels)
         } else {
             guard let url = serviceURL(app.localBaseURL) else { status = "서버 주소를 확인하세요."; return }
             backend = Qwen3MLXBackend(baseURL: url)
@@ -25,6 +27,8 @@ final class VoicePreview: NSObject, ObservableObject, AVAudioPlayerDelegate {
         busy = true
         status = "음성 생성 중…"
         task = Task { [weak self] in
+            let activityID = MemoryDiagnostics.begin("VoicePreview.generation")
+            defer { MemoryDiagnostics.end(activityID) }
             do {
                 var audio = Data()
                 for try await chunk in backend.stream(segment: String(text.prefix(300)), voice: voice) {
@@ -58,6 +62,8 @@ final class VoicePreview: NSObject, ObservableObject, AVAudioPlayerDelegate {
 
     nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
         Task { @MainActor [weak self] in
+            let activityID = MemoryDiagnostics.begin("VoicePreview.playbackFinished")
+            defer { MemoryDiagnostics.end(activityID) }
             guard let self, self.player === player else { return }
             self.busy = false
             self.status = flag ? "재생 완료" : "재생 실패"

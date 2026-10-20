@@ -65,11 +65,13 @@ struct PlayerOverlay: View {
                     .padding(.horizontal, 8).padding(.vertical, 3)
                     .background(tint.opacity(0.18), in: Capsule())
                     .foregroundStyle(tint)
+                    .overlay(OverlayDragHandle())
                 if app.chunkCount > 1 {
                     Text("문단 \(app.chunkIndex)/\(app.chunkCount)")
                         .font(.caption).foregroundStyle(.secondary)
+                        .overlay(OverlayDragHandle())
                 }
-                Spacer()
+                Spacer().overlay(OverlayDragHandle())
                 if app.phase == .synthesizing {
                     ProgressView().controlSize(.small)
                     Text("합성 중…").font(.caption).foregroundStyle(.secondary)
@@ -127,6 +129,7 @@ struct PlayerOverlay: View {
                 .frame(height: subtitleViewportHeight, alignment: .top)         // fixed viewport the text scrolls through
                 .clipped()
                 .mask(crawlFadeMask)
+                .overlay(OverlayDragHandle())
             }
 
             // Transport + progress are one fixed-size, centered cluster, so the

@@ -5,6 +5,8 @@ import SwiftUI
 /// lazily; reused across opens.
 @MainActor
 final class MainWindow: NSObject, NSWindowDelegate {
+    private let diagnosticID = MemoryDiagnostics.begin("mainWindow.instance")
+    deinit { MemoryDiagnostics.end(diagnosticID) }
     private var window: NSWindow?
     private let appState: AppState
 
@@ -20,7 +22,7 @@ final class MainWindow: NSObject, NSWindowDelegate {
             w.center()
             w.isReleasedWhenClosed = false
             w.delegate = self
-            w.contentView = NSHostingView(rootView: RootView().environmentObject(appState))
+            w.contentView = NSHostingView(rootView: RootView(app: appState).environmentObject(appState))
             window = w
         }
         NSApp.setActivationPolicy(.regular)        // Dock icon + app menu while the window is up
