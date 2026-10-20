@@ -12,6 +12,8 @@
 
 macOS용 TTS 앱: **텍스트를 선택하고 단축키 한 번으로 AI 음성 읽기 + LLM 코드 해설**까지.
 
+**개발 소스: v0.2.0 (빌드 2)** · [변경 기록](CHANGELOG.md). 최신 공개 다운로드는 **v0.1.0**이며, v0.2.0 앱 패키지는 아직 발행하지 않았습니다.
+
 > 💖 **Codebasic TTS는 무료·오픈소스입니다.** 앱이 유용하다면 후원으로 개발을 응원해 주세요
 > → [**GitHub Sponsors로 후원하기**](https://github.com/sponsors/codebasic) (금액·주기 자유)
 
