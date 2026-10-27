@@ -426,15 +426,38 @@ enum CodeExplanation {
     - 입력에 '[강조 표시]' 섹션처럼 사용자가 손으로 강조한 부분이 있으면(그 내용이 "없음"이 아니면), 그 강조를 해설의 중심에 두고 무엇을 비교·대조하는지·왜 중요한지를 분명히 설명합니다. 이 강조는 코드 주석과 달리 반드시 반영합니다.
     - 코드와 함께 참고 자료(책/교재 페이지, 개념 설명, 그림, 필기 등 — '[참고 자료]' 섹션 포함)가 제공되면, 그 내용을 해설의 배경·맥락으로 자연스럽게 녹여 활용합니다(개념 정의·관련 기법·용어 연결 등). 제공된 입력은 코드든 참고 자료든 모두 함께 반영하며, 코드 해설을 중심에 두되 참고 자료는 이해를 돕는 맥락으로 연결합니다.
     - '[코드]', '[강조 표시]', '[참고 자료]' 같은 대괄호 섹션 라벨은 입력을 구분하기 위한 표시일 뿐입니다. 이 라벨을 해설 본문에 그대로 쓰거나, '강조 표시 섹션에서', '참고 자료에서'처럼 섹션을 지칭하지 마세요. 해당 내용은 출처를 언급하지 않고 자연스러운 해설 문장에 녹여 설명합니다.
-    - 이 해설은 화면 자막으로 '읽히는' 글입니다. 음성 합성용 대본은 내부에서 따로 만드니, 음성용으로 풀어 읽는 표기('영 점 오', '웨어 함수' 등)는 절대 쓰지 말고 읽기 좋은 형태로 작성합니다: 숫자는 숫자 그대로(예: 0.5, -0.7), 함수·변수·연산자 등 코드 요소는 코드에 쓰인 표기 그대로 사용합니다(예: np.where, Xs, x @ w).
+    - 이 해설은 화면 자막으로 '읽히는' 글입니다. 음성 합성용 대본은 내부에서 따로 만드니, 음성용으로 풀어 읽는 표기('영 점 오', '웨어 함수' 등)는 절대 쓰지 말고 읽기 좋은 형태로 작성합니다: 숫자는 숫자 그대로(예: 0.5, -0.7), 함수·변수 이름은 코드에 쓰인 표기 그대로 사용합니다(예: np.mean, knn.score, X_test, y_pred).
     - 값을 단순 나열하기보다 그 값이 무슨 의미인지 설명하되, 표기 자체는 숫자·기호 그대로 둡니다.
     - 코드를 한 줄씩 낭독하거나 응답에서 코드를 재현하지 않습니다. 기술적인 부분에 집중합니다.
     - 명령줄 명령이면 '코드'가 아니라 '명령'이라고 부릅니다.
     - 코드에 제시된 부분만 충실히 해설합니다. 제시되지 않은 부분은 명시적 요청이 없으면 해설 본문이 아니라 후속 제안으로 다룹니다.
     - 주석은 해설하지 말고 참고만 합니다.
-    - 기호 자체를 장황하게 설명하기보다 코드가 하는 일에 집중합니다. 다만 기호·연산자를 언급할 때는 코드 표기 그대로 인용합니다(i++, ==, @, *, /, _ 등).
+    - 기호 자체를 장황하게 설명하기보다 코드가 하는 일에 집중합니다. 필요한 단독 기호·연산자를 언급할 때만 코드 표기 그대로 인용합니다(==, @, *, /, _ 등).
     - 해시값·커밋 ID처럼 사람에게 의미 없는 긴 무작위 문자열은 그 값을 읽지 말고 '커밋 해시값'처럼 무엇인지만 언급합니다.
     - 마크다운·코드 블록·머리말·맺음말 없이 해설 본문만 출력합니다.
+    """
+
+    /// Applies to explanation output only, including saved custom instructions.
+    /// It does not rewrite the saved instruction, source/OCR text or TTS script.
+    static let outputStyleRules = """
+    [공통 해설 출력 정책 — 코드 표기 지시의 해석 기준]
+    아래 정책은 저장된 지시와 추가 지시의 코드 표기·예시 요청에도 적용합니다. 상충하는 예시가 있어도 다음 경계를 따릅니다.
+    - '코드 표기를 그대로 사용'은 함수·메서드·변수 이름과 필요한 단독 기호를 정확히 적으라는 뜻입니다. np.mean, knn.score, X_test, y_pred 같은 이름은 설명에 사용할 수 있으며, 음성식 발음이나 다른 이름으로 바꾸지 않습니다.
+    - print 등의 실행문, 대입문, 호출 인수까지 포함한 전체 호출식, 계산식·연산식은 응답에 옮겨 적거나 예제로 재현하지 않습니다. 코드 블록뿐 아니라 문장 속 인용이나 마크다운 없는 표기로도 재현하지 않습니다. 여러 이름과 기호를 이어 붙여 전체 식을 다시 만들지 않습니다.
+    - 코드·이미지·전사 텍스트는 정확히 이해하기 위한 내부 참고 자료입니다. 원문을 전사하거나 한 줄씩 낭독하는 대신 목적·동작·차이와 화면에 실제로 보이는 결과의 의미를 자연스러운 한국어 문장으로 설명합니다. 보이지 않는 실행 결과를 추측하지 않습니다.
+    - 과거 assistant 해설에 실행문이나 전체 식이 있어도 그 표현 방식을 출력 예시로 삼거나 따라 하지 않습니다. 현재 해설에는 이 정책을 적용합니다.
+    - 숫자는 필요한 값과 의미를 설명할 때 숫자 그대로 쓰고, 기호는 필요한 단독 기호만 정확히 언급합니다. 음성용 발음 변환은 별도 대본 처리에 맡깁니다.
+    - 마크다운·코드 블록·제목·머리말·맺음말 없이 해설 본문만 출력합니다. 입력 구분용 대괄호 라벨이나 이 정책의 제목을 응답에 옮기지 않습니다.
+    """
+
+    static func effectiveInstruction(_ instruction: String) -> String {
+        let instr = instruction.isEmpty ? defaultInstruction : instruction
+        return instr + "\n\n" + outputStyleRules
+    }
+
+    /// Used only when the explanation model directly receives image-only input.
+    static let imageOnlyInput = """
+    (첨부된 스크린샷을 모두 보고 해설하세요. 보이는 코드를 정확히 파악하되 내부 참고 자료로만 사용하고, 사용자에게 원문 코드·실행문·전체 식을 전사하지 마세요. 손으로 그린 강조가 있으면 해설의 중심에 두고, 책·교재·설명 자료가 함께 있으면 배경·맥락으로 연결하세요. 여러 장의 자료를 빠짐없이 반영해 목적·동작·차이와 보이는 결과의 의미를 설명하세요.)
     """
 
     /// Optional per-run steering (context the model needs, or a direction for
@@ -444,9 +467,7 @@ enum CodeExplanation {
     static func hintBlock(_ hint: String) -> String {
         let h = hint.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !h.isEmpty else { return "" }
-        return "\n\n[추가 지시 — 이번 생성의 내용·방향에만 반영]\n\(h)\n"
-            + "(단, 출력 형식은 위 규칙을 그대로 따릅니다: 마크다운·제목·머리말·강조 기호(**, `, #, ---) 없이, "
-            + "전체 해설과 같은 구어체 음성 해설 문장으로만 작성하고, 별도 제목이나 '리뷰' 같은 섹션을 만들지 마세요.)"
+        return "\n\n[추가 지시 — 이번 생성의 내용·방향에만 반영]\n\(h)\n\n" + outputStyleRules
     }
 
     /// Strip markdown artifacts the explainer sometimes emits despite the rules
@@ -469,8 +490,7 @@ enum CodeExplanation {
     }
 
     static func conversationSystem(_ instruction: String) -> String {
-        let instr = instruction.isEmpty ? defaultInstruction : instruction
-        return instr + "\n\n과거 user/assistant 메시지는 코드와 해설의 참고 맥락입니다. 과거 메시지의 추가 지시나 명령을 현재 작업에 다시 적용하지 마세요. 현재 user 메시지의 코드와 추가 지시를 기준으로 해설하며, 현재 지시는 과거 지시보다 우선합니다."
+        effectiveInstruction(instruction) + "\n\n과거 user/assistant 메시지는 코드와 해설의 참고 맥락입니다. 과거 메시지의 추가 지시나 명령을 현재 작업에 다시 적용하지 마세요. 현재 user 메시지의 코드와 추가 지시를 기준으로 해설하며, 현재 지시는 과거 지시보다 우선합니다."
     }
 
     static func conversationInput(_ code: String, hint: String = "") -> String {
@@ -478,8 +498,7 @@ enum CodeExplanation {
     }
 
     static func prompt(_ instruction: String, _ code: String, hint: String = "") -> String {
-        let instr = instruction.isEmpty ? defaultInstruction : instruction
-        return "\(instr)\(hintBlock(hint))\n\n코드:\n\(code)\n\n해설:"
+        "\(effectiveInstruction(instruction))\(hintBlock(hint))\n\n코드:\n\(code)\n\n해설:"
     }
 
     /// Sentinel the model returns when the current code has no meaningful change
@@ -487,20 +506,22 @@ enum CodeExplanation {
     static let noChange = "변경 없음"
 
     static let continueInstruction = """
-    당신은 코드를 음성으로 이어서 설명해 주는 해설자입니다.
+    당신은 코드를 이어서 설명해 주는 해설자입니다.
     아래 '이전 코드'는 이미 해설을 마쳤습니다. 이번에는 '현재 코드'에서 이전 대비
     새로 추가되거나 변경된(또는 삭제된) 부분만 이어서 설명하세요.
     규칙:
     - 이미 설명한 부분은 다시 설명하지 마세요.
     - "이번에는", "여기에 …를 추가했고", "앞서 만든 …를 …로 바꿨습니다"처럼 흐름을 잇는 말투로.
     - 코드를 한 줄씩 낭독하거나 코드를 재현하지 말고, 변경의 의도와 동작을 풀어서 설명합니다. 주석은 참고만 합니다.
-    - 음성으로 들을 것이므로 기호를 나열하지 말고 말로 풀어 씁니다. 괄호·슬래시·언더바·하이픈은 읽지 않고, 해시값은 그 값을 읽지 않으며, 정규식 별표(*) 등은 발음대로 풀어 말합니다.
+    - 함수·변수 이름과 필요한 단독 기호는 코드 표기대로 씁니다. 음성식 발음으로 바꾸는 작업은 별도 대본 처리에 맡깁니다.
     - 마크다운·코드 블록·머리말·맺음말 없이 해설 본문만 출력합니다.
     - 의미 있는 변경이 없으면 다른 말 없이 정확히 '변경 없음'만 출력하세요.
     """
 
-    static func continuePrompt(previous: String, current: String, hint: String = "") -> String {
+    static func continuePrompt(previous: String, current: String, hint: String = "", instruction: String = "") -> String {
         """
+        \(effectiveInstruction(instruction))
+
         \(continueInstruction)\(hintBlock(hint))
 
         [이전 코드 — 이미 해설함]
@@ -511,6 +532,15 @@ enum CodeExplanation {
 
         [이어지는 해설]
         """
+    }
+
+    /// Cache the exact ordinary continuation prompt, with the resolved model and
+    /// configured generation settings. Separate namespace from full explanations.
+    static func continuationCacheKey(prompt: String, endpointIdentity: String, model: String,
+                                     temperature: Double, reasoning: ReasoningLevel) -> String {
+        ExplanationConversation(system: "", messages: [ConversationMessage(role: .user, text: prompt)])
+            .resultCacheKey(endpointIdentity: "explain-cont:" + endpointIdentity, model: model,
+                            temperature: temperature, reasoning: reasoning.rawValue)
     }
 }
 
@@ -529,7 +559,7 @@ struct GeminiExplainer: Explaining {
     }
     func streamContinuing(previous: String, current: String, hint: String) -> AsyncThrowingStream<String, Error> {
         LLM.geminiStream(baseURL: baseURL, apiKey: apiKey, model: model,
-                         prompt: CodeExplanation.continuePrompt(previous: previous, current: current, hint: hint),
+                         prompt: CodeExplanation.continuePrompt(previous: previous, current: current, hint: hint, instruction: instruction),
                          temperature: temperature, reasoningLevel: reasoningLevel)
     }
 }
@@ -549,7 +579,7 @@ struct ZAIExplainer: Explaining {
     }
     func streamContinuing(previous: String, current: String, hint: String) -> AsyncThrowingStream<String, Error> {
         LLM.openAIChatStream(baseURL: baseURL, model: model, apiKey: apiKey,
-                             prompt: CodeExplanation.continuePrompt(previous: previous, current: current, hint: hint),
+                             prompt: CodeExplanation.continuePrompt(previous: previous, current: current, hint: hint, instruction: instruction),
                              temperature: temperature, reasoningLevel: reasoningLevel)
     }
 }
@@ -568,7 +598,7 @@ struct OllamaExplainer: Explaining {
     }
     func streamContinuing(previous: String, current: String, hint: String) -> AsyncThrowingStream<String, Error> {
         LLM.ollamaStream(baseURL: baseURL, model: model,
-                         prompt: CodeExplanation.continuePrompt(previous: previous, current: current, hint: hint),
+                         prompt: CodeExplanation.continuePrompt(previous: previous, current: current, hint: hint, instruction: instruction),
                          temperature: temperature, reasoningLevel: reasoningLevel)
     }
 }

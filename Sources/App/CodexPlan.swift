@@ -6,6 +6,21 @@ func connectionError(_ message: String) -> NSError {
     NSError(domain: "ServiceConnection", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
 }
 
+/// Keep server error codes available for narrow protocol compatibility decisions,
+/// while presenting the same server message in the UI.
+struct CodexRPCError: LocalizedError, CustomNSError {
+    let code: Int
+    let message: String
+    static var errorDomain: String { "CodexRPC" }
+    var errorCode: Int { code }
+    var errorDescription: String? { message }
+    var errorUserInfo: [String: Any] { [NSLocalizedDescriptionKey: message] }
+
+    func isUnsupportedMethod(_ method: String) -> Bool {
+        code == -32601 || (code == -32600 && message.contains("unknown variant `\(method)`"))
+    }
+}
+
 /// Owns an official app-server process. Tokens stay in Codex's own auth storage.
 /// A dedicated home avoids importing the user's project tools, MCP servers or API configuration.
 @MainActor
@@ -104,7 +119,8 @@ final class CodexPlanRPC {
                 } else { notification?(method, object["params"] as? [String: Any] ?? [:]) }
             } else if let id = object["id"] as? Int, let continuation = pending.removeValue(forKey: id) {
                 if let error = object["error"] as? [String: Any] {
-                    continuation.resume(throwing: connectionError(error["message"] as? String ?? "연결 오류"))
+                    continuation.resume(throwing: CodexRPCError(code: error["code"] as? Int ?? 0,
+                                                               message: error["message"] as? String ?? "연결 오류"))
                 } else { continuation.resume(returning: object["result"] as? [String: Any] ?? [:]) }
             }
         }
@@ -230,8 +246,16 @@ enum CodexPlan {
                     guard let info = thread["thread"] as? [String: Any], let id = info["id"] as? String else {
                         throw connectionError("생성 세션을 시작하지 못했습니다.")
                     }
+                    var referenceHistory = false
                     if let conversation, !conversation.codexHistoryItems.isEmpty {
-                        _ = try await client.request("thread/injectItems", ["threadId": id, "items": conversation.codexHistoryItems])
+                        let method = "thread/inject_items"
+                        do {
+                            _ = try await client.request(method, ["threadId": id, "items": conversation.codexHistoryItems])
+                        } catch let error as CodexRPCError where error.isUnsupportedMethod(method) {
+                            // No turn has started. Only a missing injection method
+                            // falls back to one ordinary input containing all context.
+                            referenceHistory = true
+                        }
                     }
                     let (events, eventContinuation) = AsyncStream<(String, [String: Any])>.makeStream()
                     client.notification = { eventContinuation.yield(($0, $1)) }
@@ -239,8 +263,10 @@ enum CodexPlan {
                     let current = conversation?.messages.last
                     var input: [[String: Any]] = [["type": "text", "text": current?.text ?? prompt, "text_elements": []]]
                     input += (current?.images ?? images).map { ["type": "image", "url": "data:image/png;base64,\($0.base64EncodedString())"] }
+                    if referenceHistory, let conversation { input = conversation.codexReferenceInput }
                     var params: [String: Any] = ["threadId": id, "input": input]
                     if !reasoning.isProviderDefault { params["effort"] = reasoning.rawValue }
+                    try Task.checkCancellation()
                     _ = try await client.request("turn/start", params)
                     let deadline = Task { @MainActor in
                         let activityID = MemoryDiagnostics.begin("CodexPlan.generationDeadline")

@@ -16,7 +16,10 @@ struct EndpointGenerator: Normalizing, Explaining {
         generate(CodeExplanation.prompt(instruction, code, hint: hint))
     }
     func streamContinuing(previous: String, current: String, hint: String) -> AsyncThrowingStream<String, Error> {
-        generate(CodeExplanation.continuePrompt(previous: previous, current: current, hint: hint))
+        generate(continuationPrompt(previous: previous, current: current, hint: hint))
+    }
+    func continuationPrompt(previous: String, current: String, hint: String) -> String {
+        CodeExplanation.continuePrompt(previous: previous, current: current, hint: hint, instruction: instruction)
     }
     func generate(_ prompt: String, images: [Data] = [], conversation: ExplanationConversation? = nil) -> AsyncThrowingStream<String, Error> {
         if endpoint.usesPlan {

@@ -89,6 +89,8 @@ import Foundation
         check(canonical(Array(extended.geminiContents.prefix(messages.count))) == canonical(conversation.geminiContents), "Gemini cached prefix stays identical")
         check(canonical(Array(extended.anthropicMessages.prefix(messages.count))) == canonical(conversation.anthropicMessages), "Anthropic cached prefix stays identical")
         check(canonical(Array(extended.ollamaMessages.prefix(openAI.count))) == canonical(conversation.ollamaMessages), "Ollama cached prefix stays identical")
+        check(canonical(Array(extended.codexReferenceInput.prefix(conversation.codexReferenceInput.count))) == canonical(conversation.codexReferenceInput),
+              "Codex reference input keeps prior message/image boundaries identical when appending")
         var byteLimited = ExplanationHistory(maxTurns: 100, maxTextBytes: 32, maxImageBytes: 4)
         for i in 0..<20 {
             let r = byteLimited.prepare(system: "rules", user: user("한\(i)", images: [Data([1])]), sourceID: "\(i)")

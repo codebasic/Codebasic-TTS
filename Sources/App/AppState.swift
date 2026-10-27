@@ -897,7 +897,7 @@ final class AppState: ObservableObject {
             code = typed.isEmpty ? transcribed : typed + "\n\n" + transcribed
         } else if singleStage {
             code = typed.isEmpty
-                ? "(첨부된 스크린샷을 모두 보고 해설하세요. 코드는 정확히 읽고, 손으로 그린 강조가 있으면 해설의 중심에 두며, 책·교재·설명 자료가 함께 있으면 그 내용을 해설의 배경·맥락으로 연결해 활용하세요. 여러 장이면 서로 보완하는 자료이니 빠짐없이 반영합니다.)"
+                ? CodeExplanation.imageOnlyInput
                 : typed
         }
         guard !code.isEmpty else { statusText = "해설 생성 실패 (빈 입력)"; return nil }
@@ -957,11 +957,10 @@ final class AppState: ObservableObject {
             statusText = "해설 생성 불가 — 엔드포인트·모델·API 키 중 하나가 미설정입니다 (설정 확인)"
             return nil
         }
-        let provider = "explain-cont:" + ep.cacheIdentity
-        let keyText = lastExplainedCode + "\u{1F}" + current
-        let nk = NormalizationCache.key(text: keyText, provider: provider, model: explainModel,
-                                        prompt: "continue\u{1F}" + explainHint
-                                                + explainReasoningLevel.cacheSuffix)
+        let prompt = explainer.continuationPrompt(previous: lastExplainedCode, current: current, hint: explainHint)
+        let nk = CodeExplanation.continuationCacheKey(prompt: prompt, endpointIdentity: ep.cacheIdentity,
+                                                     model: explainer.model, temperature: explainer.temperature,
+                                                     reasoning: explainer.reasoningLevel)
         if !force, let cached = normCache.script(forKey: nk) {
             applyContinuation(cached, newBaseline: current); return cached
         }
@@ -972,7 +971,7 @@ final class AppState: ObservableObject {
         statusText = "이어서 해설 생성 중…"
         var acc = ""
         do {
-            for try await delta in explainer.streamContinuing(previous: lastExplainedCode, current: current, hint: explainHint) {
+            for try await delta in explainer.generate(prompt) {
                 try Task.checkCancellation()
                 acc += delta
                 explanationText = base + acc

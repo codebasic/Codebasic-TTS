@@ -133,6 +133,12 @@ case "${1:-install}" in
     swiftc -O "$HERE/Sources/Core/ExplanationConversation.swift" "$HERE/Tests/ExplanationConversationTests.swift" \
       -o "$BUILD_DIR/conversation-tests"
     "$BUILD_DIR/conversation-tests"
+    swiftc -O "$HERE/Sources/App/CodexPlan.swift" "$HERE/Sources/App/AntigravityPlan.swift" "$HERE/Sources/App/Secrets.swift" \
+      "$HERE/Sources/App/Endpoints.swift" "$HERE/Sources/TTS/TextNormalizer.swift" "$HERE/Sources/TTS/EndpointGenerator.swift" \
+      "$HERE/Sources/Core/ExplanationConversation.swift" "$HERE/Sources/Core/NormalizationCache.swift" \
+      "$HERE/Sources/Core/Logging.swift" "$HERE/Sources/Core/MemoryDiagnostics.swift" "$HERE/Tests/ExplanationStyleTests.swift" \
+      -framework AppKit -o "$BUILD_DIR/explanation-style-tests"
+    "$BUILD_DIR/explanation-style-tests"
     ;;
   clean) rm -rf "$BUILD_DIR"; echo "cleaned" ;;
   install|"") build; install_and_register ;;
