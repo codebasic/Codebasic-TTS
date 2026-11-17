@@ -1,40 +1,71 @@
 # Codebasic TTS V2 prototype
 
-Goal: preserve the existing multi-provider connection/model selection while making ordinary conversation the primary interface. Direct Gemini streaming remains supported; fresh V2 defaults to gemini-flash-lite-latest with Google service default gemini-2.5-flash. OpenAI-compatible, Anthropic, Ollama and existing supported plan transports reuse EndpointGenerator unchanged.
+Goal: keep the existing multi-provider connection/model selection while making ordinary conversation the primary interface. Direct Gemini streaming remains supported; fresh V2 defaults to gemini-flash-lite-latest with Google service default gemini-2.5-flash. OpenAI-compatible, Anthropic, Ollama and supported account-plan transports reuse EndpointGenerator and provider-neutral message conversion.
 
-Scope: this independent clone only, branch feature/chat-v2, base aba918365ea9a7dc19fa27b9652a0f6bbe84df24. V1 and pipeline checkouts are read-only. No installation, app launch, push, live model generation or live voice calls.
+Scope: independent clone a separate local clone, branch feature/chat-v2, base aba918365ea9a7dc19fa27b9652a0f6bbe84df24. V1 and pipeline checkouts are read-only. No install, Services registration, push, live model generation or live voice calls. GUI execution used the explicit offline test mode only.
 
-## Isolation and operation
+## Isolation and connection reuse
 
-- Bundle ID: com.seongjoo.CodebasicTTSV2; app: build/Codebasic TTS V2.app.
-- Data: ~/Library/Application Support/Codebasic TTS V2. Google plan and Codex plan working directories are also isolated.
-- Conversation records: chat/conversations.json, including roles, timestamps, PNG attachments, response status, provider and model snapshots.
-- Disposable audio: chat/audio-cache; deleting this folder does not delete conversations.
-- No automatic V1 migration. The explicit V1 connection button imports endpoint/model settings and voice/model IDs only. It enables read-only access to V1 credential files without copying keys. A second button revokes that fallback. New settings/key writes always target V2. Existing account-plan login state is not copied; authenticate separately if needed.
-- No Services or global hotkeys are registered by V2. ElevenLabs is not contacted on startup, settings opening, key save, or text generation. Playback/preview are explicit. Voice/model IDs can be entered without listing APIs.
-- Text streams persist independently of audio. Generation and audio have separate cancellation tokens. Late cancelled work cannot append or play. Failed/partial/interrupted assistant messages remain visible and are excluded from subsequent context.
-- Corrupt conversation files are preserved and block writes; repair/restore the JSON before continuing. Persistence errors appear in the interface.
+- Bundle ID com.seongjoo.CodebasicTTSV2; local app build/Codebasic TTS V2.app.
+- Normal data: ~/Library/Application Support/Codebasic TTS V2. Google/Codex plan working directories also remain inside V2.
+- No automatic V1 migration. The explicit connection button imports endpoint/model settings and voice/model IDs only, enabling read-only access to the original V1 key files. No keys are copied. Another button revokes the fallback. New settings/key writes always target V2. Account-plan login state is not copied.
+- No V1 Services or global hotkeys are registered. ElevenLabs is not contacted on startup, settings opening, key save or text generation. Playback/preview are explicit; voice/model IDs can be entered without listing APIs.
 
-## Commands
+## Persistence and cancellation
 
-`./build.sh build` builds and ad-hoc signs locally. `./build.sh test` runs new mock chat checks and all original local test targets. Bare build.sh also means build only; install/dev/smoke are unavailable. No SwiftPM/Xcode project.
+Conversation metadata lives in chat/conversations.json: roles, timestamps, status, provider/model snapshots and attachment filenames. Immutable images live in chat/attachments and are written once. Disposable audio lives in chat/audio-cache; clearing it preserves conversations. Prior V2 inline-image archives remain readable and are upgraded on the next save; V1 data is never migrated.
 
-Build uses the installed macOS 26.5 SDK because this host's default macOS 27 SDK references a missing SwiftUIMacros plugin. Override SWIFT_SDK_PATH to choose another complete SDK. Minimum target is macOS 14, matching existing UI API usage.
+A serial utility queue performs encoding and writes. Streaming schedules at most one checkpoint per second; new chunks do not encode the full image archive. Completion, error, cancellation and normal application termination cancel the pending timer and synchronously drain/save the final snapshot. Initial send is also durable before a generation request begins. Abrupt process termination can lose up to the last checkpoint interval of text. After an unclean exit, unfinished responses become interrupted. Failed/partial/interrupted assistant messages stay visible and are excluded from future model context.
 
-## Verification and remaining limits
+Corrupt metadata or missing attachment files block further writes and show an error, preserving the original files for repair. Checkpoints still serialize all text metadata, so very large histories can eventually need per-thread storage/indexing. No hundreds-of-conversations benchmark or full 80 MB attachment stress run has been performed; the regression test uses a 1 MB attachment and 1,000 streamed chunks.
 
-New mock tests cover persisted text/images/timestamps/provider/model, audio-generation independence, duplicate generation/playback, cache reuse, cancellation/late results, synthesis and generation failures, restart interruption, corrupt-history preservation and cache deletion. Existing tests exercise provider records, serialization, fake CLI connections, model catalog and explanation rules.
+## Response playback
 
-GUI layout, actual streaming against all providers, account-plan login and real ElevenLabs audio remain unverified. No paid calls were made. Attachments currently support PNG/JPEG (up to eight, 10 MB each); no arbitrary files. Entire conversation history is supplied without automatic context trimming; large histories may exceed a provider limit. Drafts are session-only. No deletion/export/search UI in this prototype.
+Text generation and audio have separate tasks/tokens. A repeated click cannot start a second request; stop invalidates the token before cancelling and clearing the playback queue. Cache identity includes voice, model, voice settings and chunk text. Existing TextSplitter and QueuePlayer are reused: maximum 700 characters per synthesis request, sequential synthesis with the first available chunk immediately enqueued. The first chunk is fully buffered before playback; later chunks can synthesize while earlier audio plays. Slow synthesis can leave gaps at paragraph boundaries. Cancelling stops future requests and ignores late results, but cannot undo provider billing for an already submitted request.
 
-Claude Code 2.1.316 is installed. `claude auth status` returned loggedIn=false/authMethod=none. A tools-disabled, safe-mode design consultation failed with `Not logged in · Please run /login`. No Claude design/final-diff review was obtained; a separate local review pass was performed instead. Claude review remains a completion blocker for the requested independent review. No credentials or user documents were sent.
+Speech removes common Markdown heading/fence/emphasis/link delimiters locally; code content remains. It is not a full Markdown renderer or an LLM narration pass. Responses over 20,000 characters are rejected before synthesis with a visible message. The limit and initial-playback behavior are shown in the UI. Actual ElevenLabs audio/device playback remains unverified.
 
-## Acceptance record
+## Build and offline GUI commands
 
-- PASS: independent V2 clone, bundle ID, settings/data/plan workspace paths; V1 checkout stayed clean at the base revision. No install/start/registration command executed.
-- PASS: preserved shared multi-provider EndpointGenerator and model picker; fast Gemini defaults configured.
-- PASS: 21 mock chat checks, original unit suite, ElevenLabs catalog/cache parsing, memory concurrency/cancellation, fake CLI connection tests, conversation serialization (134), explanation rules (49). Test command exited 0.
-- PASS: final local V2 build using macOS 26.5 SDK exited 0, including UI actor-boundary cleanup. Existing CodexPlan capture warnings remain.
-- UNVERIFIED: GUI behavior/layout, real provider/API/voice calls, account-plan login.
-- BLOCKED: requested Claude consultation and independent final diff review, because installed CLI is not authenticated. No auto-review denial occurred.
-- Risk: medium. Recovery: discard this independent clone/build and its unique V2 data directory; V1 requires no rollback.
+`./build.sh build` compiles and ad-hoc signs locally. `./build.sh test` runs 37 chat mock checks, offline isolation/network-interception checks, and all original local regression targets. Bare build.sh also means build only; install/dev/smoke are unavailable.
+
+The build uses the installed macOS 26.5 SDK because this host's default macOS 27 SDK references a missing SwiftUIMacros plugin. Override SWIFT_SDK_PATH for another complete SDK. Minimum target is macOS 14, matching existing UI API usage.
+
+For GUI testing, run the built binary with CODEBASIC_V2_OFFLINE=1 and CODEBASIC_V2_TEST_ROOT=/tmp/codebasic-v2-gui-review. The test root must resolve inside /tmp. Offline setup happens before AppState initialization: credential reads return nil, model refresh/CLI discovery calls are skipped, URLSession requests are intercepted and failed locally, account-plan editing and V1 reuse are disabled. Chat text and audio use mock functions; no sound device or paid service is used. The network regression probe uses loopback port 1 and verifies URLProtocol interception before a connection.
+
+## GUI observations — 2026-11-17
+
+Observed with CUA on the actual compiled V2 while V1 stayed running:
+
+| Flow | Result |
+|---|---|
+| Startup | Offline isolation banner and gemini-flash-lite-latest selector visible |
+| Image | Native open panel selected a synthetic PNG from /tmp; attachment count and rendered image visible |
+| Send | User message, streamed mock response and completed response playback control visible |
+| Playback/stop | Explicit mock playback showed preparing status and stop button; stop reset the state |
+| New conversation/list | Two independent conversations listed; selecting each restored its own messages |
+| Cancel | Slow mock response changed from generating to cancelled; send became available |
+| Settings round trip | Voice and AI service panels showed existing multi-provider UI; returning preserved chat |
+| Quit/restart | Normal quit succeeded; same /tmp data restored cancelled status, completed response, timestamps and image |
+| Cleanup | Test V2 exited normally; V1 remained running |
+
+One invalid tiny PNG fixture was initially rejected correctly. Replacing it with a valid synthetic PNG succeeded. A stale attachment notice found during this test was cleared in the final UI patch. The final Markdown and notice patch was unit-tested/built; the entire GUI sequence was not repeated for that small follow-up.
+
+## Claude consultation and review
+
+The first Claude CLI attempt failed while unauthenticated. The parent later confirmed authentication but reported automatic approval review rejected source-diff review because of external Figma/Datadog destination risk. That operation was not retried or bypassed here. A separate authenticated Claude desktop design consultation was completed by the parent, without source or secrets, using Claude Haiku 5.5: https://claude.ai/chat/b12bc313-c36a-4f20-9907-75728a26d498 . This is design advice, not an independent source-diff review.
+
+Adopted against code/tests: one-second throttled checkpoints; final-state flushes; immutable separate attachments; interrupted recovery; separate playback token and a single queue; voice/model/settings cache identity; long-text splitting; basic Markdown cleanup; provider-neutral history. The mock GUI and tests verify these selected changes.
+
+Not adopted: copying credentials or sharing Keychain access, which exceed the authorized read-only V1 reference approach. Model-specific image capability detection remains deferred: users must choose an image-capable model; provider rejection is shown as a generation failure, without deleting the message/attachment. Large-history benchmarking and real provider/voice/login tests remain unverified. Local self-review and the parent's independent Codex review were performed; Claude final source-diff review remains unavailable due to the stated automatic-review block.
+
+## Acceptance and recovery
+
+- PASS: isolated clone, identity, data and plan paths; V1 checkout stayed clean at the base revision. No install or registration executed.
+- PASS: shared multi-provider generation/picker and fast Gemini defaults.
+- PASS: chat cancellation, duplicates, failures, cache independence, restart, corrupted-history protection, throttled writes, one-time attachment writes, final flushes, bounded/chunk-first audio, Markdown and over-limit handling through mocks.
+- PASS: original unit targets, model catalog/cache parsing, memory concurrency/cancellation, fake CLI connections, conversation serialization (134), explanation rules (49).
+- PASS: isolated offline GUI flows above. Real provider streaming, image/model compatibility, account login and audio device/API playback remain UNVERIFIED.
+- Risk: medium. Recovery: discard this independent clone/build and its V2-only data directory; V1 requires no rollback.
+
+Raw local verification logs are kept under build/validation. No credentials or user documents were sent to a model provider by this implementation task.

@@ -2,15 +2,8 @@ import SwiftUI
 import AppKit
 import AVFoundation
 
-@MainActor final class ChatAudio: NSObject, AVAudioPlayerDelegate {
-    var player: AVAudioPlayer?
-    var finished: () -> Void = {}
-    func play(_ data: Data) throws {
-        player = try AVAudioPlayer(data: data); player?.delegate = self
-        guard player?.play() == true else { throw URLError(.cannotDecodeContentData) }
-    }
-    nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) { Task { @MainActor [weak self] in self?.finished() } }
-    nonisolated func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) { Task { @MainActor [weak self] in self?.finished() } }
+@MainActor final class ChatAudio {
+    let queue = QueuePlayer()
 }
 struct ChatView: View {
     @EnvironmentObject var app: AppState
@@ -30,6 +23,7 @@ struct ChatView: View {
                 }
             }.frame(minWidth: 170, idealWidth: 210, maxWidth: 280)
             VStack(alignment: .leading, spacing: 10) {
+                if V2Runtime.offline { Text("오프라인 MOCK · 외부 연결 차단 · 격리 테스트 데이터").font(.caption).foregroundStyle(.orange) }
                 LLMModelPicker(label: "응답 모델", endpointID: $app.explainEndpointID, roleModels: $app.explainRoleModels, onChange: { app.saveSettings() })
                 ScrollViewReader { proxy in
                     ScrollView {
@@ -46,6 +40,7 @@ struct ChatView: View {
                                     }
                                     if message.state != "complete" { Text(message.state).font(.caption).foregroundStyle(.secondary) }
                                     if message.role == .assistant && message.state == "complete" {
+                                        if chat.playing == message.id { Text(chat.audioStatus).font(.caption) }
                                         Button(chat.playing == message.id ? "중지" : "음성 재생") {
                                             if chat.playing == message.id { chat.stop() } else { play(message) }
                                         }
@@ -57,7 +52,8 @@ struct ChatView: View {
                 }
                 if !chat.error.isEmpty { Text(chat.error).foregroundStyle(.red).textSelection(.enabled) }
                 if !notice.isEmpty { Text(notice).font(.caption) }
-                TextEditor(text: $draft).frame(height: 85).overlay(RoundedRectangle(cornerRadius: 5).stroke(.quaternary))
+                Text("음성은 재생 선택 시 700자씩 준비하며 첫 조각부터 재생합니다. 응답당 최대 20,000자.").font(.caption2).foregroundStyle(.secondary)
+                TextEditor(text: $draft).accessibilityLabel("메시지 입력").frame(height: 85).overlay(RoundedRectangle(cornerRadius: 5).stroke(.quaternary))
                 HStack {
                     Button("이미지 첨부") { attach() }.disabled(chat.generating)
                     if !images.isEmpty { Button("첨부 \(images.count)개 제거") { images = [] } }
@@ -75,20 +71,37 @@ struct ChatView: View {
                             app.keyPresent = Secrets.elevenLabsKey != nil; notice = "V1 키 참조를 해제했습니다."
                         } catch { notice = error.localizedDescription }
                     }
-                }
+                }.disabled(V2Runtime.offline)
             }.padding().frame(minWidth: 540)
         }.onAppear {
-            chat.playAudio = { try audio.play($0) }; chat.stopAudio = { audio.player?.stop() }
-            let session = chat
-            audio.finished = { [weak session] in session?.audioFinished() }
-        }.onDisappear { chat.cancelGeneration(); chat.stop() }
+            if !V2Runtime.offline {
+                chat.beginAudio = { audio.queue.start(expected: $0) }
+                chat.enqueueAudio = { audio.queue.enqueue($0) }
+                chat.stopAudio = { audio.queue.stop() }
+                let session = chat
+                audio.queue.onFinish = { [weak session] in session?.audioFinished() }
+                audio.queue.onFailure = { [weak session] in session?.error = "음성 파일 재생 실패"; session?.stop() }
+            }
+        }.onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in chat.shutdown() }
+        .onDisappear { chat.shutdown() }
     }
     private func send() {
+        if V2Runtime.offline {
+            if chat.send(text: draft, images: images, provider: "MOCK Google", model: "gemini-flash-lite-latest (mock)", system: "offline", generate: V2Runtime.mockStream) { draft = ""; images = []; notice = "" }
+            return
+        }
         guard let endpoint = app.activeEndpoint(byID: app.explainEndpointID), !app.explainModel.isEmpty else { notice = "설정에서 응답 제공자와 모델을 선택하세요."; return }
         let generator = EndpointGenerator(endpoint: endpoint, apiKey: app.endpointKey(endpoint), model: app.explainModel, instruction: "", temperature: app.explainTemperature, reasoningLevel: app.explainReasoningLevel)
         if chat.send(text: draft, images: images, provider: endpoint.name, model: app.explainModel, system: "You are a helpful assistant. Respond naturally to the user's request.", generate: { generator.generate("", conversation: $0) }) { draft = ""; images = []; notice = "" }
     }
     private func play(_ message: ChatMessage) {
+        if V2Runtime.offline {
+            chat.play(message, identity: "offline-mock") { _ in
+                try await Task.sleep(nanoseconds: 2_000_000_000)
+                return Data("MOCK audio; no device playback".utf8)
+            }
+            return
+        }
         guard let key = Secrets.elevenLabsKey else { notice = "설정에서 ElevenLabs 키를 입력하세요."; return }
         let voice = VoiceConfig(voiceId: app.voiceId, modelId: app.modelId, settingsHash: app.voiceSettings.hash)
         let backend = ElevenLabsBackend(apiKey: key, settings: app.voiceSettings, models: app.elevenModels)
@@ -101,6 +114,7 @@ struct ChatView: View {
     private func attach() {
         let panel = NSOpenPanel(); panel.allowedContentTypes = [.png, .jpeg]; panel.allowsMultipleSelection = true
         guard panel.runModal() == .OK else { return }
+        notice = ""
         for url in panel.urls {
             guard let source = try? Data(contentsOf: url), source.count <= 10_000_000,
                   let image = NSImage(data: source), let tiff = image.tiffRepresentation,

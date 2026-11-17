@@ -1,6 +1,68 @@
 import Foundation
 import Combine
 
+/// All serialization and disk I/O run on one serial queue. Attachments are immutable
+/// files written once; metadata checkpoints never base64-encode historical images.
+private final class ChatDiskStore {
+    struct Archive: Codable { var version = 1; var threads: [StoredThread] }
+    struct StoredThread: Codable { var id: UUID; var title: String; var createdAt: Date; var messages: [StoredMessage] }
+    struct StoredMessage: Codable { var message: ChatMessage; var attachments: [String] }
+    private let root: URL
+    private let queue = DispatchQueue(label: "com.seongjoo.CodebasicTTSV2.chat-storage", qos: .utility)
+    private var writes = 0
+    private var attachmentWrites = 0
+    var writeCount: Int { queue.sync { writes } }
+    var attachmentWriteCount: Int { queue.sync { attachmentWrites } }
+    init(root: URL) { self.root = root }
+    func load() throws -> [ChatThread] { try queue.sync {
+        let file = root.appendingPathComponent("conversations.json")
+        guard FileManager.default.fileExists(atPath: file.path) else { return [] }
+        let data = try Data(contentsOf: file)
+        if let legacy = try? JSONDecoder().decode([ChatThread].self, from: data) { return legacy }
+        let archive = try JSONDecoder().decode(Archive.self, from: data)
+        guard archive.version == 1 else { throw CocoaError(.fileReadCorruptFile) }
+        return try archive.threads.map { thread in
+            let messages = try thread.messages.map { stored in
+                var message = stored.message
+                message.images = try stored.attachments.map { name in
+                    guard name == URL(fileURLWithPath: name).lastPathComponent, !name.contains("..") else { throw CocoaError(.fileReadCorruptFile) }
+                    return try Data(contentsOf: root.appendingPathComponent("attachments").appendingPathComponent(name))
+                }
+                return message
+            }
+            return ChatThread(id: thread.id, title: thread.title, createdAt: thread.createdAt, messages: messages)
+        }
+    }}
+    private func write(_ threads: [ChatThread]) throws {
+        let directory = root.appendingPathComponent("attachments")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let records = try threads.map { thread in
+            let messages = try thread.messages.map { message in
+                var metadata = message; metadata.images = []
+                let names = try message.images.enumerated().map { index, data in
+                    let name = message.id.uuidString + "-" + String(index) + ".png"
+                    let file = directory.appendingPathComponent(name)
+                    if !FileManager.default.fileExists(atPath: file.path) {
+                        try data.write(to: file, options: .atomic); attachmentWrites += 1
+                    }
+                    return name
+                }
+                return StoredMessage(message: metadata, attachments: names)
+            }
+            return StoredThread(id: thread.id, title: thread.title, createdAt: thread.createdAt, messages: messages)
+        }
+        try JSONEncoder().encode(Archive(threads: records)).write(to: root.appendingPathComponent("conversations.json"), options: .atomic)
+        writes += 1
+    }
+    func save(_ threads: [ChatThread]) throws { try queue.sync { try write(threads) } }
+    func checkpoint(_ threads: [ChatThread], completion: @escaping (Error?) -> Void) {
+        queue.async {
+            do { try self.write(threads); completion(nil) } catch { completion(error) }
+        }
+    }
+}
+
+
 struct ChatMessage: Codable, Identifiable, Equatable {
     var id = UUID()
     var role: ConversationMessage.Role
@@ -17,6 +79,17 @@ struct ChatThread: Codable, Identifiable {
     var createdAt = Date()
     var messages: [ChatMessage] = []
 }
+/// Small deterministic cleanup, without another LLM/API request. Code content is
+/// retained; delimiter lines and common presentation-only Markdown are removed.
+enum ChatSpeechPlan {
+    static func chunks(_ text: String) -> [String] {
+        var speech = text.replacingOccurrences(of: "(?m)^\\s*```[^\\n]*$", with: "", options: .regularExpression)
+        speech = speech.replacingOccurrences(of: "(?m)^#{1,6}\\s+", with: "", options: .regularExpression)
+        speech = speech.replacingOccurrences(of: "\\[([^\\]]+)\\]\\([^)]+\\)", with: "$1", options: .regularExpression)
+        for marker in ["**", "__", "`"] { speech = speech.replacingOccurrences(of: marker, with: "") }
+        return TextSplitter.paragraphs(speech, maxChars: 700)
+    }
+}
 /// Durable conversation/visual records are independent of disposable audio cache.
 @MainActor final class ChatSession: ObservableObject {
     typealias Generate = (ExplanationConversation) -> AsyncThrowingStream<String, Error>
@@ -26,38 +99,60 @@ struct ChatThread: Codable, Identifiable {
     @Published private(set) var generating = false
     @Published private(set) var playing: UUID?
     @Published var error = ""
+    @Published private(set) var audioStatus = ""
     private let root: URL
     private var storageAvailable = true
+    private let disk: ChatDiskStore
+    private var checkpointTask: Task<Void, Never>?
+    private let checkpointInterval: UInt64
+    var storageWriteCount: Int { disk.writeCount }
+    var attachmentWriteCount: Int { disk.attachmentWriteCount }
     private var generation: Task<Void, Never>?
     private var audio: Task<Void, Never>?
     private var generationID = UUID()
     private var audioID = UUID()
     var playAudio: (Data) throws -> Void = { _ in }
     var stopAudio: () -> Void = {}
+    var beginAudio: (Int) -> Void = { _ in }
+    var enqueueAudio: ((URL) throws -> Void)?
+    static let maxSpeechCharacters = 20_000
     var current: ChatThread? { threads.first { $0.id == selected } }
-    init(root: URL) {
-        self.root = root
+    init(root: URL, checkpointInterval: UInt64 = 1_000_000_000) {
+        self.root = root; self.disk = ChatDiskStore(root: root); self.checkpointInterval = checkpointInterval
         do {
-            if FileManager.default.fileExists(atPath: root.appendingPathComponent("conversations.json").path) {
-                threads = try JSONDecoder().decode([ChatThread].self, from: Data(contentsOf: root.appendingPathComponent("conversations.json")))
-                // Interrupted responses remain visible but never enter future model context.
-                for i in threads.indices { for j in threads[i].messages.indices {
-                    if threads[i].messages[j].state == "generating" { threads[i].messages[j].state = "interrupted" }
-                }}
-            }
+            threads = try disk.load()
+            // Preserve partial output after an unclean exit, excluding it from context.
+            for i in threads.indices { for j in threads[i].messages.indices {
+                if threads[i].messages[j].state == "generating" { threads[i].messages[j].state = "interrupted" }
+            }}
         } catch { self.storageAvailable = false; self.error = "대화 복원 실패: " + error.localizedDescription }
         selected = threads.first?.id
     }
+    private func scheduleCheckpoint() {
+        guard checkpointTask == nil else { return }
+        checkpointTask = Task { [weak self] in
+            guard let interval = self?.checkpointInterval else { return }
+            do { try await Task.sleep(nanoseconds: interval) } catch { return }
+            guard let self, !Task.isCancelled else { return }
+            self.checkpointTask = nil
+            self.disk.checkpoint(self.threads) { [weak self] error in
+                if let error { Task { @MainActor [weak self] in self?.error = "대화 저장 실패: " + error.localizedDescription } }
+            }
+        }
+    }
+    /// Normal completion, cancellation and application termination flush synchronously.
+    /// The serial disk queue drains any older asynchronous checkpoint before this save.
+    func shutdown() { cancelGeneration(); stop() }
     func newThread() {
         guard persist() else { return }
         let thread = ChatThread(); threads.insert(thread, at: 0); selected = thread.id
         _ = persist()
     }
     @discardableResult private func persist() -> Bool {
+        checkpointTask?.cancel(); checkpointTask = nil
         guard storageAvailable else { return false }
         do {
-            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-            try JSONEncoder().encode(threads).write(to: root.appendingPathComponent("conversations.json"), options: .atomic)
+            try disk.save(threads)
             return true
         } catch { self.error = "대화 저장 실패: " + error.localizedDescription; return false }
     }
@@ -85,7 +180,7 @@ struct ChatThread: Codable, Identifiable {
                 for try await part in generate(conversation) {
                     guard token == self.generationID, !Task.isCancelled else { return }
                     self.update(thread, response.id) { $0.text += part }
-                    guard self.persist() else { self.cancelGeneration(); return }
+                    self.scheduleCheckpoint()
                 }
                 guard token == self.generationID, !Task.isCancelled else { return }
                 self.update(thread, response.id) { $0.state = $0.text.isEmpty ? "failed" : "complete" }
@@ -106,31 +201,44 @@ struct ChatThread: Codable, Identifiable {
         _ = persist()
     }
     func stop() {
-        audioID = UUID(); audio?.cancel(); audio = nil; playing = nil; stopAudio()
+        audioID = UUID(); audio?.cancel(); audio = nil; playing = nil; audioStatus = ""; stopAudio()
     }
     func audioFinished() { stop() }
     func play(_ message: ChatMessage, identity: String, synthesize: @escaping Synthesize) {
         guard message.role == .assistant, message.state == "complete", !message.text.isEmpty, playing != message.id else { return }
+        guard message.text.count <= Self.maxSpeechCharacters else {
+            error = "음성 재생은 응답당 20,000자까지 지원합니다. 더 짧은 응답을 요청하세요."; return
+        }
         stop(); error = ""; playing = message.id
         let token = audioID
-        let key = ExplanationConversation(system: identity, messages: [ConversationMessage(role: .assistant, text: message.text)]).resultCacheKey(endpointIdentity: "elevenlabs-v2", model: identity, temperature: 0, reasoning: "")
-        let file = root.appendingPathComponent("audio-cache").appendingPathComponent(key + ".mp3")
+        let chunks = ChatSpeechPlan.chunks(message.text)
+        guard !chunks.isEmpty else { stop(); error = "읽을 텍스트가 없습니다."; return }
+        beginAudio(chunks.count)
         audio = Task { [weak self] in
             guard let self else { return }
+            var activeFile: URL?
             do {
-                let data: Data
-                if let cached = try? Data(contentsOf: file) { data = cached }
-                else {
-                    data = try await synthesize(message.text)
+                for (index, text) in chunks.enumerated() {
                     guard token == self.audioID, !Task.isCancelled else { return }
-                    try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
-                    try data.write(to: file, options: .atomic)
+                    self.audioStatus = "음성 준비 \(index + 1)/\(chunks.count) · 첫 조각부터 순서대로 재생"
+                    let key = ExplanationConversation(system: identity, messages: [ConversationMessage(role: .assistant, text: text)]).resultCacheKey(endpointIdentity: "elevenlabs-v2-chunk700", model: identity, temperature: 0, reasoning: "")
+                    let file = self.root.appendingPathComponent("audio-cache").appendingPathComponent(key + ".mp3")
+                    activeFile = file
+                    let data: Data
+                    if let cached = try? Data(contentsOf: file) { data = cached }
+                    else {
+                        data = try await synthesize(text)
+                        guard token == self.audioID, !Task.isCancelled else { return }
+                        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+                        try data.write(to: file, options: .atomic)
+                    }
+                    guard token == self.audioID, !Task.isCancelled else { return }
+                    if let enqueue = self.enqueueAudio { try enqueue(file) } else { try self.playAudio(data) }
                 }
-                guard token == self.audioID, !Task.isCancelled else { return }
-                try self.playAudio(data)
+                self.audioStatus = "재생 중 · \(chunks.count)개 조각"
             } catch {
                 guard token == self.audioID else { return }
-                try? FileManager.default.removeItem(at: file)
+                if let file = activeFile { try? FileManager.default.removeItem(at: file) }
                 self.error = "음성 재생 실패: " + error.localizedDescription; self.stop()
             }
         }

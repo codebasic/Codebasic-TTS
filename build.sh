@@ -13,8 +13,12 @@ case "${1:-build}" in
   codesign --force --sign - "$APP"
   ;;
  test)
-  swiftc -O Sources/Core/ExplanationConversation.swift Sources/Core/ChatSession.swift Tests/ChatTests.swift -framework Combine -o build/chat-tests
+  swiftc -O Sources/Core/ExplanationConversation.swift Sources/Core/ChatSession.swift Sources/Core/TextSplitter.swift Tests/ChatTests.swift -framework Combine -o build/chat-tests
   build/chat-tests
+  swiftc -O Sources/App/Secrets.swift Sources/Core/ExplanationConversation.swift Tests/OfflineRuntimeTests.swift -o build/offline-tests
+  OFFLINE_ROOT="$(mktemp -d /tmp/codebasic-v2-offline-test.XXXXXX)"
+  CODEBASIC_V2_OFFLINE=1 CODEBASIC_V2_TEST_ROOT="$OFFLINE_ROOT" build/offline-tests
+  rm -rf "$OFFLINE_ROOT"
   bash Tests/regression.sh
   ;;
  *) echo 'V2 supports build and test only; no installation or live smoke target.'; exit 2;;

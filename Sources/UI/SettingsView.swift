@@ -87,7 +87,7 @@ struct SettingsView: View {
             }
         }
         .sheet(isPresented: $showGlossary) { GlossaryEditorView() }
-        .sheet(item: $editingService) { endpoint in ServiceEditor(endpoint: endpoint).environmentObject(app) }
+        .sheet(item: $editingService) { endpoint in ServiceEditor(endpoint: endpoint).environmentObject(app).disabled(V2Runtime.offline) }
         .onAppear {
             keyInput = Secrets.elevenLabsKey ?? ""
             editingKey = !app.keyPresent

@@ -224,9 +224,11 @@ final class AppState: ObservableObject {
     }
 
     func refreshAllModels() {
+        guard !V2Runtime.offline else { return }
         for e in endpoints where e.isEnabled { refreshEndpointModels(e) }
     }
     func refreshAllModelsIfNeeded() {
+        guard !V2Runtime.offline else { return }
         for e in endpoints
         where e.isEnabled && (endpointModels[e.id.uuidString] ?? []).isEmpty {
             // Fetching a keyed endpoint without a key just errors — wait for the key.
@@ -709,6 +711,7 @@ final class AppState: ObservableObject {
     /// gemini=`GET /models`, ollama=`GET /api/tags`) and swap it into the picker.
     /// Reuses the existing per-style helpers — no new network code.
     func refreshEndpointModels(_ endpoint: CustomEndpoint) {
+        guard !V2Runtime.offline else { return }
         let e = endpoint
         let id = e.id.uuidString
         if !e.usesPlan && (e.apiStyle == .gemini || e.apiStyle == .anthropic) && endpointKey(e).isEmpty {
@@ -1391,6 +1394,7 @@ final class AppState: ObservableObject {
     }
 
     func refreshVoices() {
+        guard !V2Runtime.offline else { return }
         refreshModels()
         guard let key = Secrets.elevenLabsKey else { connectionStatus = "키 없음"; return }
         connectionStatus = "연결 확인 중…"
@@ -1411,6 +1415,7 @@ final class AppState: ObservableObject {
 
     /// Keep the last successful catalog and selected model through all failures.
     func refreshModels() {
+        guard !V2Runtime.offline else { return }
         guard !refreshingModels else { return }
         guard let key = Secrets.elevenLabsKey else { modelStatus = "모델 조회: 키 없음"; return }
         refreshingModels = true

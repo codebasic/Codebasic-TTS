@@ -9,8 +9,7 @@ enum AntigravityPlan {
             .first { FileManager.default.isExecutableFile(atPath: $0) }.map(URL.init(fileURLWithPath:))
     }
     static var home: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/Codebasic TTS V2/antigravity-plan")
+        URL(fileURLWithPath: Secrets.appSupportDir).appendingPathComponent("antigravity-plan")
     }
     static func environment(home: URL) -> [String: String] {
         ["HOME": home.path,

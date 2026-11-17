@@ -6,6 +6,7 @@ import AppKit
 // Dock icon even when launched directly during development.
 // Program start runs on the main thread; assume the main actor so we can touch
 // the @MainActor AppDelegate.
+V2Runtime.installOfflineNetworkBlock()
 MainActor.assumeIsolated {
     let app = NSApplication.shared
     let delegate = AppDelegate()
