@@ -1,3 +1,7 @@
+# Independent V2 prototype
+
+See [V2-IMPLEMENTATION.md](V2-IMPLEMENTATION.md). Use `./build.sh build` and `./build.sh test`; V2 has no installation target. The inherited V1 documentation below describes the original app.
+
 # Codebasic TTS
 
 <p align="center">

@@ -4,7 +4,7 @@ import Foundation
 /// (user-readable only); build.sh installs it there from Sidecar/.eleven_key.
 /// Keychain hardening is a later milestone.
 enum Secrets {
-    static let appSupportDir = ("~/Library/Application Support/Codebasic TTS"
+    static let appSupportDir = ("~/Library/Application Support/Codebasic TTS V2"
         as NSString).expandingTildeInPath
 
     static var elevenLabsKey: String? { key(named: "eleven_key") }
@@ -13,7 +13,11 @@ enum Secrets {
 
     static func key(named name: String) -> String? {
         let path = (appSupportDir as NSString).appendingPathComponent(name)
-        guard let raw = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
+        let legacy = ("~/Library/Application Support/Codebasic TTS" as NSString).expandingTildeInPath
+        let reuse = FileManager.default.fileExists(atPath: appSupportDir + "/reuse-v1-credentials")
+        // Explicit opt-in, read-only fallback. Writes always remain in V2.
+        guard let raw = (try? String(contentsOfFile: path, encoding: .utf8))
+            ?? (reuse ? try? String(contentsOfFile: legacy + "/" + name, encoding: .utf8) : nil) else { return nil }
         let key = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         return key.isEmpty ? nil : key
     }

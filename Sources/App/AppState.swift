@@ -1387,7 +1387,7 @@ final class AppState: ObservableObject {
         try? k.write(toFile: path, atomically: true, encoding: .utf8)
         keyPresent = !k.isEmpty
         connectionStatus = k.isEmpty ? "키 삭제됨" : "키 저장됨"
-        if !k.isEmpty { refreshVoices() }
+        // V2 saves credentials without contacting ElevenLabs.
     }
 
     func refreshVoices() {
@@ -1631,13 +1631,12 @@ final class AppState: ObservableObject {
     private func seedEndpoints(from o: [String: Any]) {
         func str(_ key: String, _ def: String) -> String { o[key] as? String ?? def }
 
-        if let k = Secrets.geminiKey { Secrets.writeEndpointKey(CustomEndpoint.geminiSeedID, k) }
-        if let k = Secrets.zaiKey { Secrets.writeEndpointKey(CustomEndpoint.zaiSeedID, k) }
+        // V2 never migrates or copies credential files.
 
         let gemini = CustomEndpoint(id: CustomEndpoint.geminiSeedID, name: "Gemini",
                                     baseURL: str("geminiBaseURL", GeminiNormalizer.defaultBaseURL),
                                     apiStyle: .gemini,
-                                    defaultModel: str("geminiModel", "gemini-2.0-flash"))
+                                    defaultModel: str("geminiModel", "gemini-2.5-flash"))
         let zai = CustomEndpoint(id: CustomEndpoint.zaiSeedID, name: "Z.ai",
                                  baseURL: str("zaiBaseURL", ZAINormalizer.defaultBaseURL),
                                  apiStyle: .openAICompatible,
@@ -1656,7 +1655,7 @@ final class AppState: ObservableObject {
             let v = str("explainZAIModel", "")
             return v == ZAINormalizer.fallbackModels.first ? "" : v
         }()
-        let legacyExplainGemini = str("explainGeminiModel", gemini.defaultModel)
+        let legacyExplainGemini = str("explainGeminiModel", "gemini-flash-lite-latest")
         let legacyExplainOllama = str("explainOllamaModel", ollama.defaultModel)
         explainRoleModels = [
             gemini.id.uuidString: legacyExplainGemini == gemini.defaultModel ? "" : legacyExplainGemini,
@@ -1679,7 +1678,7 @@ final class AppState: ObservableObject {
             }
         }
         let ollamaID = CustomEndpoint.ollamaSeedID.uuidString
-        explainEndpointID = seedID(forLegacy: o["explainProvider"] as? String, ollamaID)
+        explainEndpointID = seedID(forLegacy: o["explainProvider"] as? String, gemini.id.uuidString)
         scriptEndpointID = seedID(forLegacy: o["scriptProvider"] as? String, ollamaID)
         visionEndpointID = seedID(forLegacy: o["visionProvider"] as? String, explainEndpointID)
     }

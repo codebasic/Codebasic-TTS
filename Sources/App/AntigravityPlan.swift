@@ -10,7 +10,7 @@ enum AntigravityPlan {
     }
     static var home: URL {
         FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/Codebasic TTS/antigravity-plan")
+            .appendingPathComponent("Library/Application Support/Codebasic TTS V2/antigravity-plan")
     }
     static func environment(home: URL) -> [String: String] {
         ["HOME": home.path,

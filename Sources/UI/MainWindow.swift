@@ -18,7 +18,7 @@ final class MainWindow: NSObject, NSWindowDelegate {
                 contentRect: NSRect(x: 0, y: 0, width: 880, height: 560),
                 styleMask: [.titled, .closable, .miniaturizable, .resizable],
                 backing: .buffered, defer: false)
-            w.title = "Codebasic TTS"
+            w.title = "Codebasic TTS V2"
             w.center()
             w.isReleasedWhenClosed = false
             w.delegate = self
