@@ -2,7 +2,7 @@
 
 Goal: keep the existing multi-provider connection/model selection while making ordinary conversation the primary interface. Direct Gemini streaming remains supported; fresh V2 defaults to gemini-flash-lite-latest with Google service default gemini-2.5-flash. OpenAI-compatible, Anthropic, Ollama and supported account-plan transports reuse EndpointGenerator and provider-neutral message conversion.
 
-Scope: independent clone a separate local clone, branch feature/chat-v2, base aba918365ea9a7dc19fa27b9652a0f6bbe84df24. V1 and pipeline checkouts are read-only. No install, Services registration or push. GUI execution used the explicit offline test mode only. After later explicit user authorization, one synthetic Google request and one ElevenLabs request/software playback check succeeded through the production components; see LIVE-VALIDATION.md.
+Scope: independent clone a separate local clone, branch feature/chat-v2, base aba918365ea9a7dc19fa27b9652a0f6bbe84df24. V1 and pipeline checkouts are read-only. No install, Services registration or push. The validated GUI flows used explicit offline test mode; one incidental default-mode CUA auto-relaunch was immediately closed without user actions and is documented in GUI-VALIDATION.md. After later explicit user authorization, one synthetic Google request and one ElevenLabs request/software playback check succeeded through the production components; see LIVE-VALIDATION.md.
 
 ## Isolation and connection reuse
 
@@ -65,7 +65,7 @@ Not adopted: copying credentials or sharing Keychain access, which exceed the au
 - PASS: shared multi-provider generation/picker and fast Gemini defaults.
 - PASS: chat cancellation, duplicates, failures, cache independence, restart, corrupted-history protection, throttled writes, one-time attachment writes, final flushes, bounded/chunk-first audio, Markdown and over-limit handling through mocks.
 - PASS: original unit targets, model catalog/cache parsing, memory concurrency/cancellation, fake CLI connections, conversation serialization (134), explanation rules (49).
-- PASS: isolated offline GUI flows on 0bfb8f4 above. Final post-performance-patch list/compose/attachment/playback/cancel/settings flows were subsequently observed successfully after unlock; only visual restart restoration of the newly added records remains pending because the Mac locked again. See GUI-VALIDATION.md. One authorized Google/ElevenLabs production-component check passed; image/model compatibility, other providers, account login and physical speaker audibility remain UNVERIFIED.
+- PASS: isolated offline GUI flows on 0bfb8f4 above. Final post-performance-patch list/compose/attachment/playback/cancel/settings flows were subsequently observed successfully after unlock; the parent independently completed visual restart restoration of the newly added image/response/cancelled records after another unlock. No GUI blocker remains. See GUI-VALIDATION.md. One authorized Google/ElevenLabs production-component check passed; image/model compatibility, other providers, account login and physical speaker audibility remain UNVERIFIED.
 - Risk: medium. Recovery: discard this independent clone/build and its V2-only data directory; V1 requires no rollback.
 
 Raw local verification logs are kept under build/validation. No source, credentials or user documents were sent as model content. Only the expressly authorized credential headers and new synthetic test text were sent to Google/ElevenLabs; see LIVE-VALIDATION.md.

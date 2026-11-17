@@ -20,4 +20,4 @@ Reproduce from the repository with `bash Tests/run-chat-benchmark.sh /tmp/codeba
 
 Actual GUI responsiveness on the final 300-thread dataset is recorded separately in GUI-VALIDATION.md; the ticker above is not a substitute for that observation.
 
-After unlock, CUA qualitatively verified the 300-seed-thread GUI list through item 0299, new-thread creation, compose/attach/response, playback/stop, cancellation and settings navigation without a visible hang. This observation is separate from the quantitative MainActor ticker. The final visual restoration check for the newly added test records was interrupted by another Mac lock; see GUI-VALIDATION.md.
+After unlock, CUA qualitatively verified the 300-seed-thread GUI list through item 0299, new-thread creation, compose/attach/response, playback/stop, cancellation and settings navigation without a visible hang. This observation is separate from the quantitative MainActor ticker. The final visual restoration check was briefly interrupted by another Mac lock and was then completed independently by the parent using the explicit offline environment; see GUI-VALIDATION.md.
