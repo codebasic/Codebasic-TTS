@@ -65,7 +65,7 @@ Not adopted: copying credentials or sharing Keychain access, which exceed the au
 - PASS: shared multi-provider generation/picker and fast Gemini defaults.
 - PASS: chat cancellation, duplicates, failures, cache independence, restart, corrupted-history protection, throttled writes, one-time attachment writes, final flushes, bounded/chunk-first audio, Markdown and over-limit handling through mocks.
 - PASS: original unit targets, model catalog/cache parsing, memory concurrency/cancellation, fake CLI connections, conversation serialization (134), explanation rules (49).
-- PASS: isolated offline GUI flows on 0bfb8f4 above. Final post-performance-patch GUI rerun is BLOCKED by the Mac lock; see GUI-VALIDATION.md. One authorized Google/ElevenLabs production-component check passed; image/model compatibility, other providers, account login and physical speaker audibility remain UNVERIFIED.
+- PASS: isolated offline GUI flows on 0bfb8f4 above. Final post-performance-patch list/compose/attachment/playback/cancel/settings flows were subsequently observed successfully after unlock; only visual restart restoration of the newly added records remains pending because the Mac locked again. See GUI-VALIDATION.md. One authorized Google/ElevenLabs production-component check passed; image/model compatibility, other providers, account login and physical speaker audibility remain UNVERIFIED.
 - Risk: medium. Recovery: discard this independent clone/build and its V2-only data directory; V1 requires no rollback.
 
 Raw local verification logs are kept under build/validation. No source, credentials or user documents were sent as model content. Only the expressly authorized credential headers and new synthetic test text were sent to Google/ElevenLabs; see LIVE-VALIDATION.md.

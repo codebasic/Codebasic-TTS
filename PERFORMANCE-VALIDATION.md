@@ -19,3 +19,5 @@ The former repeated full JSON encoding was a measurable bottleneck. Caching unch
 Reproduce from the repository with `bash Tests/run-chat-benchmark.sh /tmp/codebasic-v2-benchmark-repro-UNIQUE`. It generates its own deterministic synthetic PNG and archives, compiles baseline/final harnesses, performs one baseline and three final runs per scale, and leaves JSON/time/fixture records in that dedicated /tmp root. Use a new root for each reproduction. No credentials or provider transports are compiled into this harness.
 
 Actual GUI responsiveness on the final 300-thread dataset is recorded separately in GUI-VALIDATION.md; the ticker above is not a substitute for that observation.
+
+After unlock, CUA qualitatively verified the 300-seed-thread GUI list through item 0299, new-thread creation, compose/attach/response, playback/stop, cancellation and settings navigation without a visible hang. This observation is separate from the quantitative MainActor ticker. The final visual restoration check for the newly added test records was interrupted by another Mac lock; see GUI-VALIDATION.md.
