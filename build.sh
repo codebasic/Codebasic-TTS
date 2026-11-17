@@ -19,6 +19,10 @@ case "${1:-build}" in
   OFFLINE_ROOT="$(mktemp -d /tmp/codebasic-v2-offline-test.XXXXXX)"
   CODEBASIC_V2_OFFLINE=1 CODEBASIC_V2_TEST_ROOT="$OFFLINE_ROOT" build/offline-tests
   rm -rf "$OFFLINE_ROOT"
+  swiftc -O Sources/App/Secrets.swift Sources/Core/ExplanationConversation.swift Tests/LiveValidationTests.swift -o build/live-validation-tests
+  LIVE_ROOT="$(mktemp -d /tmp/codebasic-v2-live-permit-test.XXXXXX)"
+  CODEBASIC_V2_LIVE_VALIDATION=1 CODEBASIC_V2_TEST_ROOT="$LIVE_ROOT" build/live-validation-tests
+  rm -rf "$LIVE_ROOT"
   bash Tests/regression.sh
   ;;
  *) echo 'V2 supports build and test only; no installation or live smoke target.'; exit 2;;

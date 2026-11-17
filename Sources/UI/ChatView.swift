@@ -24,6 +24,7 @@ struct ChatView: View {
             }.frame(minWidth: 170, idealWidth: 210, maxWidth: 280)
             VStack(alignment: .leading, spacing: 10) {
                 if V2Runtime.offline { Text("오프라인 MOCK · 외부 연결 차단 · 격리 테스트 데이터").font(.caption).foregroundStyle(.orange) }
+                if V2Runtime.liveValidation { Text("최소 라이브 검증 · Google/ElevenLabs 각 1회 · 자동 조회 없음").font(.caption).foregroundStyle(.orange) }
                 LLMModelPicker(label: "응답 모델", endpointID: $app.explainEndpointID, roleModels: $app.explainRoleModels, onChange: { app.saveSettings() })
                 ScrollViewReader { proxy in
                     ScrollView {
@@ -79,8 +80,11 @@ struct ChatView: View {
                 chat.enqueueAudio = { audio.queue.enqueue($0) }
                 chat.stopAudio = { audio.queue.stop() }
                 let session = chat
-                audio.queue.onFinish = { [weak session] in session?.audioFinished() }
-                audio.queue.onFailure = { [weak session] in session?.error = "음성 파일 재생 실패"; session?.stop() }
+                audio.queue.onFinish = { [weak session] in
+                    V2Runtime.recordLiveEvidence("playback", ["completed": true, "completed_chunks": audio.queue.finishedCount, "expected_chunks": audio.queue.expectedCount])
+                    session?.audioFinished()
+                }
+                audio.queue.onFailure = { [weak session] in V2Runtime.recordLiveEvidence("playback", ["completed": false, "failed": true]); session?.error = "음성 파일 재생 실패"; session?.stop() }
             }
         }.onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in chat.shutdown() }
         .onDisappear { chat.shutdown() }
@@ -91,6 +95,13 @@ struct ChatView: View {
             return
         }
         guard let endpoint = app.activeEndpoint(byID: app.explainEndpointID), !app.explainModel.isEmpty else { notice = "설정에서 응답 제공자와 모델을 선택하세요."; return }
+        if V2Runtime.liveValidation {
+            guard endpoint.resolvedProvider == .google, !endpoint.usesPlan,
+                  URL(string: endpoint.baseURL)?.host == "generativelanguage.googleapis.com",
+                  !app.endpointKey(endpoint).isEmpty,
+                  chat.current?.messages.isEmpty != false, images.isEmpty,
+                  V2Runtime.consumeLivePermit("google") else { notice = "라이브 검증은 새 대화에서 승인된 Google 연결로 1회만 허용합니다."; return }
+        }
         let generator = EndpointGenerator(endpoint: endpoint, apiKey: app.endpointKey(endpoint), model: app.explainModel, instruction: "", temperature: app.explainTemperature, reasoningLevel: app.explainReasoningLevel)
         if chat.send(text: draft, images: images, provider: endpoint.name, model: app.explainModel, system: "You are a helpful assistant. Respond naturally to the user's request.", generate: { generator.generate("", conversation: $0) }) { draft = ""; images = []; notice = "" }
     }
@@ -104,7 +115,12 @@ struct ChatView: View {
         }
         guard let key = Secrets.elevenLabsKey else { notice = "설정에서 ElevenLabs 키를 입력하세요."; return }
         let voice = VoiceConfig(voiceId: app.voiceId, modelId: app.modelId, settingsHash: app.voiceSettings.hash)
-        let backend = ElevenLabsBackend(apiKey: key, settings: app.voiceSettings, models: app.elevenModels)
+        if V2Runtime.liveValidation {
+            guard message.text.count < 300, V2Runtime.consumeLivePermit("elevenlabs") else { notice = "라이브 음성 검증은 300자 미만 응답으로 1회만 허용합니다."; return }
+        }
+        let liveCatalog = URL(fileURLWithPath: ("~/Library/Application Support/Codebasic TTS/eleven_models.json" as NSString).expandingTildeInPath)
+        let models = V2Runtime.liveValidation ? ElevenModelCatalog.load(from: liveCatalog) : app.elevenModels
+        let backend = ElevenLabsBackend(apiKey: key, settings: app.voiceSettings, models: models)
         chat.play(message, identity: app.voiceId + "|" + app.modelId + "|" + app.voiceSettings.hash) { text in
             var data = Data()
             for try await chunk in backend.stream(segment: text, voice: voice) { data.append(chunk) }
@@ -140,6 +156,10 @@ struct ChatView: View {
             app.keyPresent = Secrets.elevenLabsKey != nil
             app.voiceId = object["voiceId"] as? String ?? app.voiceId
             app.modelId = object["modelId"] as? String ?? app.modelId
+            app.voiceSettings.stability = object["stability"] as? Double ?? app.voiceSettings.stability
+            app.voiceSettings.similarityBoost = object["similarity"] as? Double ?? app.voiceSettings.similarityBoost
+            app.voiceSettings.style = object["style"] as? Double ?? app.voiceSettings.style
+            app.voiceSettings.useSpeakerBoost = object["speakerBoost"] as? Bool ?? app.voiceSettings.useSpeakerBoost
             app.saveSettings(); notice = "V1 연결 설정을 반영했습니다. 키 파일과 V1 데이터는 변경하지 않았습니다."
         } catch { notice = "설정 참조 실패: " + error.localizedDescription }
     }

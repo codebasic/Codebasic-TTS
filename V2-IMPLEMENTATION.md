@@ -2,7 +2,7 @@
 
 Goal: keep the existing multi-provider connection/model selection while making ordinary conversation the primary interface. Direct Gemini streaming remains supported; fresh V2 defaults to gemini-flash-lite-latest with Google service default gemini-2.5-flash. OpenAI-compatible, Anthropic, Ollama and supported account-plan transports reuse EndpointGenerator and provider-neutral message conversion.
 
-Scope: independent clone a separate local clone, branch feature/chat-v2, base aba918365ea9a7dc19fa27b9652a0f6bbe84df24. V1 and pipeline checkouts are read-only. No install, Services registration, push, live model generation or live voice calls. GUI execution used the explicit offline test mode only.
+Scope: independent clone a separate local clone, branch feature/chat-v2, base aba918365ea9a7dc19fa27b9652a0f6bbe84df24. V1 and pipeline checkouts are read-only. No install, Services registration or push. GUI execution used the explicit offline test mode only. After later explicit user authorization, one synthetic Google request and one ElevenLabs request/software playback check succeeded through the production components; see LIVE-VALIDATION.md.
 
 ## Isolation and connection reuse
 
@@ -15,19 +15,19 @@ Scope: independent clone a separate local clone, branch feature/chat-v2, base ab
 
 Conversation metadata lives in chat/conversations.json: roles, timestamps, status, provider/model snapshots and attachment filenames. Immutable images live in chat/attachments and are written once. Disposable audio lives in chat/audio-cache; clearing it preserves conversations. Prior V2 inline-image archives remain readable and are upgraded on the next save; V1 data is never migrated.
 
-A serial utility queue performs encoding and writes. Streaming schedules at most one checkpoint per second; new chunks do not encode the full image archive. Completion, error, cancellation and normal application termination cancel the pending timer and synchronously drain/save the final snapshot. Initial send is also durable before a generation request begins. Abrupt process termination can lose up to the last checkpoint interval of text. After an unclean exit, unfinished responses become interrupted. Failed/partial/interrupted assistant messages stay visible and are excluded from future model context.
+A serial utility queue performs encoding and writes, caching serialized metadata for unchanged threads. New-thread creation performs one durability flush and rolls back if it fails. Streaming schedules at most one checkpoint per second; new chunks do not encode the full image archive. Completion, error, cancellation and normal application termination cancel the pending timer and synchronously drain/save the final snapshot. Initial send is also durable before a generation request begins. Abrupt process termination can lose up to the last checkpoint interval of text. After an unclean exit, unfinished responses become interrupted. Failed/partial/interrupted assistant messages stay visible and are excluded from future model context.
 
-Corrupt metadata or missing attachment files block further writes and show an error, preserving the original files for repair. Checkpoints still serialize all text metadata, so very large histories can eventually need per-thread storage/indexing. No hundreds-of-conversations benchmark or full 80 MB attachment stress run has been performed; the regression test uses a 1 MB attachment and 1,000 streamed chunks.
+Corrupt metadata or missing attachment files block further writes and show an error, preserving the original files for repair. Checkpoints reuse unchanged thread encodings and assemble/write all metadata, so very large histories can eventually need per-thread files/indexing. Reproducible 50/300/1000-thread synthetic benchmarks include up to 20,000 messages and 82,641,440 attachment bytes; see PERFORMANCE-VALIDATION.md for timings and memory tradeoffs.
 
 ## Response playback
 
 Text generation and audio have separate tasks/tokens. A repeated click cannot start a second request; stop invalidates the token before cancelling and clearing the playback queue. Cache identity includes voice, model, voice settings and chunk text. Existing TextSplitter and QueuePlayer are reused: maximum 700 characters per synthesis request, sequential synthesis with the first available chunk immediately enqueued. The first chunk is fully buffered before playback; later chunks can synthesize while earlier audio plays. Slow synthesis can leave gaps at paragraph boundaries. Cancelling stops future requests and ignores late results, but cannot undo provider billing for an already submitted request.
 
-Speech removes common Markdown heading/fence/emphasis/link delimiters locally; code content remains. It is not a full Markdown renderer or an LLM narration pass. Responses over 20,000 characters are rejected before synthesis with a visible message. The limit and initial-playback behavior are shown in the UI. Actual ElevenLabs audio/device playback remains unverified.
+Speech removes common Markdown heading/fence/emphasis/link delimiters locally; code content remains. It is not a full Markdown renderer or an LLM narration pass. Responses over 20,000 characters are rejected before synthesis with a visible message. The limit and initial-playback behavior are shown in the UI. One authorized 13-character ElevenLabs response reached normal AVQueuePlayer completion; physical speaker audibility is not independently measured.
 
 ## Build and offline GUI commands
 
-`./build.sh build` compiles and ad-hoc signs locally. `./build.sh test` runs 37 chat mock checks, offline isolation/network-interception checks, and all original local regression targets. Bare build.sh also means build only; install/dev/smoke are unavailable.
+`./build.sh build` compiles and ad-hoc signs locally. `./build.sh test` runs 38 chat mock checks, offline isolation/network-interception checks, and all original local regression targets, plus a mocked production Gemini payload/stream check. Bare build.sh also means build only; install/dev/smoke are unavailable.
 
 The build uses the installed macOS 26.5 SDK because this host's default macOS 27 SDK references a missing SwiftUIMacros plugin. Override SWIFT_SDK_PATH for another complete SDK. Minimum target is macOS 14, matching existing UI API usage.
 
@@ -57,7 +57,7 @@ The first Claude CLI attempt failed while unauthenticated. The parent later conf
 
 Adopted against code/tests: one-second throttled checkpoints; final-state flushes; immutable separate attachments; interrupted recovery; separate playback token and a single queue; voice/model/settings cache identity; long-text splitting; basic Markdown cleanup; provider-neutral history. The mock GUI and tests verify these selected changes.
 
-Not adopted: copying credentials or sharing Keychain access, which exceed the authorized read-only V1 reference approach. Model-specific image capability detection remains deferred: users must choose an image-capable model; provider rejection is shown as a generation failure, without deleting the message/attachment. Large-history benchmarking and real provider/voice/login tests remain unverified. Local self-review and the parent's independent Codex review were performed; Claude final source-diff review remains unavailable due to the stated automatic-review block.
+Not adopted: copying credentials or sharing Keychain access, which exceed the authorized read-only V1 reference approach. Model-specific image capability detection remains deferred: users must choose an image-capable model; provider rejection is shown as a generation failure, without deleting the message/attachment. Large-history synthetic benchmarks and a minimal Google/ElevenLabs production-component check were completed. Other real providers and account login remain unverified. Local self-review and the parent's independent Codex review were performed; Claude final source-diff review remains unavailable due to the stated automatic-review block.
 
 ## Acceptance and recovery
 
@@ -65,7 +65,7 @@ Not adopted: copying credentials or sharing Keychain access, which exceed the au
 - PASS: shared multi-provider generation/picker and fast Gemini defaults.
 - PASS: chat cancellation, duplicates, failures, cache independence, restart, corrupted-history protection, throttled writes, one-time attachment writes, final flushes, bounded/chunk-first audio, Markdown and over-limit handling through mocks.
 - PASS: original unit targets, model catalog/cache parsing, memory concurrency/cancellation, fake CLI connections, conversation serialization (134), explanation rules (49).
-- PASS: isolated offline GUI flows above. Real provider streaming, image/model compatibility, account login and audio device/API playback remain UNVERIFIED.
+- PASS: isolated offline GUI flows on 0bfb8f4 above. Final post-performance-patch GUI rerun is BLOCKED by the Mac lock; see GUI-VALIDATION.md. One authorized Google/ElevenLabs production-component check passed; image/model compatibility, other providers, account login and physical speaker audibility remain UNVERIFIED.
 - Risk: medium. Recovery: discard this independent clone/build and its V2-only data directory; V1 requires no rollback.
 
-Raw local verification logs are kept under build/validation. No credentials or user documents were sent to a model provider by this implementation task.
+Raw local verification logs are kept under build/validation. No source, credentials or user documents were sent as model content. Only the expressly authorized credential headers and new synthetic test text were sent to Google/ElevenLabs; see LIVE-VALIDATION.md.

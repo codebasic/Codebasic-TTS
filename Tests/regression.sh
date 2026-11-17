@@ -27,3 +27,12 @@ mkdir -p "$BUILD_DIR"
       "$HERE/Sources/Core/Logging.swift" "$HERE/Sources/Core/MemoryDiagnostics.swift" "$HERE/Tests/ExplanationStyleTests.swift" \
       -framework AppKit -o "$BUILD_DIR/explanation-style-tests"
     "$BUILD_DIR/explanation-style-tests"
+
+    swiftc -O "$HERE/Sources/App/CodexPlan.swift" "$HERE/Sources/App/AntigravityPlan.swift" "$HERE/Sources/App/Secrets.swift" \
+      "$HERE/Sources/App/Endpoints.swift" "$HERE/Sources/TTS/TextNormalizer.swift" "$HERE/Sources/TTS/EndpointGenerator.swift" \
+      "$HERE/Sources/Core/ExplanationConversation.swift" "$HERE/Sources/Core/NormalizationCache.swift" \
+      "$HERE/Sources/Core/Logging.swift" "$HERE/Sources/Core/MemoryDiagnostics.swift" "$HERE/Tests/GeminiValidationTests.swift" \
+      -framework AppKit -o "$BUILD_DIR/gemini-validation-tests"
+    GEMINI_ROOT="$(mktemp -d /tmp/codebasic-v2-gemini-mock.XXXXXX)"
+    CODEBASIC_V2_LIVE_VALIDATION=1 CODEBASIC_V2_TEST_ROOT="$GEMINI_ROOT" "$BUILD_DIR/gemini-validation-tests"
+    rm -rf "$GEMINI_ROOT"

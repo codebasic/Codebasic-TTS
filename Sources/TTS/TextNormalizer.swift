@@ -85,7 +85,7 @@ enum LLM {
     static func geminiStream(baseURL: String = GeminiNormalizer.defaultBaseURL,
                              apiKey: String, model: String, prompt: String,
                              images: [Data] = [], temperature: Double = 0.2,
-                             reasoningLevel: ReasoningLevel = .medium, conversation: ExplanationConversation? = nil) -> AsyncThrowingStream<String, Error> {
+                             reasoningLevel: ReasoningLevel = .medium, conversation: ExplanationConversation? = nil, maxOutputTokens: Int? = nil) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             let work = Task {
                 let activityID = MemoryDiagnostics.begin("TextNormalizer.geminiStream")
@@ -108,6 +108,7 @@ enum LLM {
                                                       "data": img.base64EncodedString()]])
                     }
                     var generationConfig: [String: Any] = ["temperature": temperature]
+                    if let maxOutputTokens { generationConfig["maxOutputTokens"] = maxOutputTokens }
                     if let thinking = reasoningLevel.geminiThinkingConfig(model: model) {
                         generationConfig["thinkingConfig"] = thinking
                     }
@@ -130,8 +131,9 @@ enum LLM {
                         let json = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
                         guard !json.isEmpty, json != "[DONE]",
                               let d = json.data(using: .utf8),
-                              let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
-                              let cands = obj["candidates"] as? [[String: Any]],
+                              let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { continue }
+                        if let usage = obj["usageMetadata"] as? [String: Any] { V2Runtime.recordLiveEvidence("google-usage", usage) }
+                        guard let cands = obj["candidates"] as? [[String: Any]],
                               let content = cands.first?["content"] as? [String: Any],
                               let parts = content["parts"] as? [[String: Any]],
                               let text = parts.first?["text"] as? String else { continue }

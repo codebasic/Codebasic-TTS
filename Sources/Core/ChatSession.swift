@@ -11,6 +11,11 @@ private final class ChatDiskStore {
     private let queue = DispatchQueue(label: "com.seongjoo.CodebasicTTSV2.chat-storage", qos: .utility)
     private var writes = 0
     private var attachmentWrites = 0
+    // Existing messages are immutable; only the last response text/state changes.
+    private struct Revision: Equatable {
+        let title: String; let count: Int; let lastID: UUID?; let text: String?; let state: String?
+    }
+    private var encodedThreads: [UUID: (Revision, Data)] = [:]
     var writeCount: Int { queue.sync { writes } }
     var attachmentWriteCount: Int { queue.sync { attachmentWrites } }
     init(root: URL) { self.root = root }
@@ -36,7 +41,9 @@ private final class ChatDiskStore {
     private func write(_ threads: [ChatThread]) throws {
         let directory = root.appendingPathComponent("attachments")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let records = try threads.map { thread in
+        let records: [Data] = try threads.map { thread in
+            let revision = Revision(title: thread.title, count: thread.messages.count, lastID: thread.messages.last?.id, text: thread.messages.last?.text, state: thread.messages.last?.state)
+            if let cached = encodedThreads[thread.id], cached.0 == revision { return cached.1 }
             let messages = try thread.messages.map { message in
                 var metadata = message; metadata.images = []
                 let names = try message.images.enumerated().map { index, data in
@@ -49,9 +56,15 @@ private final class ChatDiskStore {
                 }
                 return StoredMessage(message: metadata, attachments: names)
             }
-            return StoredThread(id: thread.id, title: thread.title, createdAt: thread.createdAt, messages: messages)
+            let record = StoredThread(id: thread.id, title: thread.title, createdAt: thread.createdAt, messages: messages)
+            let data = try JSONEncoder().encode(record)
+            encodedThreads[thread.id] = (revision, data)
+            return data
         }
-        try JSONEncoder().encode(Archive(threads: records)).write(to: root.appendingPathComponent("conversations.json"), options: .atomic)
+        var archive = Data("{\"version\":1,\"threads\":[".utf8)
+        for (index, record) in records.enumerated() { if index > 0 { archive.append(44) }; archive.append(record) }
+        archive.append(contentsOf: "]}".utf8)
+        try archive.write(to: root.appendingPathComponent("conversations.json"), options: .atomic)
         writes += 1
     }
     func save(_ threads: [ChatThread]) throws { try queue.sync { try write(threads) } }
@@ -144,9 +157,10 @@ enum ChatSpeechPlan {
     /// The serial disk queue drains any older asynchronous checkpoint before this save.
     func shutdown() { cancelGeneration(); stop() }
     func newThread() {
-        guard persist() else { return }
+        guard storageAvailable else { return }
+        let previous = selected
         let thread = ChatThread(); threads.insert(thread, at: 0); selected = thread.id
-        _ = persist()
+        if !persist() { threads.removeFirst(); selected = previous }
     }
     @discardableResult private func persist() -> Bool {
         checkpointTask?.cancel(); checkpointTask = nil

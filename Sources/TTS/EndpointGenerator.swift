@@ -36,7 +36,7 @@ struct EndpointGenerator: Normalizing, Explaining {
             return AnthropicAPI.stream(baseURL: endpoint.baseURL, key: apiKey, model: model, prompt: prompt, images: images, conversation: conversation)
         case .gemini:
             return LLM.geminiStream(baseURL: endpoint.baseURL, apiKey: apiKey, model: model, prompt: prompt,
-                                    images: images, temperature: temperature, reasoningLevel: reasoningLevel, conversation: conversation)
+                                    images: images, temperature: temperature, reasoningLevel: reasoningLevel, conversation: conversation, maxOutputTokens: V2Runtime.liveValidation ? 64 : nil)
         case .openAICompatible:
             return LLM.openAIChatStream(baseURL: endpoint.baseURL, model: model, apiKey: apiKey, prompt: prompt,
                                         images: images, temperature: temperature, reasoningLevel: reasoningLevel,

@@ -37,15 +37,32 @@ enum Secrets {
 /// Explicit test-only runtime. Activation precedes AppState construction.
 enum V2Runtime {
     static let offline = ProcessInfo.processInfo.environment["CODEBASIC_V2_OFFLINE"] == "1"
+    static let liveValidation = !offline && ProcessInfo.processInfo.environment["CODEBASIC_V2_LIVE_VALIDATION"] == "1"
+    static var suppressDiscovery: Bool { offline || liveValidation }
     static let dataRoot: String = {
-        if offline {
+        if offline || liveValidation {
             let path = ProcessInfo.processInfo.environment["CODEBASIC_V2_TEST_ROOT"] ?? "/tmp/codebasic-v2-offline"
             let resolved = URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path
-            precondition(resolved.hasPrefix("/private/tmp/") || resolved.hasPrefix("/tmp/"), "Offline test root must be inside /tmp")
+            precondition(resolved.hasPrefix("/private/tmp/") || resolved.hasPrefix("/tmp/"), "Validation root must be inside /tmp")
             return resolved
         }
         return ("~/Library/Application Support/Codebasic TTS V2" as NSString).expandingTildeInPath
     }()
+    /// One request per provider per isolated validation root, including failed attempts.
+    static func consumeLivePermit(_ provider: String) -> Bool {
+        guard liveValidation, ["google", "elevenlabs"].contains(provider) else { return !liveValidation }
+        let url = URL(fileURLWithPath: dataRoot).appendingPathComponent("live-" + provider + "-used")
+        do {
+            try FileManager.default.createDirectory(atPath: dataRoot, withIntermediateDirectories: true)
+            try Data("one synthetic validation request".utf8).write(to: url, options: .withoutOverwriting)
+            return true
+        } catch { return false }
+    }
+    static func recordLiveEvidence(_ name: String, _ object: [String: Any]) {
+        guard liveValidation, ["google-usage", "elevenlabs-response", "playback"].contains(name),
+              let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) else { return }
+        try? data.write(to: URL(fileURLWithPath: dataRoot).appendingPathComponent("live-" + name + ".json"), options: .atomic)
+    }
     static func installOfflineNetworkBlock() {
         if offline { URLProtocol.registerClass(V2OfflineURLProtocol.self) }
     }

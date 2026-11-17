@@ -135,6 +135,11 @@ import Foundation
         buffered.cancelGeneration(); stream?.finish()
         let cancelled = ChatSession(root: performanceRoot)
         check(cancelled.current?.messages.last?.state == "cancelled" && cancelled.current?.messages.last?.text == "cancelled partial", "cancel flushes pending text before checkpoint")
+        let unwritable = root.appendingPathComponent("not-a-directory")
+        try Data([1]).write(to: unwritable)
+        let failedThread = ChatSession(root: unwritable)
+        failedThread.newThread()
+        check(failedThread.threads.isEmpty && failedThread.selected == nil && !failedThread.error.isEmpty, "new thread rolls back on persistence failure")
         print("PASS: \(count) chat checks; mock generation and synthesis only")
     }
 }
