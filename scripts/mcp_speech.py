@@ -127,7 +127,7 @@ def exchange(connection, frame, deadline):
     return "unconfirmed"
 
 
-def send_local(arguments, path=None, verify_peer=verified_app_peer):
+def send_local(arguments, path=None, verify_peer=verified_app_peer, max_ipc_frame=MAX_IPC_FRAME):
     path = socket_path() if path is None else path
     deadline = time.monotonic() + IPC_TIMEOUT
     attempted_send = False
@@ -135,7 +135,7 @@ def send_local(arguments, path=None, verify_peer=verified_app_peer):
         if not check_node(path.parent, stat.S_IFDIR, 0o700) or not check_node(path, stat.S_IFSOCK, 0o600):
             return "unsafe"
         frame = encode(arguments)
-        if len(frame) > MAX_IPC_FRAME:
+        if len(frame) > max_ipc_frame:
             return "invalid"
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
             set_remaining(connection, deadline)
@@ -176,10 +176,16 @@ def valid_arguments(args):
 
 
 class Session:
+    tool = TOOL
+    server_name = "codebasic-tts"
+
     def __init__(self, backend):
         self.backend = backend
         self.initialized = False
         self.ready = False
+
+    def execute(self, args):
+        return tool_result(self.backend(args) if valid_arguments(args) else "invalid")
 
     def handle(self, frame):
         try:
@@ -214,7 +220,7 @@ class Session:
                 return error(request_id, -32602, "Invalid initialization")
             self.initialized = True
             result = {"protocolVersion": PROTOCOL, "capabilities": {"tools": {"listChanged": False}},
-                      "serverInfo": {"name": "codebasic-tts", "version": "0.1.0"}}
+                      "serverInfo": {"name": self.server_name, "version": "0.1.0"}}
         elif method == "ping":
             result = {}
         elif not self.ready:
@@ -222,27 +228,28 @@ class Session:
         elif method == "tools/list":
             if "cursor" in params:
                 return error(request_id, -32602, "Invalid cursor")
-            result = {"tools": [TOOL]}
+            result = {"tools": [self.tool]}
         elif method == "tools/call":
-            if params.get("name") != TOOL["name"]:
+            if params.get("name") != self.tool["name"]:
                 return error(request_id, -32602, "Unknown tool")
             if "task" in params:
                 return error(request_id, -32602, "Task execution is not supported")
             args = params.get("arguments")
-            result = tool_result(self.backend(args) if valid_arguments(args) else "invalid")
+            result = self.execute(args)
         else:
             return error(request_id, -32601, "Method not found")
         return {"jsonrpc": "2.0", "id": request_id, "result": result}
 
 
-def run(stdin, stdout, backend=send_local):
-    session = Session(backend)
-    while frame := stdin.readline(MAX_FRAME + 1):
-        if len(frame) > MAX_FRAME or not frame.endswith(b"\n"):
+def run(stdin, stdout, backend=send_local, *, session=None, max_frame=MAX_FRAME):
+    if session is None:
+        session = Session(backend)
+    while frame := stdin.readline(max_frame + 1):
+        if len(frame) > max_frame or not frame.endswith(b"\n"):
             oversized = not frame.endswith(b"\n")
             # Discard remaining fragments in bounded chunks, never interpreting them as requests.
             while oversized:
-                tail = stdin.readline(MAX_FRAME + 1)
+                tail = stdin.readline(max_frame + 1)
                 oversized = bool(tail) and not tail.endswith(b"\n")
             response = error(None, -32700, "Frame too long or not newline terminated")
         else:

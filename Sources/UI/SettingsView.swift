@@ -268,7 +268,6 @@ struct SettingsView: View {
         Group {
             Section("선택한 텍스트") {
                 LabeledContent("읽어주기", value: "⌃⌥⌘R")
-                LabeledContent("코드 해설", value: "⌃⌥⌘E")
             }
             Section("손쉬운 사용 권한") {
                 Label(hasPermission ? "허용됨" : "권한이 필요합니다", systemImage: hasPermission ? "checkmark.circle" : "exclamationmark.circle")

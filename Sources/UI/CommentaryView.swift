@@ -69,7 +69,7 @@ struct CommentaryView: View {
                 .font(.body.monospaced()).frame(minHeight: 150)
                 .overlay(border)
                 .onDrop(of: [.image, .fileURL], isTargeted: nil) { providers in dropImages(providers); return true }
-            Text("코드 입력창에 ⌘V — 텍스트는 코드로, 스크린샷은 이미지로 첨부됩니다.")
+            Text("코드는 ⌘V, 스크린샷은 붙여넣기 버튼이나 드래그로 첨부합니다.")
                 .font(.caption2).foregroundStyle(.tertiary)
 
             if app.hasImages {
@@ -134,21 +134,19 @@ struct CommentaryView: View {
                     .help("해설 생성을 중단합니다 (지금까지 스트림된 부분은 유지)")
                 }
                 Spacer()
-                Toggle("생성 후 바로 재생", isOn: $app.explainAutoPlay)
-                    .toggleStyle(.checkbox)
-                    .controlSize(.small)
-                    .help("단축키(⌃⌥⌘E)·Services ‘코드 해설’로 만든 해설을 바로 읽습니다. 끄면 생성만 하고 창을 띄워, 검토 후 ‘전체 재생’으로 읽습니다.")
-                    .onChange(of: app.explainAutoPlay) { _, _ in app.saveSettings() }
             }
             HStack(spacing: 16) {
                 LLMModelPicker(label: "해설 모델",
                                endpointID: $app.explainEndpointID,
                                roleModels: $app.explainRoleModels,
+                               refreshOnAppear: false,
                                onChange: { app.saveSettings() })
                 LLMModelPicker(label: "비전 모델",
                                endpointID: visionEndpointBinding,
                                roleModels: visionRoleModelsBinding,
+                               refreshOnAppear: false,
                                onChange: { app.saveSettings() })
+                Button("모델 목록 새로고침") { app.refreshAllModels() }.controlSize(.small)
                 if app.visionOverridden {
                     Button {
                         app.visionOverridden = false; app.saveSettings()

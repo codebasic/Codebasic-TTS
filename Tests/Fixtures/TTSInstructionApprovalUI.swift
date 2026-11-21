@@ -126,5 +126,44 @@ extension NSAlert {
         delegate.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification, object: application))
         assertOff()
         print("stale preview denied; byte-level Unicode edit/revert revoked approval; menu revoke and termination removed socket")
+
+        guard let receipt = application.mainMenu?.items.first?.submenu?.item(withTitle: "외부 대본 받기 허용 (이번 실행)…"),
+              let receiptAction = receipt.action else { preconditionFailure("Missing separate receipt consent") }
+        let dSocket = directory + "/d.sock"
+        func receiptClick(_ responses: [(NSAlert) -> NSApplication.ModalResponse]) {
+            ApprovalUIProbe.responses = responses
+            precondition(application.sendAction(receiptAction, to: receipt.target, from: receipt))
+            precondition(ApprovalUIProbe.responses.isEmpty)
+            precondition(application.windows.allSatisfy { !$0.isVisible })
+        }
+        func assertDraftOff() {
+            precondition(receipt.state == .off && delegate.appState.explanationDrafts.receiverPID == nil)
+            precondition(!FileManager.default.fileExists(atPath: dSocket))
+        }
+        assertDraftOff()
+        receiptClick([{ alert in
+            precondition(alert.messageText == "외부 에이전트 대본 받기")
+            precondition(alert.informativeText.contains("재생하지 않으며"))
+            return .alertSecondButtonReturn
+        }])
+        assertDraftOff()
+        let approveReceipt: (NSAlert) -> NSApplication.ModalResponse = { alert in
+            precondition(alert.buttons.map(\.title) == ["이 도우미만 허용", "취소"])
+            guard let pid = alert.accessoryView as? NSTextField else { preconditionFailure("Missing draft helper PID") }
+            pid.stringValue = String(getpid())
+            return .alertFirstButtonReturn
+        }
+        receiptClick([approveReceipt])
+        assertOff()
+        precondition(receipt.state == .on && delegate.appState.explanationDrafts.receiverPID == getpid())
+        precondition(FileManager.default.fileExists(atPath: dSocket))
+        precondition(!FileManager.default.fileExists(atPath: directory + "/s.sock"))
+        // A new read permit does not replace or turn off receipt, and vice versa.
+        click([choice, { _ in .alertFirstButtonReturn }]); assertOn()
+        receiptClick([]); assertDraftOff(); assertOn()
+        receiptClick([approveReceipt])
+        delegate.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification, object: application))
+        assertDraftOff(); assertOff()
+        print("receipt: default off and cancel unchanged; separate allow/revoke; no speech grant; cleanup at termination")
     }
 }

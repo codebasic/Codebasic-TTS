@@ -87,6 +87,33 @@ final class AppState: ObservableObject {
             && scriptBuiltFrom != (inputText + "\u{1F}" + scriptHint)
     }
 
+    // External workspace is never connected to the legacy generator buffers.
+    let explanationDrafts = ExplanationDraftWorkspace()
+    @Published var sharedInstructionProfile: LocalInstructionProfile.Name?
+
+    func instructionSnapshot(_ name: LocalInstructionProfile.Name) -> LocalInstructionProfile? {
+        let text: String
+        switch name {
+        case .explain:
+            text = CodeExplanation.effectiveInstruction(explainPrompt)
+        case .continue:
+            text = CodeExplanation.effectiveInstruction(explainPrompt) + "\n\n" + CodeExplanation.continueInstruction
+        case .normalize:
+            text = normalizePrompt.isEmpty ? TextNormalizer.defaultInstruction : normalizePrompt
+        }
+        return LocalInstructionProfile(name: name, text: text)
+    }
+
+    /// The external agent has already done the text work. Only the current
+    /// voice engine may be used, and only on this explicit editor action.
+    func playExplanationDraft(displayOnly: Bool = false) {
+        guard !isBusy, !explaining, !normalizing,
+              let input = explanationDrafts.playback(displayOnly: displayOnly) else { return }
+        playbackMode = .explain
+        synthesize(input.speech, displayText: input.display, preserveLiteral: true)
+        phase = .synthesizing
+    }
+
     // Commentary (코드 → 해설). Shares the endpoint pool above, but the explain
     // model is SEPARATE from the script model — they can differ.
     @Published var codeText = ""                 // source code (해설 panel, top)
@@ -94,11 +121,8 @@ final class AppState: ObservableObject {
     @Published var explaining = false
     @Published var explainPrompt = CodeExplanation.defaultInstruction
     @Published var explainHint = ""              // 해설 단계 (코드→해설) 추가 지시
-    @Published var explainAutoPlay = true        // 단축키/Services 해설: 생성 직후 바로 재생(끄면 검토 후 수동 재생)
+    @Published var explainAutoPlay = true        // legacy setting retained for older versions
 
-    /// Set by AppDelegate: bring the management window forward so a review-only
-    /// 해설 (explainAutoPlay == false) is visible to read/check before playing.
-    var onRequestReview: (() -> Void)?
     @Published var explainTemperature: Double = 0.4          // 해설 LLM 생성 매개변수
     @Published var scriptTemperature: Double = 0.2           // 대본 LLM 생성 매개변수
     /// 역할별 reasoning(thinking) 수준 — 공급자별 파라미터로 변환해 요청에 실린다
@@ -1088,10 +1112,6 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// Services entry ("코드 해설"): stream the explanation of the selected code,
-    /// then read the 해설 directly (음성 대본 is an opt-in panel step, not used in
-    /// the one-shot). Code is fed RAW; a failed/cancelled explanation never falls
-    /// through to speaking the source. Runs under `explainTask` so 중지 cancels it.
     /// Build the speech 대본 for already-readable prose (e.g. a 해설): when 대본
     /// 정규화 is enabled, normalize it for TTS (spell numbers/symbols); else read
     /// the prose as-is. Cached by content. On cancel/error, falls back to `text`.
@@ -1117,35 +1137,6 @@ final class AppState: ObservableObject {
         let final = out.isEmpty ? text : out
         normCache.put(key: nk, script: final)
         return final
-    }
-
-    func explainAndSpeak(_ code: String) {
-        cancelActiveWork()
-        playbackMode = .explain
-        codeText = code             // raw — no cleanInput
-        explanationText = ""
-        phase = .synthesizing
-        statusText = "해설 생성 중…"
-        explainTask = Task { [weak self] in
-            let activityID = MemoryDiagnostics.begin("AppState.explainAndPlay")
-            defer { MemoryDiagnostics.end(activityID) }
-            guard let self else { return }
-            guard let explanation = await self.runExplain(force: false), !Task.isCancelled else {
-                self.phase = .idle
-                if self.statusText.isEmpty { self.statusText = "해설 생성 실패" }
-                return                  // do NOT speak raw code
-            }
-            guard self.explainAutoPlay else {       // 검토 모드: 생성만 하고 창을 띄워 보여줌
-                self.phase = .idle
-                self.statusText = "해설 생성 완료 — 검토 후 ‘전체 재생’"
-                self.onRequestReview?()
-                return
-            }
-            let reading = TextSplitter.cleanInput(explanation)   // 자막: 읽기 좋은 해설
-            let tts = await self.ttsScript(for: reading)         // 음성: 내부 대본(정규화 토글 따름)
-            guard !Task.isCancelled else { return }
-            self.synthesize(tts, displayText: reading)
-        }
     }
 
     // MARK: - Script (TTS-friendly text)
@@ -1513,7 +1504,7 @@ final class AppState: ObservableObject {
         if normalizePrompt != TextNormalizer.defaultInstruction {
             dict["normalizePrompt"] = normalizePrompt
         }
-        if explainPrompt != CodeExplanation.defaultInstruction {
+        if !explainPrompt.utf8.elementsEqual(CodeExplanation.defaultInstruction.utf8) {
             dict["explainPrompt"] = explainPrompt
         }
         if let d = try? JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted]) {

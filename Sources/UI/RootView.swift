@@ -1,8 +1,8 @@
 import SwiftUI
 import Combine
 
-/// The management window. TTS is the core function (first tab); 해설 (code →
-/// commentary) is a feeder that hands its prose to TTS via "TTS로 보내기".
+/// The management window. TTS remains independent from the external-agent
+/// Explain workspace and its explicitly enabled legacy generation view.
 struct RootView: View {
     let app: AppState
     @State private var selectedTab: Int
@@ -24,7 +24,7 @@ struct RootView: View {
     var body: some View {
         TabView(selection: tabSelection) {
             GenerateView().tabItem { Label("TTS", systemImage: "waveform") }.tag(0)
-            CommentaryView().tabItem { Label("해설", systemImage: "text.book.closed") }.tag(1)
+            ExplainWorkspace(drafts: app.explanationDrafts).tabItem { Label("해설", systemImage: "text.book.closed") }.tag(1)
             HistoryView().tabItem { Label("히스토리", systemImage: "clock.arrow.circlepath") }.tag(2)
             BacklogView().tabItem { Label("백로그", systemImage: "flag") }.tag(3)
             SettingsView().tabItem { Label("설정", systemImage: "slider.horizontal.3") }.tag(4)

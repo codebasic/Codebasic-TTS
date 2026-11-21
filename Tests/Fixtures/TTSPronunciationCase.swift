@@ -153,5 +153,49 @@ enum PronunciationCase {
         await delayed.fail(new)
         try await awaitPayload(app, count: 3)
         print("playback: delayed error from stopped provider did not reset latest accepted request")
+
+        let inbox = app.explanationDrafts
+        inbox.editDisplay("User's unsaved manual draft")
+        let item = ExplanationDraft(id: "fixture-draft", display: Case.visual, speech: Case.spoken)!
+        precondition(inbox.receive(item) == .accepted && inbox.receive(item) == .duplicate)
+        precondition(inbox.receive(ExplanationDraft(id: item.id, display: "달라진 대본", speech: nil)!) == .conflict)
+        precondition(inbox.pending.count == 1 && inbox.display == "User's unsaved manual draft")
+        precondition(app.phase == .idle && Case.log.snapshot().0.count == 1 && Case.log.snapshot().1.count == 3)
+        precondition(!inbox.open(item.id) && inbox.pending.count == 1)
+        precondition(inbox.open(item.id, replace: true) && inbox.pending.isEmpty)
+        precondition(inbox.display == Case.visual && inbox.speech == Case.spoken)
+        precondition(inbox.receive(item) == .duplicate && inbox.pending.isEmpty)
+        app.playExplanationDraft()
+        try await awaitPayload(app, count: 4)
+        precondition(app.subtitleText == Case.visual && Case.log.snapshot().1.last == Case.spoken)
+
+        let edited = Case.visual + " 수정했습니다."
+        inbox.editDisplay(edited)
+        precondition(inbox.speechNeedsReview && inbox.playback() == nil)
+        app.playExplanationDraft()
+        precondition(app.phase == .idle && Case.log.snapshot().1.count == 4)
+        app.playExplanationDraft(displayOnly: true)
+        try await awaitPayload(app, count: 5)
+        precondition(app.subtitleText == edited && Case.log.snapshot().1.last == edited)
+        precondition(inbox.speechNeedsReview)
+        let corrected = Case.spoken + " 수정했습니다."
+        inbox.editSpeech(corrected)
+        precondition(inbox.speechNeedsReview)
+        inbox.confirmSpeech()
+        app.playExplanationDraft()
+        try await awaitPayload(app, count: 6)
+        precondition(app.subtitleText == edited && Case.log.snapshot().1.last == corrected)
+        precondition(Case.log.snapshot().0.count == 1) // normalization remains enabled, but never for these drafts.
+
+        for i in 0..<ExplanationDraftWorkspace.maxPending {
+            precondition(inbox.receive(ExplanationDraft(id: "queued-\(i)", display: "대본 \(i)", speech: nil)!) == .accepted)
+        }
+        precondition(inbox.receive(ExplanationDraft(id: "overflow", display: "가득 참", speech: nil)!) == .busy)
+        inbox.discard("queued-0")
+        precondition(inbox.receive(ExplanationDraft(id: "overflow", display: "빈 자리", speech: nil)!) == .accepted)
+        precondition(inbox.display == edited && inbox.pending.count == ExplanationDraftWorkspace.maxPending)
+        inbox.editDisplay(CodeExplanation.noChange)
+        precondition(inbox.playback() == nil && inbox.playback(displayOnly: true) == nil)
+        print("draft workspace: queued/retried/no overwrite; stale voice blocked; explicit literal playback separates subtitle and speech, no normalizer")
     }
 }

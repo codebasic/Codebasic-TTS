@@ -43,24 +43,55 @@ struct LocalInstructionProfile {
     }
 }
 
-/// A separate read-only socket; this never accesses AppState, files or a playback/provider backend.
+/// Read-only profile endpoint. Granting this transport never enables receipt or playback.
 final class LocalInstructionSocket {
+    private let transport: LocalApprovedSocket
+
+    init(peer: LocalInstructionPeer, profile: LocalInstructionProfile,
+         directory: String = LocalApprovedSocket.defaultDirectory,
+         lifetime: DispatchTimeInterval = .seconds(600)) {
+        transport = LocalApprovedSocket(peer: peer, endpoint: "i.sock", directory: directory,
+                                        lifetime: lifetime, maxFrame: 128) { bytes, _ in
+            guard let args = try? JSONDecoder().decode([String: String].self, from: bytes),
+                  args == ["profile": profile.name.rawValue] else { return nil }
+            let result: [String: Any] = ["schema_version": 1, "profile": profile.name.rawValue,
+                                         "revision": profile.revision, "instructions": profile.text]
+            guard let reply = try? JSONSerialization.data(withJSONObject: result, options: [.withoutEscapingSlashes]),
+                  reply.count < 52 * 1024 else { return nil }
+            return reply
+        }
+    }
+
+    func start() -> Bool { transport.start() }
+    func stop() { transport.stop() }
+}
+
+/// Private Unix transport for one explicitly approved live process. Endpoint
+/// instances have disjoint paths, handlers, and leases.
+final class LocalApprovedSocket {
+    static var defaultDirectory: String { "/private/tmp/codebasic-tts-mcp-\(getuid())" }
     private let directory: String
-    private var path: String { directory + "/i.sock" }
-    private let queue = DispatchQueue(label: "com.codebasic.tts.local-instructions")
+    private let endpoint: String
+    private var path: String { directory + "/" + endpoint }
+    private let queue: DispatchQueue
     private let lock = NSLock()
     private let approvedPeer: LocalInstructionPeer
-    private let profile: LocalInstructionProfile
+    private let maxFrame: Int
     private let expires: DispatchTime
+    private let handle: (Data, @escaping () -> Bool) -> Data?
     private var source: DispatchSourceRead?
     private var inode: ino_t = 0
     private var revoked = false
 
-    init(peer: LocalInstructionPeer, profile: LocalInstructionProfile,
-         directory: String = "/private/tmp/codebasic-tts-mcp-\(getuid())", lifetime: DispatchTimeInterval = .seconds(600)) {
+    init(peer: LocalInstructionPeer, endpoint: String, directory: String,
+         lifetime: DispatchTimeInterval, maxFrame: Int,
+         handle: @escaping (Data, @escaping () -> Bool) -> Data?) {
         approvedPeer = peer
-        self.profile = profile
+        self.endpoint = endpoint
         self.directory = directory
+        self.maxFrame = maxFrame
+        self.handle = handle
+        queue = DispatchQueue(label: "com.codebasic.tts.approved-ipc." + endpoint)
         expires = .now() + lifetime
     }
 
@@ -117,24 +148,15 @@ final class LocalInstructionSocket {
         guard LocalInstructionPeer.connected(fd) == approvedPeer,
               setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size)) == 0,
               fcntl(fd, F_SETFL, O_NONBLOCK) == 0 else { return }
-        let deadline = DispatchTime.now() + .milliseconds(400)
-        var bytes = Data()
-        var byte: UInt8 = 0
-        while bytes.count < 128 {
-            guard ready(fd, event: Int16(POLLIN), deadline: deadline), recv(fd, &byte, 1, 0) == 1 else { return }
-            if byte == 10 { break }
-            bytes.append(byte)
-        }
-        guard byte == 10, let args = try? JSONDecoder().decode([String: String].self, from: bytes),
-              args == ["profile": profile.name.rawValue] else { return }
-        let result: [String: Any] = ["schema_version": 1, "profile": profile.name.rawValue,
-                                     "revision": profile.revision, "instructions": profile.text]
-        guard var out = try? JSONSerialization.data(withJSONObject: result, options: [.withoutEscapingSlashes]),
-              out.count < 52 * 1024 else { return }
+        let deadline = DispatchTime.now() + .milliseconds(600)
+        guard let bytes = readFrame(fd, deadline: deadline),
+              LocalInstructionPeer.connected(fd) == approvedPeer,
+              active(),
+              var out = handle(bytes, { [weak self] in self?.active() == true }) else { return }
         out.append(10)
         lock.lock()
         defer { lock.unlock() }
-        // Keep this checked across the write. Stop can wait only for the short send deadline.
+        // Keep the lease checked across the write. Stop can wait only for the short send deadline.
         guard !revoked, DispatchTime.now() < expires, LocalInstructionPeer.connected(fd) == approvedPeer else { return }
         let sendDeadline = DispatchTime.now() + .milliseconds(100)
         _ = out.withUnsafeBytes { (view: UnsafeRawBufferPointer) -> Bool in
@@ -148,6 +170,35 @@ final class LocalInstructionSocket {
             }
             return true
         }
+    }
+
+    private func active() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return !revoked && DispatchTime.now() < expires && LocalInstructionPeer.current(pid: approvedPeer.pid) == approvedPeer
+    }
+
+    /// Require a single LF-terminated frame followed by client half-close.
+    /// No queued or trailing second frame can be mistaken for the approved request.
+    private func readFrame(_ fd: Int32, deadline: DispatchTime) -> Data? {
+        var frame = Data()
+        var terminated = false
+        var chunk = [UInt8](repeating: 0, count: 4096)
+        while ready(fd, event: Int16(POLLIN), deadline: deadline) {
+            let count = chunk.withUnsafeMutableBytes { recv(fd, $0.baseAddress, $0.count, 0) }
+            if count == 0 { return terminated ? frame : nil }
+            guard count > 0, !terminated else { return nil }
+            let received = chunk.prefix(count)
+            if let index = received.firstIndex(of: 10) {
+                guard index == received.endIndex - 1 else { return nil }
+                frame.append(contentsOf: received.prefix(upTo: index))
+                terminated = true
+            } else {
+                frame.append(contentsOf: received)
+            }
+            guard frame.count < maxFrame else { return nil }
+        }
+        return nil
     }
 
     private func ready(_ fd: Int32, event: Int16, deadline: DispatchTime) -> Bool {

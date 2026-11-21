@@ -9,6 +9,7 @@ struct LLMModelPicker: View {
     let label: String
     @Binding var endpointID: String                    // role → endpoint reference
     @Binding var roleModels: [String: String]          // endpoint id → the role's model there
+    var refreshOnAppear = true
     var onChange: () -> Void = {}
 
     private var current: AppState.LLMChoice? {
@@ -68,6 +69,6 @@ struct LLMModelPicker: View {
                 .labelsHidden().frame(maxWidth: 260)
             }
         }
-        .onAppear { app.refreshAllModelsIfNeeded() }
+        .onAppear { if refreshOnAppear { app.refreshAllModelsIfNeeded() } }
     }
 }

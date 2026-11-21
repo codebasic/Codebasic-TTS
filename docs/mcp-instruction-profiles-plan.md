@@ -4,7 +4,7 @@
 
 ## 결정
 
-지시와 작업 흐름은 Codebasic TTS 앱에서 계속 관리합니다. 외부 폴더나 별도 에이전트 지시 파일로 옮기지 않습니다. 사용자가 앱에서 지시 공유를 따로 허용한 동안, 연결한 에이전트가 **읽기 전용 `get_tts_instructions(profile)`**로 필요한 프로필을 요청합니다. 앱은 조회에 모델이나 음성 제공자를 호출하지 않습니다. 기존 앱 자체의 해설·정규화·재생과 MCP `speak_text`는 그대로 둡니다.
+지시와 작업 흐름은 Codebasic TTS 앱에서 계속 관리합니다. 외부 폴더나 별도 에이전트 지시 파일로 옮기지 않습니다. 사용자가 앱에서 지시 공유를 따로 허용한 동안, 연결한 에이전트가 **읽기 전용 `get_tts_instructions(profile)`**로 필요한 프로필을 요청합니다. 앱은 조회에 모델이나 음성 제공자를 호출하지 않습니다. 앱 내부 해설은 고급 화면에서 명시적으로 시작합니다. 정규화·재생과 MCP `speak_text`는 별도 기능으로 유지됩니다.
 
 MCP 표준의 `prompts/list`·`prompts/get`은 사용자가 메뉴 등에서 직접 선택하는 방식에 적합합니다. 에이전트가 명시적으로 조회하는 이번 요구에는 도구 호출이 맞습니다. 나중에 사용자 선택 방식이 필요하면 같은 프로필 조회 함수를 `prompts/get`에 연결할 수 있습니다. [MCP Prompts](https://modelcontextprotocol.io/specification/2025-11-25/server/prompts), [MCP Tools](https://modelcontextprotocol.io/specification/2025-11-25/server/tools)
 

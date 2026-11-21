@@ -19,6 +19,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var localInstructionSocket: LocalInstructionSocket?
     private var localInstructionMenu: NSMenuItem?
     private var localInstructionExpiry: DispatchWorkItem?
+    private var draftReceiptSocket: LocalExplanationDraftSocket?
+    private var draftReceiptExpiry: DispatchWorkItem?
+    private var draftReceiptMenu: NSMenuItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
@@ -28,9 +31,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         registerHotKeys()
         observeState()
 
-        // Review-only 해설 (auto-play off): surface the window so it can be checked.
-        appState.onRequestReview = { [weak self] in self?.mainWindow.show() }
-        if appState.keyPresent { appState.refreshVoices() }
+        // Opening the app does not refresh cloud voices. Settings already
+        // loads voice/model inventory when the user opens it.
         mainWindow.show()                       // open the management window on launch
 
         Log.app.info("Codebasic TTS launched. Backend: \(self.appState.backendIdentity, privacy: .public)")
@@ -60,7 +62,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     // Separate consent: enabling speech must never publish instructions.
-    @objc private func toggleLocalInstructions() {
+    @objc private func toggleLocalInstructions() { toggleInstructionSharing() }
+
+    func toggleInstructionSharing(preselect: LocalInstructionProfile.Name? = nil) {
         if localInstructionSocket != nil { revokeLocalInstructions(); return }
         let selection = NSAlert()
         selection.messageText = "로컬 MCP 지시 공유 (이번 실행)"
@@ -71,6 +75,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pidField.placeholderString = "지시 도우미 PID"
         let picker = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 390, height: 26))
         picker.addItems(withTitles: ["해설", "이어서 해설", "음성 대본 정규화 (사전·힌트 제외)"])
+        if let preselect, let index = LocalInstructionProfile.Name.allCases.firstIndex(of: preselect) {
+            picker.selectItem(at: index)
+            picker.isEnabled = false
+        }
         let fields = NSView(frame: NSRect(x: 0, y: 0, width: 390, height: 60))
         fields.addSubview(pidField); fields.addSubview(picker)
         selection.accessoryView = fields
@@ -78,7 +86,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let names = LocalInstructionProfile.Name.allCases
         guard let pid = Int32(pidField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)),
               let peer = LocalInstructionPeer.current(pid: pid), names.indices.contains(picker.indexOfSelectedItem),
-              let profile = instructionSnapshot(names[picker.indexOfSelectedItem]) else {
+              let profile = appState.instructionSnapshot(names[picker.indexOfSelectedItem]) else {
             showInstructionShareError("같은 계정에서 계속 실행 중인 도우미의 PID와 공유할 수 있는 길이의 지시가 필요합니다.")
             return
         }
@@ -93,8 +101,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         preview.isRichText = false
         preview.string = profile.text; preview.isEditable = false; preview.isSelectable = true
         approval.accessoryView = scroll
-        guard approval.runModal() == .alertFirstButtonReturn else { return }
-        guard instructionSnapshot(profile.name)?.revision == profile.revision else {
+        guard approval.runModal() == .alertFirstButtonReturn, localInstructionSocket == nil else { return }
+        guard appState.instructionSnapshot(profile.name)?.revision == profile.revision else {
             showInstructionShareError("미리 보는 동안 지시가 바뀌었습니다. 새 내용을 확인한 뒤 다시 공유하세요.")
             return
         }
@@ -104,6 +112,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         localInstructionSocket = socket
+        appState.sharedInstructionProfile = profile.name
         localInstructionMenu?.state = .on
         let expiry = DispatchWorkItem { [weak self, weak socket] in
             guard let self, let socket, self.localInstructionSocket === socket else { return }
@@ -111,19 +120,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         localInstructionExpiry = expiry
         DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(600), execute: expiry)
-    }
-
-    private func instructionSnapshot(_ name: LocalInstructionProfile.Name) -> LocalInstructionProfile? {
-        let text: String
-        switch name {
-        case .explain:
-            text = CodeExplanation.effectiveInstruction(appState.explainPrompt)
-        case .continue:
-            text = CodeExplanation.effectiveInstruction(appState.explainPrompt) + "\n\n" + CodeExplanation.continueInstruction
-        case .normalize:
-            text = appState.normalizePrompt.isEmpty ? TextNormalizer.defaultInstruction : appState.normalizePrompt
-        }
-        return LocalInstructionProfile(name: name, text: text)
     }
 
     private func showInstructionShareError(_ reason: String) {
@@ -136,12 +132,62 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func revokeLocalInstructions() {
         localInstructionExpiry?.cancel(); localInstructionExpiry = nil
         localInstructionSocket?.stop(); localInstructionSocket = nil
+        appState.sharedInstructionProfile = nil
         localInstructionMenu?.state = .off
+    }
+
+    @objc func toggleDraftReceipt() {
+        if draftReceiptSocket != nil { revokeDraftReceipt(); return }
+        let alert = NSAlert()
+        alert.messageText = "외부 에이전트 대본 받기"
+        alert.informativeText = "지정한 도우미의 대본만 최대 10분 동안 임시 보관함에 받습니다. 화면을 덮어쓰거나 재생하지 않으며, 지시문 조회도 허용하지 않습니다."
+        alert.addButton(withTitle: "이 도우미만 허용")
+        alert.addButton(withTitle: "취소")
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
+        field.placeholderString = "대본 도우미 PID"
+        alert.accessoryView = field
+        guard alert.runModal() == .alertFirstButtonReturn, draftReceiptSocket == nil else { return }
+        guard let pid = Int32(field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)),
+              let peer = LocalInstructionPeer.current(pid: pid) else {
+            showDraftReceiptError("같은 Mac 계정에서 현재 실행 중인 대본 도우미 PID가 필요합니다.")
+            return
+        }
+
+        let workspace = appState.explanationDrafts
+        let socket = LocalExplanationDraftSocket(peer: peer) { draft in workspace.receive(draft) }
+        guard socket.start() else {
+            showDraftReceiptError("도우미가 종료됐거나 대본 소켓 경로가 이미 사용 중입니다.")
+            return
+        }
+        draftReceiptSocket = socket
+        workspace.setReceiver(pid)
+        draftReceiptMenu?.state = .on
+        let expiry = DispatchWorkItem { [weak self, weak socket] in
+            guard let self, let socket, self.draftReceiptSocket === socket else { return }
+            self.revokeDraftReceipt()
+        }
+        draftReceiptExpiry = expiry
+        DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(600), execute: expiry)
+    }
+
+    private func showDraftReceiptError(_ message: String) {
+        let alert = NSAlert()
+        alert.messageText = "대본 받기를 허용하지 않았습니다"
+        alert.informativeText = message
+        alert.runModal()
+    }
+
+    private func revokeDraftReceipt() {
+        draftReceiptExpiry?.cancel(); draftReceiptExpiry = nil
+        draftReceiptSocket?.stop(); draftReceiptSocket = nil
+        appState.explanationDrafts.setReceiver(nil)
+        draftReceiptMenu?.state = .off
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         localSpeechSocket?.stop()
         revokeLocalInstructions()
+        revokeDraftReceipt()
     }
 
     @objc private func openWindow() { mainWindow.show() }
@@ -183,21 +229,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private let hotKeys = HotKeyCenter()
 
-    /// ⌃⌥⌘E → explain the selection, ⌃⌥⌘R → read it aloud. The selection is
+    /// ⌃⌥⌘R → read the selection aloud. The selection is
     /// grabbed via a clipboard-preserving copy, so it works even where the
     /// Services menu is hidden (VS Code). First use prompts for Accessibility.
     private func registerHotKeys() {
         let mods = controlKey | optionKey | cmdKey
-        hotKeys.register(id: 1, keyCode: kVK_ANSI_E, modifiers: mods) { [weak self] in
-            self?.appState.captureHUDTarget()   // before the async grab: mouse is still on the target screen
-            SelectionGrabber.grab { text in
-                guard let self, let text else { return }
-                MainActor.assumeIsolated {
-                    self.appState.selectedTab = 1
-                    self.appState.explainAndSpeak(text)
-                }
-            }
-        }
         hotKeys.register(id: 2, keyCode: kVK_ANSI_R, modifiers: mods) { [weak self] in
             self?.appState.captureHUDTarget()   // before the async grab: mouse is still on the target screen
             SelectionGrabber.grab { text in
@@ -205,24 +241,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 MainActor.assumeIsolated { self.appState.speakSelected(text) }
             }
         }
-    }
-
-    // MARK: - ⌘V paste (intercept to attach screenshots in the 해설 탭)
-
-    /// The Edit-menu 붙여넣기 (⌘V) routes here. In the 해설 탭, an image on the
-    /// clipboard is attached as a screenshot; otherwise (and for text) the paste
-    /// is forwarded to the first responder for normal handling.
-    @objc func handlePaste(_ sender: Any?) {
-        if appState.selectedTab == 1 {
-            let pb = NSPasteboard.general
-            let hasImage = (pb.readObjects(forClasses: [NSImage.self], options: nil) as? [NSImage])?
-                .contains { !$0.size.equalTo(.zero) } ?? false
-            if hasImage {
-                appState.pasteImagesFromClipboard()
-                if !pb.canReadObject(forClasses: [NSString.self], options: nil) { return }  // image-only → done
-            }
-        }
-        NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: sender)   // normal text paste
     }
 
     // MARK: - Services
@@ -239,17 +257,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Log.app.info("handleSelectedText: \(text.count) chars — \"\(preview, privacy: .public)\"")
         appState.captureHUDTarget()
         appState.speakSelected(text)
-    }
-
-    /// Called by ServiceProvider when the user picks "코드 해설": explain the
-    /// selected code via the LLM, then speak the commentary (코드 → 해설 → 대본 →
-    /// 음성). Surfaces the 해설 tab so the result is visible.
-    func handleCodeText(_ code: String) {
-        let preview = code.replacingOccurrences(of: "\n", with: " ").prefix(60)
-        Log.app.info("handleCodeText: \(code.count) chars — \"\(preview, privacy: .public)\"")
-        appState.captureHUDTarget()
-        appState.selectedTab = 1        // 해설 탭 (2번째)
-        appState.explainAndSpeak(code)
     }
 
     // MARK: - Main menu (regular app needs one for ⌘Q and text-editing shortcuts)
@@ -272,6 +279,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                            action: #selector(toggleLocalInstructions), keyEquivalent: "")
         instructions.target = self
         localInstructionMenu = instructions
+        let draftReceipt = appMenu.addItem(withTitle: "외부 대본 받기 허용 (이번 실행)…",
+                                           action: #selector(toggleDraftReceipt), keyEquivalent: "")
+        draftReceipt.target = self
+        draftReceiptMenu = draftReceipt
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Codebasic TTS 가리기", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         appMenu.addItem(withTitle: "다른 항목 가리기",
@@ -289,9 +300,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         editMenu.addItem(.separator())
         editMenu.addItem(withTitle: "오려두기", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
         editMenu.addItem(withTitle: "복사", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
-        let pasteItem = NSMenuItem(title: "붙여넣기", action: #selector(handlePaste(_:)), keyEquivalent: "v")
-        pasteItem.target = self
-        editMenu.addItem(pasteItem)
+        editMenu.addItem(withTitle: "붙여넣기", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         editMenu.addItem(withTitle: "전체 선택", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
 
         let windowItem = NSMenuItem()
