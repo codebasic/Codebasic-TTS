@@ -72,7 +72,7 @@ struct AgentInstructionSnapshot: Equatable, Sendable {
 @MainActor final class AgentCatalog: ObservableObject {
     struct File: Codable { let version: Int; let records: [AgentCatalogRecord] }
     enum Failure: LocalizedError {
-        case unreadable, invalid, duplicate, full, conflict
+        case unreadable, invalid, duplicate, full, conflict, busy
         var errorDescription: String? {
             switch self {
             case .unreadable: return "저장된 지시 목록을 읽지 못했습니다. 원본은 덮어쓰지 않습니다."
@@ -80,14 +80,16 @@ struct AgentInstructionSnapshot: Equatable, Sendable {
             case .duplicate: return "같은 이름의 지시가 이미 있습니다."
             case .full: return "저장할 수 있는 지시 수가 한도에 도달했습니다."
             case .conflict: return "다른 편집에서 지시가 바뀌었습니다. 다시 열어 확인하세요."
+            case .busy: return "다른 앱 창이 지시 목록을 저장 중입니다. 잠시 후 다시 시도하세요."
             }
         }
     }
 
     @Published private(set) var records: [AgentCatalogRecord] = []
-    private(set) var readError = false
+    @Published private(set) var readError = false
     private let url: URL
     private let write: (Data, URL) throws -> Void
+    private var knownStore = false
     /// Only called after durable commit. On deletion, the selector no longer
     /// resolves; random IDs are never reused (the live proof is tombstoned).
     var didChange: ((String, Bool) -> Void)?
@@ -95,57 +97,185 @@ struct AgentInstructionSnapshot: Equatable, Sendable {
     init(url: URL, write: @escaping (Data, URL) throws -> Void = AgentCatalog.writeAtomically) {
         self.url = url
         self.write = write
-        guard FileManager.default.fileExists(atPath: url.path) else { return }
-        do {
-            let reader = try FileHandle(forReadingFrom: url)
-            defer { try? reader.close() }
-            let bound = 4 * 1024 * 1024
-            guard let bytes = try reader.read(upToCount: bound + 1), bytes.count <= bound else {
-                throw Failure.unreadable
-            }
-            let loaded = try JSONDecoder().decode(File.self, from: bytes)
-            guard loaded.version == 1, Set(loaded.records.map(\.id)).count == loaded.records.count else {
-                throw Failure.unreadable
-            }
-            records = loaded.records // Never truncate or silently rewrite imported oversized data.
-        } catch { readError = true }
+        _ = refresh()
     }
 
     func record(_ selector: String) -> AgentCatalogRecord? {
-        records.first { $0.selector == selector }
+        guard !readError else { return nil }
+        return records.first { $0.selector == selector }
+    }
+
+    func filteredRecords(label query: String) -> [AgentCatalogRecord] {
+        let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        return term.isEmpty ? records : records.filter { $0.label.localizedStandardContains(term) }
+    }
+
+    /// Refreshes before a new grant or provenance check, as well as on focus.
+    @discardableResult
+    func refresh() -> Bool {
+        do {
+            let latest = try Self.readFile(url)
+            guard latest != nil || !knownStore else { throw Failure.unreadable }
+            adopt(latest)
+            return true
+        } catch {
+            markUnreadable()
+            return false
+        }
+    }
+
+    /// Hold a shared disk lease through the bounded final handoff. A body edit
+    /// or delete in another process cannot commit between verification and send.
+    func deliveryGate(for snapshot: AgentInstructionSnapshot) -> (@escaping () -> Void) -> Void {
+        let url = self.url
+        return { send in
+            _ = try? Self.withLock(url, exclusive: false) {
+                guard let record = try Self.readFile(url)?.records.first(where: { $0.selector == snapshot.selector }),
+                      record.generation == snapshot.generation, AgentBytes.same(record.body, snapshot.text) else { return }
+                send()
+            }
+        }
     }
 
     @discardableResult
     func save(id: UUID? = nil, expected: UUID? = nil, label: String, body: String) throws -> AgentCatalogRecord {
-        guard !readError else { throw Failure.unreadable }
         guard let label = AgentBytes.label(label) else { throw Failure.invalid }
-        let index = id.flatMap { id in records.firstIndex { $0.id == id } }
-        let previous = index.map { records[$0] }
-        if id != nil, previous?.editVersion != expected || previous == nil { throw Failure.conflict }
-        if id == nil, records.count >= AgentLimits.profiles { throw Failure.full }
-        guard AgentBytes.textValid(body) || previous.map({ AgentBytes.same($0.body, body) }) == true else {
-            throw Failure.invalid
+        return try transaction { latest in
+            let index = id.flatMap { id in latest.firstIndex { $0.id == id } }
+            let previous = index.map { latest[$0] }
+            if id != nil, previous?.editVersion != expected || previous == nil { throw Failure.conflict }
+            if id == nil, latest.count >= AgentLimits.profiles { throw Failure.full }
+            guard AgentBytes.textValid(body) || previous.map({ AgentBytes.same($0.body, body) }) == true else {
+                throw Failure.invalid
+            }
+            guard !latest.contains(where: { $0.id != id && $0.label.caseInsensitiveCompare(label) == .orderedSame }) else {
+                throw Failure.duplicate
+            }
+            if let previous, AgentBytes.same(previous.label, label), AgentBytes.same(previous.body, body) {
+                return (previous, nil)
+            }
+            // A label-only edit does not affect the active wire revision.
+            let generation = previous.flatMap { AgentBytes.same($0.body, body) ? $0.generation : nil } ?? UUID()
+            let record = AgentCatalogRecord(id: id ?? UUID(), generation: generation,
+                                            label: label, body: body, editRecord: UUID())
+            var next = latest
+            if let index { next[index] = record } else { next.append(record) }
+            return (record, next)
         }
-        guard !records.contains(where: { $0.id != id && $0.label.caseInsensitiveCompare(label) == .orderedSame }) else {
-            throw Failure.duplicate
-        }
-        if let previous, AgentBytes.same(previous.label, label), AgentBytes.same(previous.body, body) { return previous }
-        // Rename doesn't alter wire text/identity or silently retarget a grant.
-        let bodyChanged = previous.map { !AgentBytes.same($0.body, body) } ?? true
-        let record = AgentCatalogRecord(id: id ?? UUID(), generation: bodyChanged ? UUID() : previous!.generation,
-                                        label: label, body: body, editRecord: UUID())
-        var next = records
-        if let index { next[index] = record } else { next.append(record) }
-        try replace(next) {
-            if bodyChanged { didChange?(record.selector, false) }
-        }
-        return record
     }
 
     func delete(_ id: UUID, expected: UUID) throws {
-        guard !readError else { throw Failure.unreadable }
-        guard let old = records.first(where: { $0.id == id }), old.editVersion == expected else { throw Failure.conflict }
-        try replace(records.filter { $0.id != id }) { didChange?(old.selector, true) }
+        try transaction { latest in
+            guard latest.first(where: { $0.id == id })?.editVersion == expected else { throw Failure.conflict }
+            return ((), latest.filter { $0.id != id })
+        }
+    }
+
+    private func transaction<T>(_ change: ([AgentCatalogRecord]) throws -> (T, [AgentCatalogRecord]?)) throws -> T {
+        var latest: File?
+        var didRead = false
+        do {
+            let result = try Self.withLock(url, exclusive: true) {
+                latest = try Self.readFile(url)
+                guard latest != nil || !knownStore else { throw Failure.unreadable }
+                didRead = true
+                let (value, next) = try change(latest?.records ?? [])
+                if let next {
+                    let replacement = File(version: 1, records: next)
+                    let bytes = try JSONEncoder().encode(replacement)
+                    guard bytes.count <= Self.fileLimit else { throw Failure.full }
+                    try write(bytes, url)
+                    latest = replacement
+                }
+                return value
+            }
+            adopt(latest)
+            return result
+        } catch {
+            if didRead { adopt(latest) }
+            else if case Failure.unreadable = error { markUnreadable() }
+            throw error
+        }
+    }
+
+    private func adopt(_ file: File?) {
+        knownStore = file != nil
+        let next = file?.records ?? []
+        let index = Dictionary(uniqueKeysWithValues: next.map { ($0.id, $0) })
+        // Revoke before exposing the new values. No socket calls under disk lock.
+        for old in records {
+            let current = index[old.id]
+            if current?.generation != old.generation || current.map({ !AgentBytes.same($0.body, old.body) }) == true {
+                didChange?(old.selector, current == nil)
+            }
+        }
+        if !zip(records, next).allSatisfy({ $0.id == $1.id && $0.editVersion == $1.editVersion &&
+            $0.generation == $1.generation && AgentBytes.same($0.label, $1.label) && AgentBytes.same($0.body, $1.body) })
+            || records.count != next.count { records = next }
+        if readError { readError = false }
+    }
+
+    private func markUnreadable() {
+        if !readError {
+            // Unknown is not a deletion; stop active retrieval without treating it as durable data loss.
+            for old in records { didChange?(old.selector, false) }
+            readError = true
+        }
+    }
+
+    private nonisolated static let fileLimit = 4 * 1024 * 1024
+
+    private nonisolated static func readFile(_ url: URL) throws -> File? {
+        let fd = Darwin.open(url.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        if fd < 0 {
+            if errno == ENOENT { return nil }
+            throw Failure.unreadable
+        }
+        let reader = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        defer { try? reader.close() }
+        var meta = stat()
+        guard fstat(fd, &meta) == 0, privateFile(meta),
+              meta.st_size > 0, meta.st_size <= fileLimit,
+              let bytes = try? reader.read(upToCount: fileLimit + 1), bytes.count <= fileLimit,
+              let loaded = try? JSONDecoder().decode(File.self, from: bytes),
+              loaded.version == 1, Set(loaded.records.map(\.id)).count == loaded.records.count else {
+            throw Failure.unreadable
+        }
+        return loaded // Preserve oversized old bodies without sharing or truncating them.
+    }
+
+    private nonisolated static func privateFile(_ st: stat) -> Bool {
+        (st.st_mode & S_IFMT) == S_IFREG && st.st_uid == getuid() && st.st_nlink == 1 && st.st_mode & 0o777 == 0o600
+    }
+
+    private nonisolated static func withLock<T>(_ url: URL, exclusive: Bool, _ body: () throws -> T) throws -> T {
+        let parent = url.deletingLastPathComponent()
+        if exclusive { try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true) }
+        let directory = Darwin.open(parent.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard directory >= 0 else { throw Failure.unreadable }
+        defer { close(directory) }
+        var dirStat = stat()
+        guard fstat(directory, &dirStat) == 0, dirStat.st_uid == getuid(), dirStat.st_mode & 0o022 == 0 else {
+            throw Failure.unreadable
+        }
+        let name = "." + url.lastPathComponent + ".lock"
+        // This stable lock is never unlinked by the app. The kernel releases it when a process dies.
+        let fd = openat(directory, name, O_RDWR | O_CREAT | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, 0o600)
+        guard fd >= 0 else { throw Failure.unreadable }
+        defer { close(fd) }
+        var locked = stat(), current = stat()
+        guard fstat(fd, &locked) == 0, privateFile(locked) else { throw Failure.unreadable }
+        let deadline = DispatchTime.now() + .milliseconds(250)
+        while flock(fd, (exclusive ? LOCK_EX : LOCK_SH) | LOCK_NB) != 0 {
+            guard errno == EWOULDBLOCK || errno == EINTR else { throw Failure.unreadable }
+            guard DispatchTime.now() < deadline else { throw Failure.busy }
+            usleep(5_000)
+        }
+        guard fstatat(directory, name, &current, AT_SYMLINK_NOFOLLOW) == 0, privateFile(current),
+              locked.st_dev == current.st_dev, locked.st_ino == current.st_ino,
+              lstat(parent.path, &current) == 0, dirStat.st_dev == current.st_dev,
+              dirStat.st_ino == current.st_ino, (current.st_mode & S_IFMT) == S_IFDIR else { throw Failure.unreadable }
+        return try body()
     }
 
     nonisolated static func writeAtomically(_ bytes: Data, _ destination: URL) throws {
@@ -162,10 +292,4 @@ struct AgentInstructionSnapshot: Equatable, Sendable {
         }
     }
 
-    private func replace(_ next: [AgentCatalogRecord], didWrite: () -> Void) throws {
-        try write(JSONEncoder().encode(File(version: 1, records: next)), url)
-        // Update grants before publishing the committed value to observers.
-        didWrite()
-        records = next
-    }
 }

@@ -112,7 +112,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let socket = LocalInstructionSocket(peer: peer, profile: profile)
         guard socket.start() else {
-            showInstructionShareError("도우미가 종료됐거나 이전 소켓 경로가 남아 있습니다. 새 도우미와 소켓 상태를 확인하세요.")
+            showInstructionShareError(socket.requiresPathInspection ? LocalApprovedSocket.unknownPathMessage
+                                     : "도우미가 종료됐거나 다른 앱이 소켓을 사용 중입니다. 새 도우미와 소켓 상태를 확인하세요.")
             return
         }
         localInstructionSocket = socket
@@ -164,7 +165,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             showInstructionShareError("호환용 기본 지시 공유를 먼저 해제하세요.")
             return
         }
-        guard let pair = state.pair, let snapshot = appState.agentSnapshot(selector), snapshot.shareable else {
+        let custom = LocalInstructionProfile.Name(rawValue: selector) == nil
+        guard !custom || appState.agentCatalog.refresh(),
+              let pair = state.pair, let snapshot = appState.agentSnapshot(selector), snapshot.shareable else {
             showInstructionShareError("서명된 도우미를 연결하고 공유할 지시문을 선택하세요.")
             return
         }
@@ -179,10 +182,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.accessoryView = scroll
         alert.addButton(withTitle: "이 버전만 공개"); alert.addButton(withTitle: "취소")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        guard state.pair?.id == pair.id, appState.agentSnapshot(selector) == snapshot,
-              localInstructionSocket == nil, state.share(snapshot) else {
-            showInstructionShareError("선택한 도우미나 지시문이 바뀌었거나 소켓을 시작할 수 없습니다.")
+        guard (!custom || appState.agentCatalog.refresh()), state.pair?.id == pair.id,
+              appState.agentSnapshot(selector) == snapshot, localInstructionSocket == nil else {
+            showInstructionShareError("선택한 도우미나 지시문이 바뀌었습니다. 다시 확인하세요.")
             return
+        }
+        if !state.share(snapshot, deliveryGate: custom ? appState.agentCatalog.deliveryGate(for: snapshot) : { $0() }) {
+            showInstructionShareError(state.status.isEmpty ? "지시 조회를 허용할 수 없습니다." : state.status)
         }
     }
 
@@ -198,7 +204,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.informativeText = "이 도우미에 실제 전달한 지시 버전의 대본만 최대 10분간 받습니다. 편집기를 덮어쓰거나 재생하지 않으며 지시문 조회도 따로 허용해야 합니다."
         alert.addButton(withTitle: "이 도우미 대본만 받기"); alert.addButton(withTitle: "취소")
         guard alert.runModal() == .alertFirstButtonReturn, state.pair?.id == pair.id else { return }
-        if state.receive(current: { [weak self] in self?.appState.agentSnapshot($0) },
+        if state.receive(current: { [weak self] selector in
+            guard let self, LocalInstructionProfile.Name(rawValue: selector) != nil
+                    || self.appState.agentCatalog.refresh() else { return nil }
+            return self.appState.agentSnapshot(selector)
+        },
                          workspace: appState.explanationDrafts) { draftReceiptMenu?.state = .on }
     }
 

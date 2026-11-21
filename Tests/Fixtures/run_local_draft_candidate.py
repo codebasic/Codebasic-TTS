@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import selectors
+import shutil
 import subprocess
 import tempfile
 
@@ -96,19 +97,27 @@ def main():
                                            (root/"other", APP_ID+".agent-helper",[other_src])):
             subprocess.run(["/usr/bin/swiftc","-framework","Security",*map(str,common+files),"-o",str(binary)],
                            check=True, timeout=120, env=compile_env)
-            subprocess.run(["/usr/bin/codesign","--force","--sign",os.environ.get("CODESIGN_IDENTITY","Codebasic TTS Local"),
+            subprocess.run(["/usr/bin/codesign","--force","--options","runtime","--timestamp=none",
+                            "--sign",os.environ.get("CODESIGN_IDENTITY","Codebasic TTS Local"),
                             "--identifier",identifier,str(binary)], check=True, timeout=15)
+        shutil.copy2(root / "server", root / "unhardened")
+        subprocess.run(["/usr/bin/codesign","--force","--timestamp=none",
+                        "--sign",os.environ.get("CODESIGN_IDENTITY","Codebasic TTS Local"),
+                        "--identifier",APP_ID,str(root / "unhardened")], check=True, timeout=15)
 
         def launch(path, *args, extra=None):
             return subprocess.Popen([str(root/path),*args], env={**env,**(extra or {})}, stdin=subprocess.PIPE,
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
         server = launch("server", str(root))
+        unhardened = launch("unhardened", str(root))
         a, b, wrong = launch("helper"), launch("helper"), launch("helper",extra={"CODEBASIC_TTS_SIGNER_SHA1":"0"*40})
         other = launch("other")
         try:
             assert read(server) == "ready"
+            assert read(unhardened) == "ready"
             for h in a,b,wrong: initialize(h)
+            assert command(unhardened, f"bind {a.pid}") == "no" # wrong runtime policy, same signer and ID
             assert command(server, f"bind {os.getpid()}") == "no" # unsigned/wrong code
             assert command(server, f"bind {other.pid}") == "no" # same signer and identifier, different code
             assert command(server, f"bind {wrong.pid}") == "ok" and command(server,"share") == "ok"
@@ -147,9 +156,9 @@ def main():
             assert json.loads(command(server,"snapshot"))["count"] == 1
             assert command(server, f"bind {b.pid}") == "ok"
             assert not json.loads(command(server,"snapshot"))["receiving"]
-            print("signed Agent IPC: exact delivery, wrong signer/pid, default off, independent grants, old proof, dedup, revoke/revert/delete and pasted editor untouched")
+            print("signed Agent IPC: exact delivery, wrong signer/pid/code/runtime, default off, independent grants, old proof, dedup, revoke/revert/delete and pasted editor untouched")
         finally:
-            for proc in server,a,b,wrong,other: stop(proc)
+            for proc in server,unhardened,a,b,wrong,other: stop(proc)
 
 
 if __name__ == "__main__":

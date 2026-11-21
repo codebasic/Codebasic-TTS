@@ -9,6 +9,7 @@ struct ExplainWorkspace: View {
     @ObservedObject var catalog: AgentCatalog
     @ObservedObject var access: AgentSessionController
     @State private var profile = "explain"
+    @State private var profileSearch = ""
     @State private var catalogEdit: AgentCatalogEditor.Target?
     @State private var removeProfile: AgentCatalogRecord?
     @State private var showRemove = false
@@ -57,6 +58,10 @@ struct ExplainWorkspace: View {
                 .padding()
                 .frame(maxWidth: 1050)
                 .frame(maxWidth: .infinity)
+            }
+            .onAppear { _ = catalog.refresh() }
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+                _ = catalog.refresh()
             }
             .sheet(isPresented: $showInstructionEditor) {
                 ExplainInstructionEditor(initialValue: app.explainPrompt) { text in
@@ -118,6 +123,30 @@ struct ExplainWorkspace: View {
                 .labelsHidden().frame(width: 218)
                 Button("새 지시…") { catalogEdit = .init(record: nil) }
                     .disabled(catalog.readError || catalog.records.count >= AgentLimits.profiles)
+            }
+            if !catalog.records.isEmpty && !catalog.readError {
+                HStack {
+                    TextField("이름으로 저장된 지시 찾기", text: $profileSearch)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 270)
+                    if !profileSearch.isEmpty {
+                        Button("검색 지우기") { profileSearch = "" }
+                    }
+                    Spacer(minLength: 0)
+                }
+                if !profileSearch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    let matches = catalog.filteredRecords(label: profileSearch)
+                    if matches.isEmpty {
+                        Text("일치하는 이름이 없습니다.").font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        Menu("\(matches.count)개 검색 결과") {
+                            ForEach(matches) { match in
+                                Button(match.label) { profile = match.selector; profileSearch = "" }
+                            }
+                        }
+                        .fixedSize()
+                    }
+                }
             }
             Text("선택은 이 앱 안에서만 바뀝니다. 도우미가 볼 수 있게 하려면 지시의 정확한 버전을 따로 허용하세요.")
                 .font(.caption).foregroundStyle(.secondary)

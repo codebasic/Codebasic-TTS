@@ -15,7 +15,8 @@ enum AgentPeerSigning {
         guard SecCodeCopySelf([], &code) == errSecSuccess, let code,
               SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess, let staticCode,
               SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
-              let certificates = (info as? [String: Any])?[kSecCodeInfoCertificates as String] as? [SecCertificate],
+              let details = info as? [String: Any], hardened(details),
+              let certificates = details[kSecCodeInfoCertificates as String] as? [SecCertificate],
               let certificate = certificates.first else { return nil }
         return Insecure.SHA1.hash(data: SecCertificateCopyData(certificate) as Data)
             .map { String(format: "%02x", $0) }.joined()
@@ -66,9 +67,20 @@ enum AgentPeerSigning {
               SecCodeCopyGuestWithAttributes(nil, attributes as CFDictionary, [], &guest) == errSecSuccess,
               let guest else { return false }
         guard SecCodeCheckValidity(guest, [], requirement) == errSecSuccess else { return false }
-        guard let expectedHash else { return true }
         var code: SecStaticCode?
-        guard SecCodeCopyStaticCode(guest, [], &code) == errSecSuccess, let code else { return false }
-        return signedHash(code) == expectedHash
+        var info: CFDictionary?
+        guard SecCodeCopyStaticCode(guest, [], &code) == errSecSuccess, let code,
+              SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
+              let details = info as? [String: Any], hardened(details) else { return false }
+        return expectedHash == nil || details[kSecCodeInfoUnique as String] as? Data == expectedHash
+    }
+
+    /// Neither of these two bundled executables needs entitlements, including
+    /// runtime exceptions for dynamic code, library validation or debugging.
+    private static func hardened(_ details: [String: Any]) -> Bool {
+        guard let flags = details[kSecCodeInfoFlags as String] as? NSNumber,
+              flags.uint32Value & SecCodeSignatureFlags.runtime.rawValue != 0 else { return false }
+        let entitlements = details[kSecCodeInfoEntitlementsDict as String]
+        return entitlements == nil || (entitlements as? [String: Any])?.isEmpty == true
     }
 }

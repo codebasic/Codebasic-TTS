@@ -21,7 +21,7 @@ import ObjectiveC
         method_exchangeImplementations(system, fake)
     }
 
-    static func selectNormalize(_ alert: NSAlert) -> NSApplication.ModalResponse {
+    static func selectProfile(_ alert: NSAlert, index: Int = 2) -> NSApplication.ModalResponse {
         precondition(alert.messageText == "로컬 MCP 지시 공유 (이번 실행)")
         precondition(alert.buttons.map(\.title) == ["미리 보기", "취소"])
         let fields = alert.accessoryView?.subviews ?? []
@@ -30,11 +30,11 @@ import ObjectiveC
             preconditionFailure("Missing process and profile fields")
         }
         pid.stringValue = String(getpid())
-        profile.selectItem(at: 2)
+        profile.selectItem(at: index)
         return .alertFirstButtonReturn
     }
 
-    static func verifyPreview(_ alert: NSAlert) {
+    static func verifyPreview(_ alert: NSAlert, expected: String? = nil) {
         precondition(alert.messageText.contains(String(getpid())))
         precondition(alert.informativeText.contains("최대 10분") && alert.informativeText.contains("원격 모델"))
         precondition(alert.buttons.map(\.title) == ["이 프로필만 공유", "취소"])
@@ -42,7 +42,7 @@ import ObjectiveC
               let view = scroll.documentView as? NSTextView else { preconditionFailure("Missing native preview") }
         precondition(scroll.hasVerticalScroller)
         precondition(!view.isEditable && !view.isRichText)
-        precondition(view.string == instruction)
+        precondition(view.string.utf8.elementsEqual((expected ?? instruction).utf8))
         precondition(!view.string.contains(hint) && !view.string.contains(glossary))
     }
 }
@@ -84,7 +84,7 @@ extension NSAlert {
             var meta = stat()
             precondition(lstat(socket, &meta) == 0 && meta.st_mode & S_IFMT == S_IFSOCK && meta.st_mode & 0o777 == 0o600)
         }
-        let choice = ApprovalUIProbe.selectNormalize
+        let choice: (NSAlert) -> NSApplication.ModalResponse = { ApprovalUIProbe.selectProfile($0) }
         let confirm: (NSAlert) -> NSApplication.ModalResponse = { alert in
             ApprovalUIProbe.verifyPreview(alert)
             return .alertFirstButtonReturn
@@ -131,10 +131,27 @@ extension NSAlert {
         assertOff() // undoing the edit never restores consent
         click([choice, confirm]); assertOn()
         click([]); assertOff()
+        let custom = "합성 사용자 해설 e\u{301}\n"
+        delegate.appState.explainPrompt = custom
+        let effective = CodeExplanation.effectiveInstruction(custom)
+        for (index, key, expected) in [(0, "explain", effective),
+                                        (1, "continue", effective + "\n\n" + CodeExplanation.continueInstruction)] {
+            let original = delegate.appState.agentSnapshot(key)!
+            precondition(original.text.utf8.elementsEqual(expected.utf8))
+            click([{ ApprovalUIProbe.selectProfile($0, index: index) }, { alert in
+                ApprovalUIProbe.verifyPreview(alert, expected: expected)
+                return .alertFirstButtonReturn
+            }]); assertOn()
+            delegate.appState.explainPrompt += "changed"
+            assertOff()
+            delegate.appState.explainPrompt = custom
+            precondition(delegate.appState.agentSnapshot(key)?.generation != original.generation)
+            assertOff()
+        }
         click([choice, confirm]); assertOn()
         delegate.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification, object: application))
         assertOff()
-        print("stale preview denied; byte-level Unicode edit/revert revoked approval; menu revoke and termination removed socket")
+        print("stale preview denied; exact customized explain/continue/normalize presets and edit/revert revocation passed; menu revoke and termination removed socket")
 
         guard let receipt = application.mainMenu?.items.first?.submenu?.item(withTitle: "외부 대본 받기 허용 (이번 실행)…"),
               let receiptAction = receipt.action else { preconditionFailure("Missing separate receipt consent") }

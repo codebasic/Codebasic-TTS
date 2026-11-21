@@ -55,13 +55,28 @@ build() {
   SIGN_ID="${CODESIGN_IDENTITY:-Codebasic TTS Local}"
   if security find-identity -p codesigning 2>/dev/null | grep -qF "$SIGN_ID"; then
     echo "==> Code signing with stable identity: $SIGN_ID"
-    codesign --force --sign "$SIGN_ID" --identifier com.seongjoo.SelectedTextTTS.agent-helper "$helper"
-    codesign --force --sign "$SIGN_ID" "$APP_DIR"
+    codesign --force --options runtime --timestamp=none --sign "$SIGN_ID" --identifier com.seongjoo.SelectedTextTTS.agent-helper "$helper"
+    codesign --force --options runtime --timestamp=none --sign "$SIGN_ID" "$APP_DIR"
   else
+    if [ "${TTS_REQUIRE_STABLE_SIGNING:-0}" = 1 ] || [ -n "${CODESIGN_IDENTITY:-}" ]; then
+      echo "Required stable code signing identity not found." >&2
+      return 1
+    fi
     echo "==> Ad-hoc code signing  (no '$SIGN_ID' identity → Accessibility grant resets each rebuild)"
-    codesign --force --sign - --identifier com.seongjoo.SelectedTextTTS.agent-helper "$helper"
-    codesign --force --sign - "$APP_DIR"
+    codesign --force --options runtime --sign - --identifier com.seongjoo.SelectedTextTTS.agent-helper "$helper"
+    codesign --force --options runtime --sign - "$APP_DIR"
   fi
+
+  codesign --verify --strict "$helper"
+  codesign --verify --strict --deep "$APP_DIR"
+  for product in "$APP_DIR" "$helper"; do
+    signature="$(codesign --display --verbose=4 "$product" 2>&1)"
+    entitlements="$(codesign --display --entitlements - "$product" 2>/dev/null)"
+    if ! grep -Eq 'flags=0x[0-9a-f]+\((adhoc,)?runtime\)' <<< "$signature" || [ -n "$entitlements" ]; then
+      echo "Expected hardened runtime without entitlements: $product" >&2
+      return 1
+    fi
+  done
 
   echo "==> Built: $APP_DIR"
 }
@@ -129,6 +144,10 @@ case "${1:-install}" in
     swiftc -O "$HERE/Sources/Core/AgentCatalog.swift" "$HERE/Sources/Core/AgentDeliveryProofs.swift" \
       "$HERE/Sources/Core/ExplanationDraftWorkspace.swift" "$HERE/Tests/AgentCatalogTests.swift" -o "$BUILD_DIR/agent-catalog-tests"
     "$BUILD_DIR/agent-catalog-tests" "$catalog_fixture"
+    socket_fixture="$(mktemp -d "$BUILD_DIR/socket-test.XXXXXX")"
+    swiftc -O "$HERE/Sources/App/LocalInstructionSocket.swift" \
+      "$HERE/Tests/LocalApprovedSocketLifecycleTests.swift" -o "$BUILD_DIR/local-approved-socket-tests"
+    "$BUILD_DIR/local-approved-socket-tests" "$socket_fixture"
     mkdir -p "$BUILD_DIR"
     swiftc -O "$HERE/Sources/Core/TextSplitter.swift" "$HERE/Sources/Core/CrawlLayout.swift" \
       "$HERE/Sources/App/Endpoints.swift" "$HERE/Tests/main.swift" -o "$BUILD_DIR/tests"

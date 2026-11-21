@@ -58,12 +58,19 @@ import Foundation
         return true
     }
 
-    func share(_ snapshot: AgentInstructionSnapshot) -> Bool {
+    func share(_ snapshot: AgentInstructionSnapshot,
+               deliveryGate: @escaping (@escaping () -> Void) -> Void = { $0() }) -> Bool {
         guard shared == nil, let pair, snapshot.shareable else { return false }
         let deadline = ContinuousClock.now.advanced(by: .seconds(AgentLimits.grantSeconds))
         let socket = LocalApprovedSocket(peer: pair.peer, endpoint: "i.sock", directory: directory,
                                          lifetime: .seconds(AgentLimits.grantSeconds), maxFrame: 128,
-                                         verified: Self.verifier(leaf: pair.leaf, hash: pair.helperHash), didDeliver: { bytes in
+                                         verified: Self.verifier(leaf: pair.leaf, hash: pair.helperHash),
+                                         deliveryGate: { send in
+            deliveryGate {
+                guard ContinuousClock.now < deadline else { return }
+                send()
+            }
+        }, didDeliver: { bytes in
             guard let reply = Self.decode(bytes), let token = Self.uuid(reply["proof"]),
                   let epoch = Self.uuid(reply["proof_epoch"]) else { return }
             pair.proofs.delivered(token, snapshot: snapshot, epoch: epoch)
@@ -80,7 +87,11 @@ import Foundation
                   data.count + 1 <= 52 * 1024 else { return nil }
             return data
         }
-        guard socket.start() else { status = "지시 조회 소켓을 시작할 수 없습니다."; return false }
+        guard socket.start() else {
+            status = socket.requiresPathInspection ? LocalApprovedSocket.unknownPathMessage : "지시 조회 소켓을 시작할 수 없습니다."
+            return false
+        }
+        status = ""
         shareSocket = socket
         shared = snapshot
         shareTask = Task { [weak self] in
@@ -138,7 +149,11 @@ import Foundation
             guard signal.wait(timeout: responseDeadline) == .success else { return Self.reply("unconfirmed") }
             return Self.reply(response.get())
         }
-        guard socket.start() else { status = "대본 받기 소켓을 시작할 수 없습니다."; return false }
+        guard socket.start() else {
+            status = socket.requiresPathInspection ? LocalApprovedSocket.unknownPathMessage : "대본 받기 소켓을 시작할 수 없습니다."
+            return false
+        }
+        status = ""
         receiptSocket = socket
         receiving = true
         receiveDeadline = deadline
