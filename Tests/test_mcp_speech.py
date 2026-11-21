@@ -106,14 +106,14 @@ class SocketTest(unittest.TestCase):
                 self.assertEqual(source.read(1024), mcp.encode(ARGS))
 
     def test_missing_socket_and_symlink(self):
-        with tempfile.TemporaryDirectory(prefix="tts-mcp-test-", dir="/private/tmp") as directory:
+        with tempfile.TemporaryDirectory(prefix="s", dir=os.environ.get("TMPDIR", "/private/tmp")) as directory:
             path = Path(directory) / "s.sock"
             self.assertEqual(mcp.send_local(ARGS, path), "offline")
             path.symlink_to("no-socket")
             self.assertEqual(mcp.send_local(ARGS, path), "unsafe")
 
     def test_local_unix_frame_and_safe_path(self):
-        with tempfile.TemporaryDirectory(prefix="tts-mcp-test-", dir="/private/tmp") as directory:
+        with tempfile.TemporaryDirectory(prefix="s", dir=os.environ.get("TMPDIR", "/private/tmp")) as directory:
             path = Path(directory) / "s.sock"
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
                 try:

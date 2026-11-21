@@ -110,6 +110,15 @@ extension NSAlert {
             return .alertFirstButtonReturn
         }]); assertOff()
         delegate.appState.normalizePrompt = ApprovalUIProbe.instruction
+        click([choice, { alert in
+            ApprovalUIProbe.verifyPreview(alert)
+            delegate.appState.normalizePrompt += "edited then reverted"
+            delegate.appState.normalizePrompt = ApprovalUIProbe.instruction
+            return .alertFirstButtonReturn
+        }, { alert in
+            precondition(alert.informativeText.contains("미리 보는 동안 지시가 바뀌었습니다"))
+            return .alertFirstButtonReturn
+        }]); assertOff()
         click([choice, confirm]); assertOn()
         delegate.appState.normalizePrompt = ApprovalUIProbe.instruction
         assertOn() // a true byte-identical assignment is not a change
@@ -142,28 +151,10 @@ extension NSAlert {
         }
         assertDraftOff()
         receiptClick([{ alert in
-            precondition(alert.messageText == "외부 에이전트 대본 받기")
-            precondition(alert.informativeText.contains("재생하지 않으며"))
-            return .alertSecondButtonReturn
-        }])
-        assertDraftOff()
-        let approveReceipt: (NSAlert) -> NSApplication.ModalResponse = { alert in
-            precondition(alert.buttons.map(\.title) == ["이 도우미만 허용", "취소"])
-            guard let pid = alert.accessoryView as? NSTextField else { preconditionFailure("Missing draft helper PID") }
-            pid.stringValue = String(getpid())
+            precondition(alert.informativeText.contains("서명된 도우미를 먼저 연결"))
             return .alertFirstButtonReturn
-        }
-        receiptClick([approveReceipt])
-        assertOff()
-        precondition(receipt.state == .on && delegate.appState.explanationDrafts.receiverPID == getpid())
-        precondition(FileManager.default.fileExists(atPath: dSocket))
-        precondition(!FileManager.default.fileExists(atPath: directory + "/s.sock"))
-        // A new read permit does not replace or turn off receipt, and vice versa.
-        click([choice, { _ in .alertFirstButtonReturn }]); assertOn()
-        receiptClick([]); assertDraftOff(); assertOn()
-        receiptClick([approveReceipt])
-        delegate.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification, object: application))
+        }])
         assertDraftOff(); assertOff()
-        print("receipt: default off and cancel unchanged; separate allow/revoke; no speech grant; cleanup at termination")
+        print("unpaired receipt explicitly rejected; signed grant behavior is covered by the round-trip fixture")
     }
 }

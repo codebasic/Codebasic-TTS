@@ -5,7 +5,7 @@ from pathlib import Path
 import plistlib
 import sys
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import mcp_speech as common
@@ -79,13 +79,10 @@ class DraftAdapterTests(unittest.TestCase):
         self.assertNotIn("kVK_ANSI_E", delegate)
         self.assertNotIn("explainAndSpeak(", delegate)
 
-    def test_production_submit_is_separate_and_never_sends_to_unverified_peer(self):
-        connection = MagicMock()
-        with patch.object(common, "check_node", return_value=True), patch.object(common, "same_uid", return_value=True), \
-             patch.object(common.socket, "socket") as factory, patch.object(common, "exchange") as exchange, \
-             patch.dict(os.environ, {}, clear=True):
-            factory.return_value.__enter__.return_value = connection
-            self.assertEqual(draft.submit(ARGS), "unsafe")
-            self.assertEqual(Path(connection.connect.call_args.args[0]).name, "d.sock")
-            exchange.assert_not_called()
-            connection.sendall.assert_not_called()
+    def test_legacy_submit_fails_closed_without_contacting_any_socket(self):
+        with patch.object(common.socket, "socket") as factory:
+            self.assertEqual(draft.submit(ARGS), "upgrade_required")
+            factory.assert_not_called()
+        rows = self.run_session(draft.submit, call(ARGS))
+        self.assertTrue(rows[-1]["result"]["isError"])
+        self.assertIn("paste the draft manually", rows[-1]["result"]["content"][0]["text"])

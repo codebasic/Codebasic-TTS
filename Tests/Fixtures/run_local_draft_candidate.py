@@ -1,26 +1,26 @@
 #!/usr/bin/env python3
-"""Signed, disposable Swift inbox ↔ production MCP adapter; no real app or provider."""
+"""Native signed CLI + app-side gate, offscreen/synthetic; all files in build/."""
 import json
 import os
 from pathlib import Path
 import re
 import selectors
-import shutil
 import subprocess
 import tempfile
-import time
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 BUILD = Path(os.environ.get("TTS_BUILD_DIR", REPO / "build"))
 SOURCES = REPO / "Sources"
+APP_ID = "com.seongjoo.SelectedTextTTS"
+FIXTURE_SELECTOR = "66666666-6666-4666-8666-666666666666"
 
 
-def line(proc):
-    with selectors.DefaultSelector() as selector:
-        selector.register(proc.stdout, selectors.EVENT_READ)
-        if not selector.select(5):
-            raise TimeoutError("fixture output timed out")
+def read(proc):
+    with selectors.DefaultSelector() as handles:
+        handles.register(proc.stdout, selectors.EVENT_READ)
+        if not handles.select(5):
+            raise TimeoutError("fixture did not respond")
         return proc.stdout.readline().strip()
 
 
@@ -29,8 +29,8 @@ def write(proc, message):
     proc.stdin.flush()
 
 
-def close(proc):
-    if proc and proc.poll() is None:
+def stop(proc):
+    if proc.poll() is None:
         proc.stdin.close()
         try:
             proc.wait(timeout=3)
@@ -39,110 +39,118 @@ def close(proc):
             proc.wait(timeout=2)
 
 
-def rpc(proc, method, params=None, ident=1):
-    request = {"jsonrpc": "2.0", "method": method, "id": ident}
+def rpc(proc, method, params=None):
+    msg = {"jsonrpc":"2.0", "id":1, "method":method}
     if params is not None:
-        request["params"] = params
-    write(proc, json.dumps(request, ensure_ascii=False))
-    return json.loads(line(proc))
+        msg["params"] = params
+    write(proc, json.dumps(msg, ensure_ascii=False))
+    return json.loads(read(proc))["result"]
+
+
+def call(proc, name, **kwargs):
+    return rpc(proc, "tools/call", {"name":name, "arguments":kwargs})
 
 
 def initialize(proc):
-    init = rpc(proc, "initialize", {"protocolVersion": "2025-11-25", "capabilities": {},
-                                  "clientInfo": {"name": "draft-probe", "version": "1"}})
-    assert init["result"]["serverInfo"]["name"] == "codebasic-tts-draft"
+    res = rpc(proc, "initialize", {"protocolVersion":"2025-11-25", "capabilities":{}})
+    assert res["serverInfo"]["name"] == "codebasic-tts-agent"
     write(proc, '{"jsonrpc":"2.0","method":"notifications/initialized"}')
-    tools = rpc(proc, "tools/list")["result"]["tools"]
-    assert [tool["name"] for tool in tools] == ["submit_explanation_draft"]
+    assert {t["name"] for t in rpc(proc, "tools/list")["tools"]} == {"get_tts_instructions","submit_explanation_draft"}
 
 
-def submit(proc, args):
-    result = rpc(proc, "tools/call", {"name": "submit_explanation_draft", "arguments": args})["result"]
-    return result["content"][0]["text"].split(":", 1)[0], result["isError"]
+def command(proc, instruction):
+    write(proc, instruction)
+    return read(proc)
 
 
-def snapshot(proc):
-    write(proc, "snapshot")
-    return json.loads(line(proc))
+def message(result):
+    return result["content"][0]["text"]
 
 
-cache = BUILD / "cache"
-cache.mkdir(parents=True, exist_ok=True)
-candidate = BUILD / "Codebasic TTS.app"
-subprocess.run(["/usr/bin/codesign", "--verify", "--strict", str(candidate)], check=True, timeout=12)
-meta = subprocess.run(["/usr/bin/codesign", "-dr", "-", str(candidate)], check=True, text=True,
-                      capture_output=True, timeout=12)
-anchor = re.search(r'certificate\s+leaf\s*=\s*H["\']?([a-fA-F0-9]{40})', meta.stdout + meta.stderr)
-if not anchor:
-    raise RuntimeError("The test candidate must be signed with the existing locally trusted certificate")
+def main():
+    app = BUILD / "Codebasic TTS.app"
+    subprocess.run(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(app)], check=True, timeout=12)
+    sig = subprocess.run(["/usr/bin/codesign", "-dr", "-", str(app)], check=True, text=True, capture_output=True, timeout=12)
+    leaf = re.search(r'certificate leaf = H"([a-fA-F0-9]{40})"', sig.stderr + sig.stdout)
+    assert leaf, "signed local fixture requires the existing supported certificate"
+    with tempfile.TemporaryDirectory(prefix="v", dir=BUILD) as temp:
+        root = Path(temp)
+        assert len(os.fsencode(root / "i.sock")) < 104, "fixture AF_UNIX path too long"
+        new_helper = root / "AgentCatalogMCP.swift"
+        original = (REPO/"Helpers/AgentCatalogMCP.swift").read_text()
+        path = r'"/private/tmp/codebasic-tts-mcp-\(getuid())"'
+        assert original.count(path) == 1
+        new_helper.write_text(original.replace(path, json.dumps(str(root))))
+        sdk = subprocess.check_output(["/usr/bin/xcrun","--sdk","macosx26.5","--show-sdk-path"], text=True).strip()
+        env = {"PATH":"/usr/bin:/bin", "HOME":str(root), "TMPDIR":str(root),
+               "CODEBASIC_TTS_SIGNER_SHA1":leaf.group(1)}
+        compile_env = {**env, "SDKROOT":sdk, "CLANG_MODULE_CACHE_PATH":str(BUILD/"module-cache")}
+        common = [SOURCES/"App/AgentPeerSigning.swift", SOURCES/"Core/AgentCatalog.swift"]
+        server_src = [SOURCES/"App/LocalInstructionSocket.swift", SOURCES/"App/AgentSessionController.swift",
+                      SOURCES/"Core/AgentDeliveryProofs.swift", SOURCES/"Core/ExplanationDraftWorkspace.swift",
+                      HERE / "LocalExplanationDraftSocketProbe.swift"]
+        other_src = root / "Other.swift"
+        other_src.write_text("import Foundation\n@main struct Other { static func main() { while readLine() != nil {} } }\n")
+        for binary, identifier, files in ((root/"helper", APP_ID+".agent-helper",[new_helper]),
+                                           (root/"server", APP_ID,server_src),
+                                           (root/"other", APP_ID+".agent-helper",[other_src])):
+            subprocess.run(["/usr/bin/swiftc","-framework","Security",*map(str,common+files),"-o",str(binary)],
+                           check=True, timeout=120, env=compile_env)
+            subprocess.run(["/usr/bin/codesign","--force","--sign",os.environ.get("CODESIGN_IDENTITY","Codebasic TTS Local"),
+                            "--identifier",identifier,str(binary)], check=True, timeout=15)
 
-with tempfile.TemporaryDirectory(prefix="cbtts-draft-", dir="/private/tmp") as directory:
-    tmp = Path(directory)
-    probe = tmp / "draft-probe"
-    sdk = subprocess.check_output(["/usr/bin/xcrun", "--sdk", "macosx26.5", "--show-sdk-path"], text=True).strip()
-    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp), "CODEBASIC_TTS_SIGNER_SHA1": anchor.group(1)}
-    subprocess.run(["/usr/bin/swiftc", "-o", str(probe),
-                    str(SOURCES / "App/LocalInstructionSocket.swift"),
-                    str(SOURCES / "App/LocalExplanationDraftSocket.swift"),
-                    str(SOURCES / "Core/ExplanationDraftWorkspace.swift"),
-                    str(HERE / "LocalExplanationDraftSocketProbe.swift")],
-                   env={**env, "SDKROOT": sdk, "CLANG_MODULE_CACHE_PATH": str(cache)}, check=True, timeout=100)
-    subprocess.run(["/usr/bin/codesign", "--force", "--sign", os.environ.get("CODESIGN_IDENTITY", "Codebasic TTS Local"),
-                    "--identifier", "com.seongjoo.SelectedTextTTS", str(probe)], check=True, timeout=12)
-    for name in ("mcp_speech.py", "tts_mcp_app_identity.py"):
-        shutil.copyfile(REPO / "scripts" / name, tmp / name)
-    adapter = tmp / "mcp_tts_draft.py"
-    original = (REPO / "scripts/mcp_tts_draft.py").read_text()
-    needle = 'return Path("/private/tmp") / ("codebasic-tts-mcp-%d" % os.geteuid()) / "d.sock"'
-    assert original.count(needle) == 1
-    adapter.write_text(original.replace(needle, "return Path(" + json.dumps(str(tmp / "d.sock")) + ")"))
+        def launch(path, *args, extra=None):
+            return subprocess.Popen([str(root/path),*args], env={**env,**(extra or {})}, stdin=subprocess.PIPE,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
-    def helper(config):
-        process = subprocess.Popen(["/usr/bin/python3", "-I", "-B", str(adapter)],
-                                   env=config, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                   stderr=subprocess.PIPE, text=True)
-        return process
+        server = launch("server", str(root))
+        a, b, wrong = launch("helper"), launch("helper"), launch("helper",extra={"CODEBASIC_TTS_SIGNER_SHA1":"0"*40})
+        other = launch("other")
+        try:
+            assert read(server) == "ready"
+            for h in a,b,wrong: initialize(h)
+            assert command(server, f"bind {os.getpid()}") == "no" # unsigned/wrong code
+            assert command(server, f"bind {other.pid}") == "no" # same signer and identifier, different code
+            assert command(server, f"bind {wrong.pid}") == "ok" and command(server,"share") == "ok"
+            assert call(wrong,"get_tts_instructions",profile=FIXTURE_SELECTOR)["isError"]
+            assert command(server, f"bind {a.pid}") == "ok"
+            assert call(a,"get_tts_instructions",profile=FIXTURE_SELECTOR)["isError"] # default off on rebind
+            assert command(server, "share") == "ok"
+            assert call(b,"get_tts_instructions",profile=FIXTURE_SELECTOR)["isError"]
+            reply = call(a,"get_tts_instructions",profile=FIXTURE_SELECTOR)
+            assert not reply["isError"] and reply["structuredContent"]["instructions"].encode() == "합성 지시 e\u0301\n".encode()
+            assert "proof" not in json.dumps(reply) and "Owner label" not in json.dumps(reply)
+            old = reply["structuredContent"]["revision"]
+            fields = dict(profile=FIXTURE_SELECTOR, revision=old, idempotency_key="one",display_text="as_frame",speech_text="애즈 프레임")
+            assert call(a,"submit_explanation_draft",**fields)["isError"] # receiving still off
+            assert command(server, "receipt") == "ok"
+            assert command(server, "change") == "ok" and command(server, "revert") == "ok"
+            assert call(a,"get_tts_instructions",profile=FIXTURE_SELECTOR)["isError"] # edit/revert never restores
+            assert call(b,"submit_explanation_draft",**fields)["isError"]
+            assert not call(a,"submit_explanation_draft",**fields)["isError"] # actual older proof
+            assert "Already received" in message(call(a,"submit_explanation_draft",**fields))
+            assert "Already received" in message(call(a,"submit_explanation_draft",**{**fields,"idempotency_key":"different-key"}))
+            assert call(a,"submit_explanation_draft",**{**fields,"speech_text":"other"})["isError"]
+            snap = json.loads(command(server,"snapshot"))
+            assert snap["count"] == 1 and snap["editor"] == "manual untouched" and snap["old"] == [True]
+            assert snap["labels"] == ["Owner label"] and len(snap["pairs"][0]) == 36
+            assert command(server,"share") == "ok"
+            new = call(a,"get_tts_instructions",profile=FIXTURE_SELECTOR)["structuredContent"]["revision"]
+            assert new != old
+            assert command(server,"stopreceipt") == "ok" and command(server,"receipt") == "ok"
+            revoked = call(a,"submit_explanation_draft",**{**fields,"revision":new,"idempotency_key":"two"})
+            assert revoked["isError"] and "proof" in message(revoked)
+            read_again = call(a,"get_tts_instructions",profile=FIXTURE_SELECTOR)
+            assert read_again["structuredContent"]["revision"] == new
+            assert command(server,"delete") == "ok"
+            assert call(a,"submit_explanation_draft",**{**fields,"revision":new,"idempotency_key":"two"})["isError"]
+            assert json.loads(command(server,"snapshot"))["count"] == 1
+            assert command(server, f"bind {b.pid}") == "ok"
+            assert not json.loads(command(server,"snapshot"))["receiving"]
+            print("signed Agent IPC: exact delivery, wrong signer/pid, default off, independent grants, old proof, dedup, revoke/revert/delete and pasted editor untouched")
+        finally:
+            for proc in server,a,b,wrong,other: stop(proc)
 
-    def start(peer, lifetime=600_000):
-        process = subprocess.Popen([str(probe), str(peer.pid), str(tmp), str(lifetime)], env=env, text=True,
-                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        assert line(process) == "ready", process.stderr.read()
-        return process
 
-    allowed, other = helper(env), helper(env)
-    wrong = helper({**env, "CODEBASIC_TTS_SIGNER_SHA1": "0" * 40})
-    server = None
-    first = {"idempotency_key": "one", "display_text": "as_frame 옵션", "speech_text": "애즈 프레임 옵션"}
-    try:
-        for process in (allowed, other, wrong):
-            initialize(process)
-        assert submit(allowed, first) == ("offline", True)
-        server = start(wrong)
-        assert submit(wrong, first) == ("unsafe", True)
-        assert snapshot(server)["count"] == 0
-        close(server); server = None
-        server = start(allowed)
-        assert not (tmp / "s.sock").exists() and not (tmp / "i.sock").exists()
-        assert submit(other, first)[1] is True
-        assert submit(allowed, first) == ("accepted", False)
-        assert submit(allowed, first) == ("duplicate", False)
-        assert submit(allowed, {**first, "speech_text": "다른 대본"}) == ("conflict", True)
-        assert snapshot(server) == {"count": 1, "editor": "synthetic manual text",
-                                     "lastDisplay": first["display_text"], "lastSpeech": first["speech_text"]}
-        for n in range(2, 9):
-            assert submit(allowed, {"idempotency_key": f"queued-{n}", "display_text": "가" * 2730}) == ("accepted", False)
-        assert submit(allowed, {"idempotency_key": "over", "display_text": "가득 참"}) == ("busy", True)
-        assert snapshot(server)["count"] == 8
-        write(server, "revoke")
-        assert line(server) == "revoked" and not (tmp / "d.sock").exists()
-        assert submit(allowed, first) == ("offline", True)
-        close(server); server = None
-        server = start(allowed, lifetime=150)
-        time.sleep(.25)
-        assert submit(allowed, first)[1] is True and snapshot(server)["count"] == 0
-        print("signed draft IPC: opt-in, wrong pin/PID, arrival/retry/conflict/limit, no editor overwrite, separated text, revoke/expiry")
-    finally:
-        close(server)
-        close(allowed)
-        close(other)
-        close(wrong)
+if __name__ == "__main__":
+    main()

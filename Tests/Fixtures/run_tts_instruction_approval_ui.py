@@ -11,7 +11,7 @@ REPO = HERE.parents[1]
 CACHE = REPO / "build" / "clt-check" / "cache"
 CACHE.mkdir(parents=True, exist_ok=True)
 
-with tempfile.TemporaryDirectory(prefix="cbtts-approval-", dir="/private/tmp") as temp:
+with tempfile.TemporaryDirectory(prefix="u", dir=REPO / "build") as temp:
     root = Path(temp)
     profile = root / "profile"
     profile.mkdir(mode=0o700)

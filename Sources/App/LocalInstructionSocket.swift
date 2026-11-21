@@ -77,6 +77,8 @@ final class LocalApprovedSocket {
     private let lock = NSLock()
     private let approvedPeer: LocalInstructionPeer
     private let maxFrame: Int
+    private let verified: (Int32) -> Bool
+    private let didDeliver: (Data) -> Void
     private let expires: DispatchTime
     private let handle: (Data, @escaping () -> Bool) -> Data?
     private var source: DispatchSourceRead?
@@ -85,11 +87,15 @@ final class LocalApprovedSocket {
 
     init(peer: LocalInstructionPeer, endpoint: String, directory: String,
          lifetime: DispatchTimeInterval, maxFrame: Int,
+         verified: @escaping (Int32) -> Bool = { _ in true },
+         didDeliver: @escaping (Data) -> Void = { _ in },
          handle: @escaping (Data, @escaping () -> Bool) -> Data?) {
         approvedPeer = peer
         self.endpoint = endpoint
         self.directory = directory
         self.maxFrame = maxFrame
+        self.verified = verified
+        self.didDeliver = didDeliver
         self.handle = handle
         queue = DispatchQueue(label: "com.codebasic.tts.approved-ipc." + endpoint)
         expires = .now() + lifetime
@@ -145,21 +151,22 @@ final class LocalApprovedSocket {
         guard fd >= 0 else { return }
         defer { close(fd) }
         var noSigPipe: Int32 = 1
-        guard LocalInstructionPeer.connected(fd) == approvedPeer,
+        guard LocalInstructionPeer.connected(fd) == approvedPeer, verified(fd),
               setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size)) == 0,
               fcntl(fd, F_SETFL, O_NONBLOCK) == 0 else { return }
         let deadline = DispatchTime.now() + .milliseconds(600)
         guard let bytes = readFrame(fd, deadline: deadline),
-              LocalInstructionPeer.connected(fd) == approvedPeer,
+              LocalInstructionPeer.connected(fd) == approvedPeer, verified(fd),
               active(),
               var out = handle(bytes, { [weak self] in self?.active() == true }) else { return }
         out.append(10)
         lock.lock()
         defer { lock.unlock() }
         // Keep the lease checked across the write. Stop can wait only for the short send deadline.
-        guard !revoked, DispatchTime.now() < expires, LocalInstructionPeer.connected(fd) == approvedPeer else { return }
+        guard !revoked, DispatchTime.now() < expires, LocalInstructionPeer.connected(fd) == approvedPeer,
+              verified(fd) else { return }
         let sendDeadline = DispatchTime.now() + .milliseconds(100)
-        _ = out.withUnsafeBytes { (view: UnsafeRawBufferPointer) -> Bool in
+        let delivered = out.withUnsafeBytes { (view: UnsafeRawBufferPointer) -> Bool in
             guard let base = view.baseAddress else { return false }
             var sent = 0
             while sent < view.count {
@@ -170,6 +177,7 @@ final class LocalApprovedSocket {
             }
             return true
         }
+        if delivered { didDeliver(out) }
     }
 
     private func active() -> Bool {

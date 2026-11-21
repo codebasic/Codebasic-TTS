@@ -89,9 +89,34 @@ final class AppState: ObservableObject {
 
     // External workspace is never connected to the legacy generator buffers.
     let explanationDrafts = ExplanationDraftWorkspace()
+    let agentCatalog = AgentCatalog(url: URL(fileURLWithPath: Secrets.appSupportDir)
+        .appendingPathComponent("agent-instructions-v1.json"))
+    let agentAccess = AgentSessionController()
+    private var presetSnapshots: [String: AgentInstructionSnapshot] = [:]
     @Published var sharedInstructionProfile: LocalInstructionProfile.Name?
 
+    func agentSnapshot(_ selector: String) -> AgentInstructionSnapshot? {
+        if let builtin = LocalInstructionProfile.Name(rawValue: selector) {
+            let text = instructionText(builtin)
+            if let old = presetSnapshots[selector], AgentBytes.same(old.text, text) { return old }
+            let snapshot = AgentInstructionSnapshot(selector: selector, generation: UUID(), text: text)
+            presetSnapshots[selector] = snapshot
+            return snapshot
+        }
+        guard let stored = agentCatalog.record(selector) else { return nil }
+        return AgentInstructionSnapshot(selector: selector, generation: stored.generation, text: stored.body)
+    }
+
+    func invalidatePreset(_ selector: String) {
+        presetSnapshots.removeValue(forKey: selector)
+        agentAccess.invalidate(selector, deleted: false)
+    }
+
     func instructionSnapshot(_ name: LocalInstructionProfile.Name) -> LocalInstructionProfile? {
+        LocalInstructionProfile(name: name, text: instructionText(name))
+    }
+
+    private func instructionText(_ name: LocalInstructionProfile.Name) -> String {
         let text: String
         switch name {
         case .explain:
@@ -101,14 +126,15 @@ final class AppState: ObservableObject {
         case .normalize:
             text = normalizePrompt.isEmpty ? TextNormalizer.defaultInstruction : normalizePrompt
         }
-        return LocalInstructionProfile(name: name, text: text)
+        return text
     }
 
     /// The external agent has already done the text work. Only the current
     /// voice engine may be used, and only on this explicit editor action.
     func playExplanationDraft(displayOnly: Bool = false) {
         guard !isBusy, !explaining, !normalizing,
-              let input = explanationDrafts.playback(displayOnly: displayOnly) else { return }
+              let input = explanationDrafts.playback(displayOnly: displayOnly),
+              AgentBytes.safeForSpeech(input.speech) else { return }
         playbackMode = .explain
         synthesize(input.speech, displayText: input.display, preserveLiteral: true)
         phase = .synthesizing

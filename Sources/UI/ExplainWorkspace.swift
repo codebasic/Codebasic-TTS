@@ -6,7 +6,13 @@ import SwiftUI
 struct ExplainWorkspace: View {
     @EnvironmentObject private var app: AppState
     @ObservedObject var drafts: ExplanationDraftWorkspace
-    @State private var profile: LocalInstructionProfile.Name = .explain
+    @ObservedObject var catalog: AgentCatalog
+    @ObservedObject var access: AgentSessionController
+    @State private var profile = "explain"
+    @State private var catalogEdit: AgentCatalogEditor.Target?
+    @State private var removeProfile: AgentCatalogRecord?
+    @State private var showRemove = false
+    @State private var catalogError = ""
     @State private var showInstructionEditor = false
     @State private var showExactPreview = false
     @State private var showSpeech = false
@@ -16,9 +22,9 @@ struct ExplainWorkspace: View {
     @State private var confirmEditorChange = false
     @State private var copiedRevision: String?
 
-    private var selectedSnapshot: LocalInstructionProfile? { app.instructionSnapshot(profile) }
+    private var selectedSnapshot: AgentInstructionSnapshot? { app.agentSnapshot(profile) }
     private var canUsePlayer: Bool { !app.isBusy && !app.explaining && !app.normalizing }
-    private var sharedProfile: LocalInstructionProfile.Name? { app.sharedInstructionProfile }
+    private var selectedRecord: AgentCatalogRecord? { catalog.record(profile) }
 
     var body: some View {
         if showAdvanced {
@@ -59,6 +65,29 @@ struct ExplainWorkspace: View {
                     app.saveSettings()
                 }
             }
+            .sheet(item: $catalogEdit) { item in
+                AgentCatalogEditor(target: item) { label, body in
+                    let saved = try catalog.save(id: item.record?.id, expected: item.record?.editVersion,
+                                                 label: label, body: body)
+                    profile = saved.selector
+                    copiedRevision = nil
+                    catalogError = ""
+                }
+            }
+            .alert("이 지시문을 삭제할까요?", isPresented: $showRemove) {
+                Button("삭제", role: .destructive) {
+                    guard let old = removeProfile else { return }
+                    do {
+                        try catalog.delete(old.id, expected: old.editVersion)
+                        profile = "explain"
+                        catalogError = ""
+                    } catch { catalogError = error.localizedDescription }
+                    removeProfile = nil
+                }
+                Button("취소", role: .cancel) { removeProfile = nil }
+            } message: {
+                Text("이미 받은 대본은 보관함에 남지만, 이 지시 버전의 새 대본은 받을 수 없습니다.")
+            }
             .confirmationDialog(pendingReplacement == nil ? "편집기의 글을 비울까요?" : "편집기의 글을 받은 대본으로 바꿀까요?",
                                 isPresented: $confirmEditorChange, titleVisibility: .visible) {
                 Button(pendingReplacement == nil ? "비우기" : "바꾸기", role: .destructive) {
@@ -81,54 +110,86 @@ struct ExplainWorkspace: View {
                 Text("에이전트 지시문").font(.headline)
                 Spacer()
                 Picker("지시문 프로필", selection: $profile) {
-                    Text("전체 해설").tag(LocalInstructionProfile.Name.explain)
-                    Text("변경분만").tag(LocalInstructionProfile.Name.continue)
+                    Text("전체 해설").tag("explain")
+                    Text("변경분만").tag("continue")
+                    Text("음성 대본 정규화").tag("normalize")
+                    ForEach(catalog.records) { record in Text(record.label).tag(record.selector) }
                 }
-                .labelsHidden().pickerStyle(.segmented).frame(width: 178)
+                .labelsHidden().frame(width: 218)
+                Button("새 지시…") { catalogEdit = .init(record: nil) }
+                    .disabled(catalog.readError || catalog.records.count >= AgentLimits.profiles)
             }
-            Text(profile == .continue
-                 ? "기본 지시문에 변경된 부분만 해설하는 규칙을 더합니다. 이전 코드나 해설은 공유하지 않습니다."
-                 : "기본 코드 해설 프로필입니다. 대본은 외부 에이전트가 작성하고, 이 앱에서는 편집·재생만 합니다.")
+            Text("선택은 이 앱 안에서만 바뀝니다. 도우미가 볼 수 있게 하려면 지시의 정확한 버전을 따로 허용하세요.")
                 .font(.caption).foregroundStyle(.secondary)
+            if catalog.readError || !catalogError.isEmpty {
+                Text(catalog.readError ? AgentCatalog.Failure.unreadable.localizedDescription : catalogError)
+                    .font(.caption).foregroundStyle(.orange)
+            }
             HStack {
-                Button("기본 해설 지시 편집…") { showInstructionEditor = true }
+                if let entry = selectedRecord {
+                    Button("편집…") { catalogEdit = .init(record: entry) }
+                    Button("삭제…") { removeProfile = entry; showRemove = true }
+                } else if profile == "explain" || profile == "continue" {
+                    Button("기본 해설 지시 편집…") { showInstructionEditor = true }
+                }
                 Button(showExactPreview ? "미리 보기 닫기" : "정확한 지시 미리 보기") { showExactPreview.toggle() }
                     .disabled(selectedSnapshot == nil)
-                Button(copiedRevision == selectedSnapshot?.revision && selectedSnapshot != nil ? "복사됨" : "지시 복사") {
+                Button(copiedRevision == selectedSnapshot?.generation.uuidString && selectedSnapshot != nil ? "복사됨" : "지시 복사") {
                     guard let snapshot = selectedSnapshot else { return }
                     let clipboard = NSPasteboard.general
                     clipboard.clearContents()
-                    if clipboard.setString(snapshot.text, forType: .string) { copiedRevision = snapshot.revision }
+                    if clipboard.setString(snapshot.text, forType: .string) { copiedRevision = snapshot.generation.uuidString }
                 }
                 .disabled(selectedSnapshot == nil)
                 Spacer()
-                Button(sharedProfile == nil ? "MCP 조회 허용…" : "조회 허용 해제") {
-                    AppDelegate.shared?.toggleInstructionSharing(preselect: profile)
+                Button(access.shared == nil ? "이 버전만 조회 허용…" : "조회 허용 해제") {
+                    AppDelegate.shared?.toggleAgentSharing(profile)
                 }
-                .disabled(sharedProfile == nil && selectedSnapshot == nil)
+                .disabled(access.shared == nil && (selectedSnapshot?.shareable != true || access.pair == nil))
             }
-            if let sharedProfile {
-                Text("\(name(sharedProfile)) 지시 조회 허용됨 · 정해진 도우미, 최대 10분")
+            HStack {
+                Button(access.pair == nil ? "서명된 도우미 연결…" : "도우미 다시 연결…") { AppDelegate.shared?.pairAgent() }
+                if let pair = access.pair {
+                    Text("\(pair.label) · PID \(pair.peer.pid)").font(.caption)
+                    Button("연결 끊기") { access.disconnect() }
+                }
+            }
+            if let active = access.shared {
+                Text("조회 허용: \(title(active.selector)) · 이 버전만 · 최대 10분")
                     .font(.caption).foregroundStyle(.secondary)
-            } else if selectedSnapshot == nil {
-                Text("이 지시는 공유 한도(UTF-8 8KB)를 초과했거나 유효하지 않습니다.")
-                    .font(.caption).foregroundStyle(.orange)
+            } else if let legacy = app.sharedInstructionProfile {
+                Text("호환용 기본 조회 허용: \(name(legacy)) · 앱 메뉴에서 해제할 수 있습니다.")
+                    .font(.caption).foregroundStyle(.secondary)
             } else {
                 Text("MCP 조회 허용 안 함").font(.caption).foregroundStyle(.secondary)
             }
-            if showExactPreview, let snapshot = selectedSnapshot {
-                ScrollView {
-                    Text(verbatim: snapshot.text)
-                        .font(.callout.monospaced())
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(8)
+            if !access.status.isEmpty { Text(access.status).font(.caption).foregroundStyle(.secondary) }
+            if let snapshot = selectedSnapshot {
+                if !snapshot.shareable {
+                    Text("이 지시는 공유 한도(UTF-8 8KB)를 초과했거나 유효하지 않습니다. 원문은 그대로 보존됩니다.")
+                        .font(.caption).foregroundStyle(.orange)
                 }
-                .frame(maxHeight: 170)
-                .overlay(editorBorder)
-                .accessibilityLabel("복사 및 MCP 조회에 사용되는 정확한 지시문")
+                if showExactPreview {
+                    Text("ID: " + snapshot.selector + " · SHA-256: " + snapshot.digest)
+                        .font(.caption2.monospaced()).textSelection(.enabled)
+                    ScrollView {
+                        Text(verbatim: snapshot.text)
+                            .font(.callout.monospaced())
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(8)
+                    }
+                    .frame(maxHeight: 170)
+                    .overlay(editorBorder)
+                    .accessibilityLabel("복사 및 MCP 조회에 사용되는 정확한 지시문")
+                }
             }
         }
+    }
+
+    private func title(_ selector: String) -> String {
+        if let builtIn = LocalInstructionProfile.Name(rawValue: selector) { return name(builtIn) }
+        return catalog.record(selector)?.label ?? selector
     }
 
     private var inbox: some View {
@@ -139,9 +200,10 @@ struct ExplainWorkspace: View {
                     Text("\(drafts.pending.count)개 대기").font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
-                Button(drafts.receiverPID == nil ? "대본 받기 허용…" : "대본 받기 중지") {
+                Button(access.receiving ? "대본 받기 중지" : "대본 받기 허용…") {
                     AppDelegate.shared?.toggleDraftReceipt()
                 }
+                .disabled(access.pair == nil)
             }
             if let pid = drafts.receiverPID {
                 Text("도우미 PID \(pid)에서 받기 허용됨 · 최대 10분")
@@ -155,8 +217,13 @@ struct ExplainWorkspace: View {
                     VStack(spacing: 6) {
                         ForEach(drafts.pending) { item in
                             HStack(spacing: 8) {
-                                Text(verbatim: item.display).lineLimit(2)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                VStack(alignment: .leading) {
+                                    Text(verbatim: item.display).lineLimit(2)
+                                    if let from = item.provenance {
+                                        Text("\(from.agentLabel) · \(title(from.selector)) · \(from.older ? "이전 버전" : "받은 버전") \(from.revision.uuidString.prefix(8))")
+                                            .font(.caption2).foregroundStyle(.secondary)
+                                    }
+                                }.frame(maxWidth: .infinity, alignment: .leading)
                                 Button("열기…") {
                                     if drafts.hasEditorContent {
                                         pendingReplacement = item.id
@@ -213,7 +280,7 @@ struct ExplainWorkspace: View {
             }
             if drafts.speechNeedsReview {
                 HStack {
-                    Label("화면 글이 바뀌었습니다. 기존 음성 대본을 재생하기 전에 확인하세요.", systemImage: "exclamationmark.triangle")
+                    Label("음성 대본이 화면 글과 다르거나 수정되었습니다. 재생 전에 두 내용을 확인하세요.", systemImage: "exclamationmark.triangle")
                         .font(.caption).foregroundStyle(.orange)
                     Spacer()
                     Button(showSpeech ? "검토 완료 · 기존 음성 사용" : "음성 대본 열기") {
@@ -222,8 +289,13 @@ struct ExplainWorkspace: View {
                     }
                 }
             }
-            if drafts.display.trimmingCharacters(in: .whitespacesAndNewlines) == CodeExplanation.noChange {
+            if drafts.provenance?.selector == "continue",
+               drafts.display.trimmingCharacters(in: .whitespacesAndNewlines) == CodeExplanation.noChange {
                 Text("변경 없음 · 읽을 대본이 없습니다.").font(.caption).foregroundStyle(.secondary)
+            }
+            if !AgentBytes.safeForSpeech(drafts.display) || !AgentBytes.safeForSpeech(drafts.speech) {
+                Text("재생할 글에서는 SSML·태그·인코딩된 태그를 제거하세요.")
+                    .font(.caption).foregroundStyle(.orange)
             }
             HStack {
                 Button { app.playExplanationDraft() } label: { Label("그대로 재생", systemImage: "play.fill") }
@@ -288,5 +360,44 @@ private struct ExplainInstructionEditor: View {
         }
         .padding()
         .frame(minWidth: 540, minHeight: 355)
+    }
+}
+
+
+private struct AgentCatalogEditor: View {
+    struct Target: Identifiable { let id = UUID(); let record: AgentCatalogRecord? }
+    @Environment(\.dismiss) private var dismiss
+    @State private var label: String
+    @State private var bodyText: String
+    @State private var failure = ""
+    let target: Target
+    let save: (String, String) throws -> Void
+
+    init(target: Target, save: @escaping (String, String) throws -> Void) {
+        self.target = target
+        self.save = save
+        _label = State(initialValue: target.record?.label ?? "")
+        _bodyText = State(initialValue: target.record?.body ?? "")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(target.record == nil ? "새 지시문" : "지시문 편집").font(.headline)
+            TextField("이름 (Mac에서만 표시)", text: $label)
+            TextEditor(text: $bodyText).font(.callout.monospaced())
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
+                .accessibilityLabel("공유할 수 있는 지시문 원문")
+            if !failure.isEmpty { Text(failure).font(.caption).foregroundStyle(.orange) }
+            HStack {
+                Text("\(bodyText.utf8.count) / \(AgentLimits.textBytes) UTF-8 바이트")
+                    .font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button("취소", role: .cancel) { dismiss() }
+                Button("로컬에 저장") {
+                    do { try save(label, bodyText); dismiss() }
+                    catch { failure = error.localizedDescription }
+                }.keyboardShortcut(.defaultAction)
+            }
+        }.padding().frame(minWidth: 540, minHeight: 355)
     }
 }

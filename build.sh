@@ -26,7 +26,7 @@ LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchS
 build() {
   echo "==> Compiling Swift sources"
   rm -rf "$APP_DIR"
-  mkdir -p "$MACOS_DIR" "$RES_DIR"
+  mkdir -p "$MACOS_DIR" "$RES_DIR" "$APP_DIR/Contents/Helpers"
 
   # shellcheck disable=SC2046
   swiftc -O \
@@ -35,6 +35,10 @@ build() {
     -framework AppKit -framework SwiftUI -framework AVFoundation \
     -framework Carbon -framework ApplicationServices \
     -lsqlite3
+
+  helper="$APP_DIR/Contents/Helpers/CodebasicAgentMCP"
+  swiftc -O -framework Security "$HERE/Sources/App/AgentPeerSigning.swift" "$HERE/Sources/Core/AgentCatalog.swift" \
+    "$HERE/Helpers/AgentCatalogMCP.swift" -o "$helper"
 
   cp "$HERE/Resources/Info.plist" "$APP_DIR/Contents/Info.plist"
   [ -f "$HERE/Resources/AppIcon.icns" ] && cp "$HERE/Resources/AppIcon.icns" "$RES_DIR/AppIcon.icns"
@@ -51,12 +55,12 @@ build() {
   SIGN_ID="${CODESIGN_IDENTITY:-Codebasic TTS Local}"
   if security find-identity -p codesigning 2>/dev/null | grep -qF "$SIGN_ID"; then
     echo "==> Code signing with stable identity: $SIGN_ID"
-    codesign --force --deep --sign "$SIGN_ID" "$APP_DIR" >/dev/null 2>&1 || \
-      echo "    (codesign with '$SIGN_ID' failed)"
+    codesign --force --sign "$SIGN_ID" --identifier com.seongjoo.SelectedTextTTS.agent-helper "$helper"
+    codesign --force --sign "$SIGN_ID" "$APP_DIR"
   else
     echo "==> Ad-hoc code signing  (no '$SIGN_ID' identity → Accessibility grant resets each rebuild)"
-    codesign --force --sign - "$APP_DIR" >/dev/null 2>&1 || \
-      echo "    (codesign skipped/failed — fine for local runs)"
+    codesign --force --sign - --identifier com.seongjoo.SelectedTextTTS.agent-helper "$helper"
+    codesign --force --sign - "$APP_DIR"
   fi
 
   echo "==> Built: $APP_DIR"
@@ -121,6 +125,10 @@ case "${1:-install}" in
     swiftc -O "$HERE/Sources/Core/TextSplitter.swift" "$HERE/Sources/App/LocalSpeechSocket.swift" \
       "$HERE/Tests/LocalSpeechGateTests.swift" -o "$BUILD_DIR/local-speech-gate-tests"
     "$BUILD_DIR/local-speech-gate-tests"
+    catalog_fixture="$(mktemp -d "$BUILD_DIR/catalog-test.XXXXXX")"
+    swiftc -O "$HERE/Sources/Core/AgentCatalog.swift" "$HERE/Sources/Core/AgentDeliveryProofs.swift" \
+      "$HERE/Sources/Core/ExplanationDraftWorkspace.swift" "$HERE/Tests/AgentCatalogTests.swift" -o "$BUILD_DIR/agent-catalog-tests"
+    "$BUILD_DIR/agent-catalog-tests" "$catalog_fixture"
     mkdir -p "$BUILD_DIR"
     swiftc -O "$HERE/Sources/Core/TextSplitter.swift" "$HERE/Sources/Core/CrawlLayout.swift" \
       "$HERE/Sources/App/Endpoints.swift" "$HERE/Tests/main.swift" -o "$BUILD_DIR/tests"

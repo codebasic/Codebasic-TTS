@@ -19,8 +19,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var localInstructionSocket: LocalInstructionSocket?
     private var localInstructionMenu: NSMenuItem?
     private var localInstructionExpiry: DispatchWorkItem?
-    private var draftReceiptSocket: LocalExplanationDraftSocket?
-    private var draftReceiptExpiry: DispatchWorkItem?
     private var draftReceiptMenu: NSMenuItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -66,6 +64,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func toggleInstructionSharing(preselect: LocalInstructionProfile.Name? = nil) {
         if localInstructionSocket != nil { revokeLocalInstructions(); return }
+        guard appState.agentAccess.shared == nil else {
+            showInstructionShareError("활성 에이전트 지시 조회를 먼저 해제하세요.")
+            return
+        }
         let selection = NSAlert()
         selection.messageText = "로컬 MCP 지시 공유 (이번 실행)"
         selection.informativeText = "연결하려는 지시 도우미의 PID와 공유할 프로필 한 개를 지정하세요. 자동 공유되지 않습니다."
@@ -86,7 +88,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let names = LocalInstructionProfile.Name.allCases
         guard let pid = Int32(pidField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)),
               let peer = LocalInstructionPeer.current(pid: pid), names.indices.contains(picker.indexOfSelectedItem),
-              let profile = appState.instructionSnapshot(names[picker.indexOfSelectedItem]) else {
+              let profile = appState.instructionSnapshot(names[picker.indexOfSelectedItem]),
+              let approvedGeneration = appState.agentSnapshot(profile.name.rawValue)?.generation else {
             showInstructionShareError("같은 계정에서 계속 실행 중인 도우미의 PID와 공유할 수 있는 길이의 지시가 필요합니다.")
             return
         }
@@ -101,8 +104,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         preview.isRichText = false
         preview.string = profile.text; preview.isEditable = false; preview.isSelectable = true
         approval.accessoryView = scroll
-        guard approval.runModal() == .alertFirstButtonReturn, localInstructionSocket == nil else { return }
-        guard appState.instructionSnapshot(profile.name)?.revision == profile.revision else {
+        guard approval.runModal() == .alertFirstButtonReturn, localInstructionSocket == nil, appState.agentAccess.shared == nil else { return }
+        guard appState.instructionSnapshot(profile.name)?.revision == profile.revision,
+              appState.agentSnapshot(profile.name.rawValue)?.generation == approvedGeneration else {
             showInstructionShareError("미리 보는 동안 지시가 바뀌었습니다. 새 내용을 확인한 뒤 다시 공유하세요.")
             return
         }
@@ -136,58 +140,72 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         localInstructionMenu?.state = .off
     }
 
+    func pairAgent() {
+        let state = appState.agentAccess
+        let alert = NSAlert()
+        alert.messageText = state.pair == nil ? "서명된 에이전트 도우미 연결" : "에이전트 도우미 다시 연결"
+        alert.informativeText = "표시 이름은 나만 볼 수 있습니다. 서명과 실행 중인 프로세스를 확인하며, 다시 연결하면 이전 허용과 전달 증명이 모두 지워집니다."
+        let name = NSTextField(frame: NSRect(x: 0, y: 32, width: 360, height: 23))
+        name.placeholderString = "내가 지은 에이전트 이름"
+        let pid = NSTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 23))
+        pid.placeholderString = "서명된 도우미 PID"
+        let fields = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 57))
+        fields.addSubview(name); fields.addSubview(pid); alert.accessoryView = fields
+        alert.addButton(withTitle: "이 도우미만 연결"); alert.addButton(withTitle: "취소")
+        guard alert.runModal() == .alertFirstButtonReturn,
+              let value = Int32(pid.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)) else { return }
+        _ = state.bind(pid: value, name: name.stringValue)
+    }
+
+    func toggleAgentSharing(_ selector: String) {
+        let state = appState.agentAccess
+        if state.shared != nil { state.stopShare(); return }
+        guard localInstructionSocket == nil else {
+            showInstructionShareError("호환용 기본 지시 공유를 먼저 해제하세요.")
+            return
+        }
+        guard let pair = state.pair, let snapshot = appState.agentSnapshot(selector), snapshot.shareable else {
+            showInstructionShareError("서명된 도우미를 연결하고 공유할 지시문을 선택하세요.")
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "\(pair.label) 도우미(PID \(pair.peer.pid))에 아래 지시만 공개할까요?"
+        alert.informativeText = "이 지시의 이 버전만 최대 10분간 공유합니다. 원격 모델을 쓰는 에이전트는 받은 지시문을 해당 서비스로 보낼 수 있습니다. 선택을 바꿔도 다른 지시는 공유되지 않습니다."
+        let scroll = NSTextView.scrollableTextView()
+        scroll.frame = NSRect(x: 0, y: 0, width: 425, height: 225)
+        guard let preview = scroll.documentView as? NSTextView else { return }
+        preview.isRichText = false; preview.isEditable = false; preview.isSelectable = true
+        preview.string = snapshot.text
+        alert.accessoryView = scroll
+        alert.addButton(withTitle: "이 버전만 공개"); alert.addButton(withTitle: "취소")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard state.pair?.id == pair.id, appState.agentSnapshot(selector) == snapshot,
+              localInstructionSocket == nil, state.share(snapshot) else {
+            showInstructionShareError("선택한 도우미나 지시문이 바뀌었거나 소켓을 시작할 수 없습니다.")
+            return
+        }
+    }
+
     @objc func toggleDraftReceipt() {
-        if draftReceiptSocket != nil { revokeDraftReceipt(); return }
-        let alert = NSAlert()
-        alert.messageText = "외부 에이전트 대본 받기"
-        alert.informativeText = "지정한 도우미의 대본만 최대 10분 동안 임시 보관함에 받습니다. 화면을 덮어쓰거나 재생하지 않으며, 지시문 조회도 허용하지 않습니다."
-        alert.addButton(withTitle: "이 도우미만 허용")
-        alert.addButton(withTitle: "취소")
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
-        field.placeholderString = "대본 도우미 PID"
-        alert.accessoryView = field
-        guard alert.runModal() == .alertFirstButtonReturn, draftReceiptSocket == nil else { return }
-        guard let pid = Int32(field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)),
-              let peer = LocalInstructionPeer.current(pid: pid) else {
-            showDraftReceiptError("같은 Mac 계정에서 현재 실행 중인 대본 도우미 PID가 필요합니다.")
+        let state = appState.agentAccess
+        if state.receiving { state.stopReceipt(); draftReceiptMenu?.state = .off; return }
+        guard let pair = state.pair else {
+            showInstructionShareError("에이전트 탭에서 서명된 도우미를 먼저 연결하세요. 붙여넣기는 계속 사용할 수 있습니다.")
             return
         }
-
-        let workspace = appState.explanationDrafts
-        let socket = LocalExplanationDraftSocket(peer: peer) { draft in workspace.receive(draft) }
-        guard socket.start() else {
-            showDraftReceiptError("도우미가 종료됐거나 대본 소켓 경로가 이미 사용 중입니다.")
-            return
-        }
-        draftReceiptSocket = socket
-        workspace.setReceiver(pid)
-        draftReceiptMenu?.state = .on
-        let expiry = DispatchWorkItem { [weak self, weak socket] in
-            guard let self, let socket, self.draftReceiptSocket === socket else { return }
-            self.revokeDraftReceipt()
-        }
-        draftReceiptExpiry = expiry
-        DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(600), execute: expiry)
-    }
-
-    private func showDraftReceiptError(_ message: String) {
         let alert = NSAlert()
-        alert.messageText = "대본 받기를 허용하지 않았습니다"
-        alert.informativeText = message
-        alert.runModal()
-    }
-
-    private func revokeDraftReceipt() {
-        draftReceiptExpiry?.cancel(); draftReceiptExpiry = nil
-        draftReceiptSocket?.stop(); draftReceiptSocket = nil
-        appState.explanationDrafts.setReceiver(nil)
-        draftReceiptMenu?.state = .off
+        alert.messageText = "\(pair.label) 도우미의 대본을 받을까요?"
+        alert.informativeText = "이 도우미에 실제 전달한 지시 버전의 대본만 최대 10분간 받습니다. 편집기를 덮어쓰거나 재생하지 않으며 지시문 조회도 따로 허용해야 합니다."
+        alert.addButton(withTitle: "이 도우미 대본만 받기"); alert.addButton(withTitle: "취소")
+        guard alert.runModal() == .alertFirstButtonReturn, state.pair?.id == pair.id else { return }
+        if state.receive(current: { [weak self] in self?.appState.agentSnapshot($0) },
+                         workspace: appState.explanationDrafts) { draftReceiptMenu?.state = .on }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         localSpeechSocket?.stop()
         revokeLocalInstructions()
-        revokeDraftReceipt()
+        appState.agentAccess.disconnect()
     }
 
     @objc private func openWindow() { mainWindow.show() }
@@ -207,12 +225,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Playback overlay
 
     private func observeState() {
-        appState.$explainPrompt.dropFirst()
-            .removeDuplicates(by: { $0.utf8.elementsEqual($1.utf8) })
-            .sink { [weak self] _ in self?.revokeLocalInstructions() }.store(in: &cancellables)
-        appState.$normalizePrompt.dropFirst()
-            .removeDuplicates(by: { $0.utf8.elementsEqual($1.utf8) })
-            .sink { [weak self] _ in self?.revokeLocalInstructions() }.store(in: &cancellables)
+        appState.$explainPrompt
+            .removeDuplicates(by: AgentBytes.same).dropFirst()
+            .sink { [weak self] _ in
+                guard let self else { return }
+                self.revokeLocalInstructions()
+                self.appState.invalidatePreset("explain")
+                self.appState.invalidatePreset("continue")
+            }.store(in: &cancellables)
+        appState.$normalizePrompt
+            .removeDuplicates(by: AgentBytes.same).dropFirst()
+            .sink { [weak self] _ in
+                self?.revokeLocalInstructions()
+                self?.appState.invalidatePreset("normalize")
+            }.store(in: &cancellables)
+        appState.agentCatalog.didChange = { [weak self] selector, deleted in
+            self?.appState.agentAccess.invalidate(selector, deleted: deleted)
+        }
+        appState.agentAccess.$receiving.sink { [weak self] in self?.draftReceiptMenu?.state = $0 ? .on : .off }
+            .store(in: &cancellables)
         appState.$phase
             .receive(on: RunLoop.main)
             .sink { [weak self] phase in
