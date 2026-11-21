@@ -12,6 +12,29 @@ struct GlossaryEntry: Codable, Equatable, Identifiable {
     var note: String = ""
 }
 
+enum ExplainShareError: LocalizedError {
+    case invalidPID
+    case tooLargeOrEmpty
+    case stalePreview
+    case socketUnavailable
+    case cancelled
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidPID:
+            return "같은 계정에서 실행 중인 도우미의 PID가 필요합니다."
+        case .tooLargeOrEmpty:
+            return "공유할 지시문이 비어 있거나 8,192바이트 제한을 초과했습니다."
+        case .stalePreview:
+            return "미리 보는 동안 지시문이 바뀌었습니다. 새 내용을 확인한 뒤 다시 허용하세요."
+        case .socketUnavailable:
+            return "도우미가 종료됐거나 이전 소켓 경로가 남아 있습니다. 도우미와 소켓 상태를 확인하세요."
+        case .cancelled:
+            return "조회 허용이 취소되었습니다."
+        }
+    }
+}
+
 /// Single source of truth for the UI and the speak path. Holds connection,
 /// settings, history, and runs synthesis (cache-first) + playback.
 @MainActor
@@ -93,12 +116,25 @@ final class AppState: ObservableObject {
     @Published var explanationText = ""          // generated commentary (해설 panel, bottom)
     @Published var explaining = false
     @Published var explainPrompt = CodeExplanation.defaultInstruction
+    @Published var continuePrompt = CodeExplanation.continueInstruction
+    @Published var explainInstructionMode: ExplainInstructionMode = .full
+    @Published var instructionShareState: InstructionShareState = .inactive
+    @Published var instructionShareError = ""
+    @Published var explainDraftInboxEnabled = false
+    @Published var explainDraftInboxError = ""
+    @Published var explainWorkspace = ExplainWorkspaceState()
+    @Published var pendingStaleExplainPlayback: (displayText: String, staleSpokenText: String)? = nil
+    @Published var showLegacyExplain = false
+    @Published var allowLegacyShortcutExplain = false
     @Published var explainHint = ""              // 해설 단계 (코드→해설) 추가 지시
     @Published var explainAutoPlay = true        // 단축키/Services 해설: 생성 직후 바로 재생(끄면 검토 후 수동 재생)
 
     /// Set by AppDelegate: bring the management window forward so a review-only
     /// 해설 (explainAutoPlay == false) is visible to read/check before playing.
     var onRequestReview: (() -> Void)?
+    var onApproveExplainInstruction: ((ExplainInstructionMode, Int32, String) -> Result<InstructionShareGrant, ExplainShareError>)?
+    var onRevokeInstructionShare: (() -> Void)?
+    var onSetExplainDraftInboxEnabled: ((Bool) -> Result<Void, ExplainShareError>)?
     @Published var explainTemperature: Double = 0.4          // 해설 LLM 생성 매개변수
     @Published var scriptTemperature: Double = 0.2           // 대본 LLM 생성 매개변수
     /// 역할별 reasoning(thinking) 수준 — 공급자별 파라미터로 변환해 요청에 실린다
@@ -1148,6 +1184,220 @@ final class AppState: ObservableObject {
         }
     }
 
+    // MARK: - External-agent Explain workspace (instructions, inbox, draft playback)
+
+    func finalExplainInstruction(for mode: ExplainInstructionMode? = nil) -> String {
+        let m = mode ?? explainInstructionMode
+        return ExplainInstructionComposer.finalInstruction(
+            mode: m,
+            fullTemplate: explainPrompt,
+            deltaTemplate: continuePrompt,
+            outputStyleRules: CodeExplanation.outputStyleRules,
+            defaultFull: CodeExplanation.defaultInstruction,
+            defaultDelta: CodeExplanation.continueInstruction
+        )
+    }
+
+    func finalExplainInstructionRevision(for mode: ExplainInstructionMode? = nil) -> String {
+        let m = mode ?? explainInstructionMode
+        return ExplainInstructionComposer.revision(
+            profileName: m.profileName,
+            text: finalExplainInstruction(for: m)
+        )
+    }
+
+    func resetExplainInstructionTemplate(for mode: ExplainInstructionMode? = nil) {
+        let m = mode ?? explainInstructionMode
+        switch m {
+        case .full: explainPrompt = CodeExplanation.defaultInstruction
+        case .delta: continuePrompt = CodeExplanation.continueInstruction
+        }
+        saveSettings()
+    }
+
+    func copyFinalExplainInstruction(for mode: ExplainInstructionMode? = nil) {
+        let text = finalExplainInstruction(for: mode)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        statusText = "최종 지시문 복사됨"
+    }
+
+    @discardableResult
+    func requestApproveExplainInstruction(pidText: String, expectedRevision: String? = nil) -> Bool {
+        let trimmed = pidText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let pid = Int32(trimmed), pid > 1 else {
+            instructionShareError = ExplainShareError.invalidPID.localizedDescription
+            return false
+        }
+        guard let handler = onApproveExplainInstruction else {
+            instructionShareError = ExplainShareError.socketUnavailable.localizedDescription
+            return false
+        }
+        let targetRevision = expectedRevision ?? finalExplainInstructionRevision()
+        instructionShareError = ""
+        switch handler(explainInstructionMode, pid, targetRevision) {
+        case .success(let grant):
+            instructionShareState = .allowed(grant)
+            return true
+        case .failure(let error):
+            instructionShareError = error.localizedDescription
+            return false
+        }
+    }
+
+    func revokeInstructionShare() {
+        instructionShareError = ""
+        if let handler = onRevokeInstructionShare {
+            handler()
+        } else {
+            instructionShareState = .revoked(.manual)
+        }
+    }
+
+    @discardableResult
+    func setExplainDraftInboxEnabled(_ enabled: Bool) -> Bool {
+        explainDraftInboxError = ""
+        if let handler = onSetExplainDraftInboxEnabled {
+            switch handler(enabled) {
+            case .success:
+                explainDraftInboxEnabled = enabled
+                if !enabled { explainWorkspace.resetSessionIdempotency() }
+                return true
+            case .failure(let error):
+                explainDraftInboxEnabled = false
+                explainDraftInboxError = error.localizedDescription
+                return false
+            }
+        }
+        explainDraftInboxEnabled = enabled
+        if !enabled { explainWorkspace.resetSessionIdempotency() }
+        return true
+    }
+
+    /// Silent arrival into the Explain inbox: never starts playback, never calls an LLM,
+    /// and never overwrites the editor.
+    @discardableResult
+    func receiveExplainDraft(_ payload: ExplainDraftPayload, now: Date = Date()) -> ExplainDraftReceipt {
+        let receipt = explainWorkspace.receive(payload, now: now)
+        if receipt.status == .accepted, let draft = receipt.draft, draft.isNoChangeSentinel {
+            statusText = "변경 없음 응답 수신됨"
+        }
+        return receipt
+    }
+
+    func updateExplainDisplayText(_ text: String) {
+        explainWorkspace.editor.updateDisplayText(text)
+        pendingStaleExplainPlayback = nil
+    }
+
+    func updateExplainSpokenText(_ text: String) {
+        explainWorkspace.editor.updateSpokenText(text)
+        pendingStaleExplainPlayback = nil
+    }
+
+    func clearExplainSpokenText() {
+        explainWorkspace.editor.clearSpokenText()
+        pendingStaleExplainPlayback = nil
+    }
+
+    func acknowledgeExplainSpokenMatchesDisplay() {
+        explainWorkspace.editor.acknowledgeSpokenMatchesDisplay()
+        pendingStaleExplainPlayback = nil
+    }
+
+    func clearExplainEditor() {
+        explainWorkspace.editor.clear()
+        pendingStaleExplainPlayback = nil
+    }
+
+    @discardableResult
+    func loadExplainDraftIntoEditor(_ id: UUID) -> Bool {
+        pendingStaleExplainPlayback = nil
+        return explainWorkspace.loadDraftIntoEditor(id: id)
+    }
+
+    @discardableResult
+    func appendExplainDraftToEditor(_ id: UUID) -> Bool {
+        pendingStaleExplainPlayback = nil
+        return explainWorkspace.appendDraftToEditor(id: id)
+    }
+
+    func dismissExplainDraft(_ id: UUID) {
+        explainWorkspace.dismissDraft(id: id)
+    }
+
+    func clearExplainDraftInbox() {
+        explainWorkspace.clearInbox()
+    }
+
+    @discardableResult
+    func playExplainDraft() -> Bool {
+        switch explainWorkspace.editor.playbackPlan(allowStaleSpoken: false) {
+        case .empty:
+            return false
+        case .requiresConfirmation(let displayText, let staleSpokenText):
+            pendingStaleExplainPlayback = (displayText: displayText, staleSpokenText: staleSpokenText)
+            statusText = "화면 문구가 수정되어 확인이 필요합니다"
+            return false
+        case .ready(let spokenText, let displayText, _):
+            pendingStaleExplainPlayback = nil
+            playbackMode = .explain
+            synthesize(spokenText, displayText: displayText, preserveLiteral: true)
+            return true
+        }
+    }
+
+    @discardableResult
+    func playExplainDisplayTextDirectly() -> Bool {
+        guard case .ready(let spokenText, let displayText, _) = explainWorkspace.editor.displayOnlyPlaybackPlan() else {
+            return false
+        }
+        pendingStaleExplainPlayback = nil
+        playbackMode = .explain
+        synthesize(spokenText, displayText: displayText, preserveLiteral: true)
+        return true
+    }
+
+    @discardableResult
+    func confirmPlayStaleExplainDraft() -> Bool {
+        guard case .ready(let spokenText, let displayText, _) = explainWorkspace.editor.playbackPlan(allowStaleSpoken: true) else {
+            pendingStaleExplainPlayback = nil
+            return false
+        }
+        pendingStaleExplainPlayback = nil
+        playbackMode = .explain
+        synthesize(spokenText, displayText: displayText, preserveLiteral: true)
+        return true
+    }
+
+    func sendExplainDraftToGenerate() {
+        let editor = explainWorkspace.editor
+        let display = editor.displayText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let spoken = editor.spokenText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !display.isEmpty || !spoken.isEmpty else { return }
+        inputText = display.isEmpty ? editor.spokenText : editor.displayText
+        if !spoken.isEmpty && !editor.isSpokenStale {
+            scriptText = editor.spokenText
+            markScriptFresh()
+        } else {
+            scriptText = ""
+        }
+        selectedTab = 0
+    }
+
+    /// Guarded entry point for ⌃⌥⌘E and the macOS "코드 해설" Service: never triggers
+    /// in-app LLM explanation unless `allowLegacyShortcutExplain` is explicitly enabled.
+    func handleExplainShortcutOrService(_ code: String, surfaceWindow: () -> Void) {
+        selectedTab = 1
+        if allowLegacyShortcutExplain {
+            explainAndSpeak(code)
+            return
+        }
+        codeText = code
+        statusText = "단축키·서비스의 자동 해설 생성이 비활성화되어 있습니다 (고급 설정에서 활성화 가능)"
+        surfaceWindow()
+    }
+
     // MARK: - Script (TTS-friendly text)
 
     /// Snapshot what the current 대본 was built from, so the UI can flag it stale
@@ -1487,6 +1737,7 @@ final class AppState: ObservableObject {
             "scriptReasoningLevel": scriptReasoningLevel.rawValue,
             "visionReasoningLevel": visionReasoningLevel.rawValue,
             "explainAutoPlay": explainAutoPlay,
+            "allowLegacyShortcutExplain": allowLegacyShortcutExplain,
             "stability": voiceSettings.stability, "similarity": voiceSettings.similarityBoost,
             "style": voiceSettings.style, "speakerBoost": voiceSettings.useSpeakerBoost,
             // Endpoints are the single source of truth for LLM providers (the old
@@ -1515,6 +1766,9 @@ final class AppState: ObservableObject {
         }
         if explainPrompt != CodeExplanation.defaultInstruction {
             dict["explainPrompt"] = explainPrompt
+        }
+        if continuePrompt != CodeExplanation.continueInstruction {
+            dict["continuePrompt"] = continuePrompt
         }
         if let d = try? JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted]) {
             try? d.write(to: settingsURL)
@@ -1553,8 +1807,10 @@ final class AppState: ObservableObject {
         normalizeEnabled = o["normalize"] as? Bool ?? normalizeEnabled
         normalizePrompt = o["normalizePrompt"] as? String ?? normalizePrompt
         explainPrompt = o["explainPrompt"] as? String ?? explainPrompt
+        continuePrompt = o["continuePrompt"] as? String ?? continuePrompt
         explainTemperature = o["explainTemperature"] as? Double ?? explainTemperature
         explainAutoPlay = o["explainAutoPlay"] as? Bool ?? explainAutoPlay
+        allowLegacyShortcutExplain = o["allowLegacyShortcutExplain"] as? Bool ?? allowLegacyShortcutExplain
         scriptTemperature = o["scriptTemperature"] as? Double ?? scriptTemperature
         explainReasoningLevel = ReasoningLevel(rawValue: o["explainReasoningLevel"] as? String ?? "") ?? explainReasoningLevel
         scriptReasoningLevel = ReasoningLevel(rawValue: o["scriptReasoningLevel"] as? String ?? "") ?? scriptReasoningLevel

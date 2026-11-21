@@ -518,11 +518,13 @@ enum CodeExplanation {
     - 의미 있는 변경이 없으면 다른 말 없이 정확히 '변경 없음'만 출력하세요.
     """
 
-    static func continuePrompt(previous: String, current: String, hint: String = "", instruction: String = "") -> String {
-        """
+    static func continuePrompt(previous: String, current: String, hint: String = "", instruction: String = "",
+                               continueInstruction: String = CodeExplanation.continueInstruction) -> String {
+        let delta = continueInstruction.isEmpty ? Self.continueInstruction : continueInstruction
+        return """
         \(effectiveInstruction(instruction))
 
-        \(continueInstruction)\(hintBlock(hint))
+        \(delta)\(hintBlock(hint))
 
         [이전 코드 — 이미 해설함]
         \(previous)

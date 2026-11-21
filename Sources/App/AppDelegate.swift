@@ -19,6 +19,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var localInstructionSocket: LocalInstructionSocket?
     private var localInstructionMenu: NSMenuItem?
     private var localInstructionExpiry: DispatchWorkItem?
+    private var localExplainDraftSocket: LocalExplainDraftSocket?
+    private var localExplainDraftMenu: NSMenuItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
@@ -98,28 +100,113 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             showInstructionShareError("미리 보는 동안 지시가 바뀌었습니다. 새 내용을 확인한 뒤 다시 공유하세요.")
             return
         }
-        let socket = LocalInstructionSocket(peer: peer, profile: profile)
-        guard socket.start() else {
+        guard startInstructionSocket(peer: peer, profile: profile) else {
             showInstructionShareError("도우미가 종료됐거나 이전 소켓 경로가 남아 있습니다. 새 도우미와 소켓 상태를 확인하세요.")
             return
         }
+    }
+
+    @objc private func toggleLocalExplainDrafts() {
+        let enable = !appState.explainDraftInboxEnabled
+        if !appState.setExplainDraftInboxEnabled(enable), enable {
+            let alert = NSAlert()
+            alert.messageText = "로컬 MCP 해설 대본 수신을 시작할 수 없습니다"
+            alert.informativeText = appState.explainDraftInboxError
+            alert.runModal()
+        }
+    }
+
+    private func startInstructionSocket(peer: LocalInstructionPeer, profile: LocalInstructionProfile) -> Bool {
+        if localInstructionSocket != nil {
+            revokeLocalInstructions(reason: .manual)
+        }
+        let socket = LocalInstructionSocket(peer: peer, profile: profile)
+        guard socket.start() else { return false }
+        let now = Date()
+        let grant = InstructionShareGrant(
+            profileName: profile.name.rawValue,
+            peerPID: peer.pid,
+            revision: profile.revision,
+            instructions: profile.text,
+            approvedAt: now,
+            expiresAt: now.addingTimeInterval(600)
+        )
         localInstructionSocket = socket
         localInstructionMenu?.state = .on
+        appState.instructionShareError = ""
+        appState.instructionShareState = .allowed(grant)
         let expiry = DispatchWorkItem { [weak self, weak socket] in
             guard let self, let socket, self.localInstructionSocket === socket else { return }
-            self.revokeLocalInstructions()
+            self.revokeLocalInstructions(reason: .expired)
         }
         localInstructionExpiry = expiry
         DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(600), execute: expiry)
+        return true
+    }
+
+    private func setLocalExplainDraftInboxEnabled(_ enabled: Bool) -> Result<Void, ExplainShareError> {
+        if !enabled {
+            localExplainDraftSocket?.stop()
+            localExplainDraftSocket = nil
+            localExplainDraftMenu?.state = .off
+            return .success(())
+        }
+        if localExplainDraftSocket != nil {
+            localExplainDraftMenu?.state = .on
+            return .success(())
+        }
+        weak var capturedSocket: LocalExplainDraftSocket?
+        let socket = LocalExplainDraftSocket { [weak self] payload in
+            guard let self, let active = self.localExplainDraftSocket, active === capturedSocket else {
+                return "disabled"
+            }
+            return self.appState.receiveExplainDraft(payload).status.rawValue
+        }
+        capturedSocket = socket
+        guard socket.start() else {
+            localExplainDraftMenu?.state = .off
+            return .failure(.socketUnavailable)
+        }
+        localExplainDraftSocket = socket
+        localExplainDraftMenu?.state = .on
+        return .success(())
+    }
+
+    private func wireExplainCallbacks() {
+        appState.onApproveExplainInstruction = { [weak self] mode, pid, expectedRevision in
+            guard let self else { return .failure(.socketUnavailable) }
+            guard let peer = LocalInstructionPeer.current(pid: pid) else {
+                return .failure(.invalidPID)
+            }
+            let profileName: LocalInstructionProfile.Name = mode == .full ? .explain : .continue
+            guard let profile = self.instructionSnapshot(profileName) else {
+                return .failure(.tooLargeOrEmpty)
+            }
+            guard profile.revision == expectedRevision else {
+                return .failure(.stalePreview)
+            }
+            guard self.startInstructionSocket(peer: peer, profile: profile),
+                  let grant = self.appState.instructionShareState.activeGrant else {
+                return .failure(.socketUnavailable)
+            }
+            return .success(grant)
+        }
+        appState.onRevokeInstructionShare = { [weak self] in
+            self?.revokeLocalInstructions(reason: .manual)
+        }
+        appState.onSetExplainDraftInboxEnabled = { [weak self] enabled in
+            guard let self else { return .failure(.socketUnavailable) }
+            return self.setLocalExplainDraftInboxEnabled(enabled)
+        }
     }
 
     private func instructionSnapshot(_ name: LocalInstructionProfile.Name) -> LocalInstructionProfile? {
         let text: String
         switch name {
         case .explain:
-            text = CodeExplanation.effectiveInstruction(appState.explainPrompt)
+            text = appState.finalExplainInstruction(for: .full)
         case .continue:
-            text = CodeExplanation.effectiveInstruction(appState.explainPrompt) + "\n\n" + CodeExplanation.continueInstruction
+            text = appState.finalExplainInstruction(for: .delta)
         case .normalize:
             text = appState.normalizePrompt.isEmpty ? TextNormalizer.defaultInstruction : appState.normalizePrompt
         }
@@ -133,15 +220,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.runModal()
     }
 
-    private func revokeLocalInstructions() {
+    private func revokeLocalInstructions(reason: InstructionShareRevokeReason = .manual) {
+        let wasActive = localInstructionSocket != nil || appState.instructionShareState.activeGrant != nil
         localInstructionExpiry?.cancel(); localInstructionExpiry = nil
         localInstructionSocket?.stop(); localInstructionSocket = nil
         localInstructionMenu?.state = .off
+        if wasActive || reason == .manual {
+            appState.instructionShareState = .revoked(reason)
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         localSpeechSocket?.stop()
-        revokeLocalInstructions()
+        localExplainDraftSocket?.stop()
+        localExplainDraftSocket = nil
+        localExplainDraftMenu?.state = .off
+        appState.explainDraftInboxEnabled = false
+        revokeLocalInstructions(reason: .terminated)
     }
 
     @objc private func openWindow() { mainWindow.show() }
@@ -161,12 +256,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Playback overlay
 
     private func observeState() {
+        wireExplainCallbacks()
         appState.$explainPrompt.dropFirst()
             .removeDuplicates(by: { $0.utf8.elementsEqual($1.utf8) })
-            .sink { [weak self] _ in self?.revokeLocalInstructions() }.store(in: &cancellables)
+            .sink { [weak self] _ in self?.revokeLocalInstructions(reason: .edited) }.store(in: &cancellables)
+        appState.$continuePrompt.dropFirst()
+            .removeDuplicates(by: { $0.utf8.elementsEqual($1.utf8) })
+            .sink { [weak self] _ in self?.revokeLocalInstructions(reason: .edited) }.store(in: &cancellables)
         appState.$normalizePrompt.dropFirst()
             .removeDuplicates(by: { $0.utf8.elementsEqual($1.utf8) })
-            .sink { [weak self] _ in self?.revokeLocalInstructions() }.store(in: &cancellables)
+            .sink { [weak self] _ in self?.revokeLocalInstructions(reason: .edited) }.store(in: &cancellables)
         appState.$phase
             .receive(on: RunLoop.main)
             .sink { [weak self] phase in
@@ -193,8 +292,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             SelectionGrabber.grab { text in
                 guard let self, let text else { return }
                 MainActor.assumeIsolated {
-                    self.appState.selectedTab = 1
-                    self.appState.explainAndSpeak(text)
+                    self.appState.handleExplainShortcutOrService(text) { [weak self] in
+                        self?.mainWindow.show()
+                    }
                 }
             }
         }
@@ -213,7 +313,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// clipboard is attached as a screenshot; otherwise (and for text) the paste
     /// is forwarded to the first responder for normal handling.
     @objc func handlePaste(_ sender: Any?) {
-        if appState.selectedTab == 1 {
+        if appState.selectedTab == 1 && appState.showLegacyExplain {
             let pb = NSPasteboard.general
             let hasImage = (pb.readObjects(forClasses: [NSImage.self], options: nil) as? [NSImage])?
                 .contains { !$0.size.equalTo(.zero) } ?? false
@@ -248,8 +348,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let preview = code.replacingOccurrences(of: "\n", with: " ").prefix(60)
         Log.app.info("handleCodeText: \(code.count) chars — \"\(preview, privacy: .public)\"")
         appState.captureHUDTarget()
-        appState.selectedTab = 1        // 해설 탭 (2번째)
-        appState.explainAndSpeak(code)
+        appState.handleExplainShortcutOrService(code) { [weak self] in
+            self?.mainWindow.show()
+        }
     }
 
     // MARK: - Main menu (regular app needs one for ⌘Q and text-editing shortcuts)
@@ -272,6 +373,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                            action: #selector(toggleLocalInstructions), keyEquivalent: "")
         instructions.target = self
         localInstructionMenu = instructions
+        let explainDrafts = appMenu.addItem(withTitle: "로컬 MCP 해설 대본 수신 허용 (이번 실행)",
+                                            action: #selector(toggleLocalExplainDrafts), keyEquivalent: "")
+        explainDrafts.target = self
+        localExplainDraftMenu = explainDrafts
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Codebasic TTS 가리기", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         appMenu.addItem(withTitle: "다른 항목 가리기",

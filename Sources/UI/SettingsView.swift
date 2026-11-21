@@ -269,6 +269,9 @@ struct SettingsView: View {
             Section("선택한 텍스트") {
                 LabeledContent("읽어주기", value: "⌃⌥⌘R")
                 LabeledContent("코드 해설", value: "⌃⌥⌘E")
+                Toggle("단축키(⌃⌥⌘E)·서비스에서 앱 내 해설 생성 허용 (고급)", isOn: saved(\.allowLegacyShortcutExplain))
+                Text("기본값은 꺼짐입니다. 꺼두면 ⌃⌥⌘E나 macOS 서비스 ‘코드 해설’을 눌러도 의도치 않게 앱 내 LLM 생성이 시작되지 않습니다.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             Section("손쉬운 사용 권한") {
                 Label(hasPermission ? "허용됨" : "권한이 필요합니다", systemImage: hasPermission ? "checkmark.circle" : "exclamationmark.circle")

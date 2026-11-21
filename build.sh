@@ -121,6 +121,12 @@ case "${1:-install}" in
     swiftc -O "$HERE/Sources/Core/TextSplitter.swift" "$HERE/Sources/App/LocalSpeechSocket.swift" \
       "$HERE/Tests/LocalSpeechGateTests.swift" -o "$BUILD_DIR/local-speech-gate-tests"
     "$BUILD_DIR/local-speech-gate-tests"
+    swiftc -O "$HERE/Sources/Core/ExplainWorkspace.swift" "$HERE/Sources/App/LocalInstructionSocket.swift" \
+      "$HERE/Sources/App/LocalExplainDraftSocket.swift" "$HERE/Sources/Core/ExplanationConversation.swift" \
+      "$HERE/Sources/Core/Logging.swift" "$HERE/Sources/Core/MemoryDiagnostics.swift" \
+      "$HERE/Sources/TTS/TextNormalizer.swift" "$HERE/Tests/ExplainWorkspaceTests.swift" \
+      -o "$BUILD_DIR/explain-workspace-tests"
+    "$BUILD_DIR/explain-workspace-tests"
     mkdir -p "$BUILD_DIR"
     swiftc -O "$HERE/Sources/Core/TextSplitter.swift" "$HERE/Sources/Core/CrawlLayout.swift" \
       "$HERE/Sources/App/Endpoints.swift" "$HERE/Tests/main.swift" -o "$BUILD_DIR/tests"
