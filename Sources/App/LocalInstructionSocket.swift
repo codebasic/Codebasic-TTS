@@ -78,19 +78,35 @@ final class LocalApprovedSocket {
     private let approvedPeer: LocalInstructionPeer
     private let maxFrame: Int
     private let expires: DispatchTime
-    private let handle: (Data, @escaping () -> Bool) -> Data?
+    private let handle: (Data, @escaping () -> Bool) -> (Data, ((Bool) -> Void)?)?
+    private let verifier: ((Int32) -> Bool)?
     private var source: DispatchSourceRead?
     private var inode: ino_t = 0
     private var revoked = false
 
+    convenience init(peer: LocalInstructionPeer, endpoint: String, directory: String,
+                     lifetime: DispatchTimeInterval, maxFrame: Int,
+                     handle: @escaping (Data, @escaping () -> Bool) -> Data?) {
+        self.init(peer: peer, endpoint: endpoint, directory: directory, lifetime: lifetime, maxFrame: maxFrame,
+                  verifier: nil, respond: { bytes, active in
+                      guard let out = handle(bytes, active) else { return nil }
+                      return (out, nil)
+                  })
+    }
+
+    /// `verifier` is an additional check of the connected descriptor, run before the read and again
+    /// before the write. `respond` returns the reply plus an optional completion that is told whether
+    /// the whole frame was written; it runs before the connection is closed.
     init(peer: LocalInstructionPeer, endpoint: String, directory: String,
          lifetime: DispatchTimeInterval, maxFrame: Int,
-         handle: @escaping (Data, @escaping () -> Bool) -> Data?) {
+         verifier: ((Int32) -> Bool)?,
+         respond: @escaping (Data, @escaping () -> Bool) -> (Data, ((Bool) -> Void)?)?) {
         approvedPeer = peer
         self.endpoint = endpoint
         self.directory = directory
         self.maxFrame = maxFrame
-        self.handle = handle
+        self.verifier = verifier
+        handle = respond
         queue = DispatchQueue(label: "com.codebasic.tts.approved-ipc." + endpoint)
         expires = .now() + lifetime
     }
@@ -146,20 +162,26 @@ final class LocalApprovedSocket {
         defer { close(fd) }
         var noSigPipe: Int32 = 1
         guard LocalInstructionPeer.connected(fd) == approvedPeer,
+              verifier?(fd) ?? true,
               setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size)) == 0,
               fcntl(fd, F_SETFL, O_NONBLOCK) == 0 else { return }
         let deadline = DispatchTime.now() + .milliseconds(600)
         guard let bytes = readFrame(fd, deadline: deadline),
               LocalInstructionPeer.connected(fd) == approvedPeer,
               active(),
-              var out = handle(bytes, { [weak self] in self?.active() == true }) else { return }
+              let reply = handle(bytes, { [weak self] in self?.active() == true }) else { return }
+        var out = reply.0
         out.append(10)
+        var written = false
+        // Runs after the lease lock is released and before the descriptor is closed.
+        defer { reply.1?(written) }
         lock.lock()
         defer { lock.unlock() }
         // Keep the lease checked across the write. Stop can wait only for the short send deadline.
-        guard !revoked, DispatchTime.now() < expires, LocalInstructionPeer.connected(fd) == approvedPeer else { return }
+        guard !revoked, DispatchTime.now() < expires, LocalInstructionPeer.connected(fd) == approvedPeer,
+              verifier?(fd) ?? true else { return }
         let sendDeadline = DispatchTime.now() + .milliseconds(100)
-        _ = out.withUnsafeBytes { (view: UnsafeRawBufferPointer) -> Bool in
+        written = out.withUnsafeBytes { (view: UnsafeRawBufferPointer) -> Bool in
             guard let base = view.baseAddress else { return false }
             var sent = 0
             while sent < view.count {
