@@ -80,7 +80,11 @@ enum AgentPeerSigning {
     private static func hardened(_ details: [String: Any]) -> Bool {
         guard let flags = details[kSecCodeInfoFlags as String] as? NSNumber,
               flags.uint32Value & SecCodeSignatureFlags.runtime.rawValue != 0 else { return false }
-        let entitlements = details[kSecCodeInfoEntitlementsDict as String]
-        return entitlements == nil || (entitlements as? [String: Any])?.isEmpty == true
+        if let entitlements = details[kSecCodeInfoEntitlementsDict as String] {
+            return (entitlements as? [String: Any])?.isEmpty == true
+        }
+        // Security.framework can omit the parsed dictionary for a different
+        // format. An unrecognized embedded blob is not proof of no entitlements.
+        return details[kSecCodeInfoEntitlements as String] == nil
     }
 }

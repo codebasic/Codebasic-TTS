@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import plistlib
 import re
 import selectors
 import shutil
@@ -22,7 +23,10 @@ def read(proc):
         handles.register(proc.stdout, selectors.EVENT_READ)
         if not handles.select(5):
             raise TimeoutError("fixture did not respond")
-        return proc.stdout.readline().strip()
+        line = proc.stdout.readline()
+        if not line:
+            raise RuntimeError(f"fixture exited unexpectedly ({proc.wait(timeout=3)}): {proc.stderr.read()}")
+        return line.strip()
 
 
 def write(proc, message):
@@ -104,6 +108,20 @@ def main():
         subprocess.run(["/usr/bin/codesign","--force","--timestamp=none",
                         "--sign",os.environ.get("CODESIGN_IDENTITY","Codebasic TTS Local"),
                         "--identifier",APP_ID,str(root / "unhardened")], check=True, timeout=15)
+        # Known zero-capability value; explicitly does not enable a network client.
+        marker = {"com.apple.security.network.client": False}
+        entitlements = root / "TestEntitlements.plist"
+        entitlements.write_bytes(plistlib.dumps(marker))
+        for base, identifier in (("helper", APP_ID+".agent-helper"), ("server", APP_ID)):
+            entitled = root / ("entitled-" + base)
+            shutil.copy2(root / base, entitled)
+            subprocess.run(["/usr/bin/codesign","--force","--timestamp=none","--options","runtime",
+                            "--sign",os.environ.get("CODESIGN_IDENTITY","Codebasic TTS Local"),
+                            "--identifier",identifier,"--entitlements",str(entitlements),str(entitled)], check=True, timeout=15)
+            subprocess.run(["/usr/bin/codesign", "--verify", "--strict", str(entitled)], check=True, timeout=15)
+            embedded = subprocess.check_output(["/usr/bin/codesign","--display","--xml","--entitlements","-",str(entitled)],
+                                               stderr=subprocess.DEVNULL, timeout=12)
+            assert plistlib.loads(embedded) == marker
 
         def launch(path, *args, extra=None):
             return subprocess.Popen([str(root/path),*args], env={**env,**(extra or {})}, stdin=subprocess.PIPE,
@@ -111,12 +129,28 @@ def main():
 
         server = launch("server", str(root))
         unhardened = launch("unhardened", str(root))
+        entitled_server = launch("entitled-server", str(root))
+        entitled_helper = launch("entitled-helper")
+        exact_entitled_pin = launch("server", str(root), "entitled-helper")
         a, b, wrong = launch("helper"), launch("helper"), launch("helper",extra={"CODEBASIC_TTS_SIGNER_SHA1":"0"*40})
         other = launch("other")
         try:
             assert read(server) == "ready"
             assert read(unhardened) == "ready"
-            for h in a,b,wrong: initialize(h)
+            assert read(entitled_server) == "ready"
+            assert read(exact_entitled_pin) == "ready"
+            for h in a,b,wrong,entitled_helper: initialize(h)
+            assert command(entitled_server, "inspect-signing-info") == "dict+raw"
+            print("Security.framework signing-information flag returned both the generic entitlement dictionary and raw blob")
+            assert command(entitled_server, f"bind {a.pid}") == "no" # same signer, app ID, and hardened runtime; self check
+            assert command(exact_entitled_pin, f"bind {entitled_helper.pid}") == "no" # exact bundled test hash matches; live PID check
+            assert command(entitled_server, f"observe-request {a.pid}") == "ok"
+            assert call(a,"get_tts_instructions",profile=FIXTURE_SELECTOR)["isError"]
+            assert command(entitled_server, "stop-observing") == "0" # same signer/ID; helper's kernel peer check blocked before any request
+            assert command(server, f"observe-request {a.pid}") == "ok"
+            assert call(a,"get_tts_instructions",profile=FIXTURE_SELECTOR)["isError"] # probe intentionally sends no response
+            assert command(server, "stop-observing") == "1" # positive control: same request reached an entitlement-free signing peer
+            print("Entitled app/helper rejected by app self-check, exact-pinned helper pairing, and helper socket peer authentication")
             assert command(unhardened, f"bind {a.pid}") == "no" # wrong runtime policy, same signer and ID
             assert command(server, f"bind {os.getpid()}") == "no" # unsigned/wrong code
             assert command(server, f"bind {other.pid}") == "no" # same signer and identifier, different code
@@ -158,7 +192,7 @@ def main():
             assert not json.loads(command(server,"snapshot"))["receiving"]
             print("signed Agent IPC: exact delivery, wrong signer/pid/code/runtime, default off, independent grants, old proof, dedup, revoke/revert/delete and pasted editor untouched")
         finally:
-            for proc in server,unhardened,a,b,wrong,other: stop(proc)
+            for proc in server,unhardened,entitled_server,entitled_helper,exact_entitled_pin,a,b,wrong,other: stop(proc)
 
 
 if __name__ == "__main__":
