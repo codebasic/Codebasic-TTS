@@ -96,6 +96,23 @@ final class AppState: ObservableObject {
     @Published var explainHint = ""              // 해설 단계 (코드→해설) 추가 지시
     @Published var explainAutoPlay = true        // 단축키/Services 해설: 생성 직후 바로 재생(끄면 검토 후 수동 재생)
 
+    // 해설 탭 기본: 외부 에이전트 지시문 + 받은 대본 (순수 로직은 Core/ExplainHandoff.swift,
+    // 동작은 AppState+AgentScript.swift). 앱 내 해설 생성(위 필드들)은 고급으로 분리.
+    @Published var agentPrompts = AgentPrompts()
+    @Published var promptGrant: PromptGrant?              // AppDelegate가 소켓과 함께 켜고 끈다
+    @Published var scriptInbox = ScriptInbox()
+    @Published var scriptInboxEnabled = false             // r.sock 수신 여부 (이번 실행)
+    @Published var agentDraft = ScriptDraft()
+    /// 고급: 단축키(⌃⌥⌘E)·Services ‘코드 해설’이 앱 내 LLM 해설 생성을 시작해도 되는지.
+    /// 기본 꺼짐 — 꺼져 있으면 선택한 코드만 고급 패널에 옮기고 아무것도 생성하지 않는다.
+    @Published var inAppExplainShortcuts = false
+    /// 해설 탭이 지금 고급(앱 내 생성) 패널을 보이는지. 저장하지 않는다 — 실행할 때마다
+    /// 기본 화면으로 열려 모델 목록 조회가 일어나지 않는다.
+    @Published var explainAdvancedVisible = false
+    var onRequestPromptGrant: ((AgentPromptKind) -> Void)?
+    var onRevokePromptGrant: (() -> Void)?
+    var onToggleScriptInbox: (() -> Void)?
+
     /// Set by AppDelegate: bring the management window forward so a review-only
     /// 해설 (explainAutoPlay == false) is visible to read/check before playing.
     var onRequestReview: (() -> Void)?
@@ -1487,6 +1504,7 @@ final class AppState: ObservableObject {
             "scriptReasoningLevel": scriptReasoningLevel.rawValue,
             "visionReasoningLevel": visionReasoningLevel.rawValue,
             "explainAutoPlay": explainAutoPlay,
+            "inAppExplainShortcuts": inAppExplainShortcuts,
             "stability": voiceSettings.stability, "similarity": voiceSettings.similarityBoost,
             "style": voiceSettings.style, "speakerBoost": voiceSettings.useSpeakerBoost,
             // Endpoints are the single source of truth for LLM providers (the old
@@ -1515,6 +1533,10 @@ final class AppState: ObservableObject {
         }
         if explainPrompt != CodeExplanation.defaultInstruction {
             dict["explainPrompt"] = explainPrompt
+        }
+        // 에이전트 지시문도 고친 경우에만 저장 — 기본 양식 갱신이 그대로 적용된다.
+        for kind in AgentPromptKind.allCases where agentPrompts.isCustomized(kind) {
+            dict["agentPrompt." + kind.rawValue] = agentPrompts[kind]
         }
         if let d = try? JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted]) {
             try? d.write(to: settingsURL)
@@ -1555,6 +1577,10 @@ final class AppState: ObservableObject {
         explainPrompt = o["explainPrompt"] as? String ?? explainPrompt
         explainTemperature = o["explainTemperature"] as? Double ?? explainTemperature
         explainAutoPlay = o["explainAutoPlay"] as? Bool ?? explainAutoPlay
+        inAppExplainShortcuts = o["inAppExplainShortcuts"] as? Bool ?? false
+        for kind in AgentPromptKind.allCases {
+            if let saved = o["agentPrompt." + kind.rawValue] as? String { agentPrompts[kind] = saved }
+        }
         scriptTemperature = o["scriptTemperature"] as? Double ?? scriptTemperature
         explainReasoningLevel = ReasoningLevel(rawValue: o["explainReasoningLevel"] as? String ?? "") ?? explainReasoningLevel
         scriptReasoningLevel = ReasoningLevel(rawValue: o["scriptReasoningLevel"] as? String ?? "") ?? scriptReasoningLevel

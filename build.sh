@@ -128,6 +128,9 @@ case "${1:-install}" in
     swiftc -O "$HERE/Sources/Core/ElevenModelCatalog.swift" "$HERE/Tests/ElevenModelCatalogTests.swift" \
       -o "$BUILD_DIR/model-tests"
     "$BUILD_DIR/model-tests"
+    swiftc -O "$HERE/Sources/Core/ExplainHandoff.swift" "$HERE/Tests/ExplainHandoffTests.swift" \
+      -o "$BUILD_DIR/explain-handoff-tests"
+    "$BUILD_DIR/explain-handoff-tests"
     swiftc -O "$HERE/Sources/Core/Logging.swift" "$HERE/Sources/Core/MemoryDiagnostics.swift" \
       "$HERE/Tests/MemoryDiagnosticsTests.swift" -o "$BUILD_DIR/memory-tests"
     "$BUILD_DIR/memory-tests"

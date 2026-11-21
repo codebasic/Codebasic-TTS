@@ -19,6 +19,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var localInstructionSocket: LocalInstructionSocket?
     private var localInstructionMenu: NSMenuItem?
     private var localInstructionExpiry: DispatchWorkItem?
+    private var localInstructionProfile: LocalInstructionProfile?
+    private var scriptInboxSocket: LocalScriptInboxSocket?
+    private var scriptInboxMenu: NSMenuItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
@@ -30,6 +33,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Review-only 해설 (auto-play off): surface the window so it can be checked.
         appState.onRequestReview = { [weak self] in self?.mainWindow.show() }
+        wireAgentHandoff()
         if appState.keyPresent { appState.refreshVoices() }
         mainWindow.show()                       // open the management window on launch
 
@@ -59,9 +63,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         localSpeechGate = gate; localSpeechSocket = socket; localSpeechMenu?.state = .on
     }
 
+    // MARK: - Agent script inbox (submit_script) opt-in
+
+    /// Third, separate consent: receiving scripts enables neither playback nor instruction reads.
+    @objc private func toggleScriptInbox() {
+        if let socket = scriptInboxSocket {
+            socket.stop(); scriptInboxSocket = nil
+            scriptInboxMenu?.state = .off; appState.scriptInboxEnabled = false
+            return
+        }
+        let box = WeakSocket()
+        let socket = LocalScriptInboxSocket { [weak self, box] submission in
+            guard let self, let live = box.socket, self.scriptInboxSocket === live else { return "disabled" }
+            return self.appState.receiveAgentScript(displayText: submission.displayText,
+                                                    speechText: submission.speechText, key: submission.key)
+        }
+        box.socket = socket
+        guard socket.start() else {
+            let alert = NSAlert()
+            alert.messageText = "로컬 MCP 대본 받기를 시작할 수 없습니다"
+            alert.informativeText = "소켓 경로가 이미 있거나 안전하지 않습니다. 기존 실행과 경로를 확인하세요."
+            alert.runModal()
+            return
+        }
+        scriptInboxSocket = socket
+        scriptInboxMenu?.state = .on; appState.scriptInboxEnabled = true
+    }
+
+    private final class WeakSocket { weak var socket: LocalScriptInboxSocket? }
+
+    private func wireAgentHandoff() {
+        appState.onToggleScriptInbox = { [weak self] in self?.toggleScriptInbox() }
+        appState.onRevokePromptGrant = { [weak self] in self?.revokeLocalInstructions() }
+        appState.onRequestPromptGrant = { [weak self] kind in
+            guard let self else { return }
+            self.revokeLocalInstructions()
+            self.beginInstructionShare(preselect: kind == .full ? .explain : .continue)
+        }
+    }
+
     // Separate consent: enabling speech must never publish instructions.
     @objc private func toggleLocalInstructions() {
         if localInstructionSocket != nil { revokeLocalInstructions(); return }
+        beginInstructionShare(preselect: nil)
+    }
+
+    private func beginInstructionShare(preselect: LocalInstructionProfile.Name?) {
         let selection = NSAlert()
         selection.messageText = "로컬 MCP 지시 공유 (이번 실행)"
         selection.informativeText = "연결하려는 지시 도우미의 PID와 공유할 프로필 한 개를 지정하세요. 자동 공유되지 않습니다."
@@ -70,7 +117,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let pidField = NSTextField(frame: NSRect(x: 0, y: 33, width: 390, height: 24))
         pidField.placeholderString = "지시 도우미 PID"
         let picker = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 390, height: 26))
-        picker.addItems(withTitles: ["해설", "이어서 해설", "음성 대본 정규화 (사전·힌트 제외)"])
+        picker.addItems(withTitles: ["에이전트 지시문: 전체 해설", "에이전트 지시문: 변경분만", "음성 대본 정규화 (사전·힌트 제외)"])
+        if let preselect, let index = LocalInstructionProfile.Name.allCases.firstIndex(of: preselect) {
+            picker.selectItem(at: index)
+        }
         let fields = NSView(frame: NSRect(x: 0, y: 0, width: 390, height: 60))
         fields.addSubview(pidField); fields.addSubview(picker)
         selection.accessoryView = fields
@@ -104,7 +154,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         localInstructionSocket = socket
+        localInstructionProfile = profile
         localInstructionMenu?.state = .on
+        // The tab shows only "reading is allowed" for this exact wording; never sent/generating.
+        if let kind = agentPromptKind(profile.name) {
+            appState.promptGrant = PromptGrant(kind: kind, text: profile.text, peerPID: pid,
+                                               expires: Date().addingTimeInterval(600))
+        }
         let expiry = DispatchWorkItem { [weak self, weak socket] in
             guard let self, let socket, self.localInstructionSocket === socket else { return }
             self.revokeLocalInstructions()
@@ -116,14 +172,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func instructionSnapshot(_ name: LocalInstructionProfile.Name) -> LocalInstructionProfile? {
         let text: String
         switch name {
+        // The agent prompts: the SAME final wording the tab previews and copies.
         case .explain:
-            text = CodeExplanation.effectiveInstruction(appState.explainPrompt)
+            text = appState.agentPromptFinalText(.full)
         case .continue:
-            text = CodeExplanation.effectiveInstruction(appState.explainPrompt) + "\n\n" + CodeExplanation.continueInstruction
+            text = appState.agentPromptFinalText(.delta)
         case .normalize:
             text = appState.normalizePrompt.isEmpty ? TextNormalizer.defaultInstruction : appState.normalizePrompt
         }
         return LocalInstructionProfile(name: name, text: text)
+    }
+
+    private func agentPromptKind(_ name: LocalInstructionProfile.Name) -> AgentPromptKind? {
+        switch name {
+        case .explain: return .full
+        case .continue: return .delta
+        case .normalize: return nil
+        }
     }
 
     private func showInstructionShareError(_ reason: String) {
@@ -136,11 +201,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func revokeLocalInstructions() {
         localInstructionExpiry?.cancel(); localInstructionExpiry = nil
         localInstructionSocket?.stop(); localInstructionSocket = nil
+        localInstructionProfile = nil
         localInstructionMenu?.state = .off
+        if appState.promptGrant != nil { appState.promptGrant = nil }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         localSpeechSocket?.stop()
+        scriptInboxSocket?.stop()
         revokeLocalInstructions()
     }
 
@@ -161,9 +229,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Playback overlay
 
     private func observeState() {
-        appState.$explainPrompt.dropFirst()
-            .removeDuplicates(by: { $0.utf8.elementsEqual($1.utf8) })
-            .sink { [weak self] _ in self?.revokeLocalInstructions() }.store(in: &cancellables)
+        // An approved agent prompt is one exact wording. Any byte-level change (even one later
+        // undone) ends the approval. The in-app explainPrompt is no longer shared over MCP.
+        appState.$agentPrompts.dropFirst()
+            .sink { [weak self] prompts in
+                guard let self, let active = self.localInstructionProfile,
+                      let kind = self.agentPromptKind(active.name),
+                      !prompts.finalText(kind).utf8.elementsEqual(active.text.utf8) else { return }
+                self.revokeLocalInstructions()
+            }.store(in: &cancellables)
         appState.$normalizePrompt.dropFirst()
             .removeDuplicates(by: { $0.utf8.elementsEqual($1.utf8) })
             .sink { [weak self] _ in self?.revokeLocalInstructions() }.store(in: &cancellables)
@@ -192,10 +266,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.appState.captureHUDTarget()   // before the async grab: mouse is still on the target screen
             SelectionGrabber.grab { text in
                 guard let self, let text else { return }
-                MainActor.assumeIsolated {
-                    self.appState.selectedTab = 1
-                    self.appState.explainAndSpeak(text)
-                }
+                MainActor.assumeIsolated { self.handleCodeText(text, captureTarget: false) }
             }
         }
         hotKeys.register(id: 2, keyCode: kVK_ANSI_R, modifiers: mods) { [weak self] in
@@ -213,7 +284,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// clipboard is attached as a screenshot; otherwise (and for text) the paste
     /// is forwarded to the first responder for normal handling.
     @objc func handlePaste(_ sender: Any?) {
-        if appState.selectedTab == 1 {
+        if appState.selectedTab == 1 && appState.explainAdvancedVisible {
             let pb = NSPasteboard.general
             let hasImage = (pb.readObjects(forClasses: [NSImage.self], options: nil) as? [NSImage])?
                 .contains { !$0.size.equalTo(.zero) } ?? false
@@ -244,12 +315,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Called by ServiceProvider when the user picks "코드 해설": explain the
     /// selected code via the LLM, then speak the commentary (코드 → 해설 → 대본 →
     /// 음성). Surfaces the 해설 tab so the result is visible.
-    func handleCodeText(_ code: String) {
+    /// In-app generation is an advanced opt-in: unless the user enabled it, this only
+    /// parks the selection in the 고급 panel and shows the window — no model call.
+    func handleCodeText(_ code: String, captureTarget: Bool = true) {
         let preview = code.replacingOccurrences(of: "\n", with: " ").prefix(60)
         Log.app.info("handleCodeText: \(code.count) chars — \"\(preview, privacy: .public)\"")
-        appState.captureHUDTarget()
+        if captureTarget { appState.captureHUDTarget() }
         appState.selectedTab = 1        // 해설 탭 (2번째)
-        appState.explainAndSpeak(code)
+        if appState.externalExplainRequest(code) {
+            appState.explainAdvancedVisible = true
+        } else {
+            mainWindow.show()
+        }
     }
 
     // MARK: - Main menu (regular app needs one for ⌘Q and text-editing shortcuts)
@@ -272,6 +349,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                            action: #selector(toggleLocalInstructions), keyEquivalent: "")
         instructions.target = self
         localInstructionMenu = instructions
+        let inbox = appMenu.addItem(withTitle: "로컬 MCP 대본 받기 (이번 실행)",
+                                    action: #selector(toggleScriptInbox), keyEquivalent: "")
+        inbox.target = self
+        scriptInboxMenu = inbox
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Codebasic TTS 가리기", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         appMenu.addItem(withTitle: "다른 항목 가리기",

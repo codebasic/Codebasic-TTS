@@ -269,6 +269,8 @@ struct SettingsView: View {
             Section("선택한 텍스트") {
                 LabeledContent("읽어주기", value: "⌃⌥⌘R")
                 LabeledContent("코드 해설", value: "⌃⌥⌘E")
+                Text("코드 해설 단축키·서비스는 해설 탭 ‘고급’에서 허용한 경우에만 앱 내 생성을 시작합니다. 기본은 선택한 코드를 옮겨 두기만 합니다.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             Section("손쉬운 사용 권한") {
                 Label(hasPermission ? "허용됨" : "권한이 필요합니다", systemImage: hasPermission ? "checkmark.circle" : "exclamationmark.circle")
