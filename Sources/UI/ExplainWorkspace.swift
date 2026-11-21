@@ -26,7 +26,7 @@ struct ExplainWorkspace: View {
                 HStack {
                     Button { showAdvanced = false } label: { Label("외부 에이전트 작업 공간", systemImage: "chevron.left") }
                     Spacer()
-                    Text("고급 · 앱에서 직접 생성").foregroundStyle(.secondary)
+                    Text("고급 · 앱에서 직접 해설 생성").foregroundStyle(.secondary)
                 }
                 .padding([.top, .horizontal])
                 CommentaryView()
@@ -43,7 +43,7 @@ struct ExplainWorkspace: View {
                         Text("외부 에이전트가 대본을 만들고, 여기서는 편집하고 읽습니다.")
                             .font(.caption).foregroundStyle(.secondary)
                         Spacer(minLength: 8)
-                        Button("고급: 앱에서 직접 생성…") { showAdvanced = true }
+                        Button("고급: 앱에서 직접 해설 생성…") { showAdvanced = true }
                             .controlSize(.small)
                             .help("이 기능은 외부 대본 작업 공간과 분리됩니다. 생성 버튼을 누르면 선택한 AI 서비스가 사용됩니다.")
                     }
@@ -78,9 +78,9 @@ struct ExplainWorkspace: View {
     private var instruction: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                Text("해설 지시문").font(.headline)
+                Text("에이전트 지시문").font(.headline)
                 Spacer()
-                Picker("해설 프로필", selection: $profile) {
+                Picker("지시문 프로필", selection: $profile) {
                     Text("전체 해설").tag(LocalInstructionProfile.Name.explain)
                     Text("변경분만").tag(LocalInstructionProfile.Name.continue)
                 }
@@ -88,10 +88,10 @@ struct ExplainWorkspace: View {
             }
             Text(profile == .continue
                  ? "기본 지시문에 변경된 부분만 해설하는 규칙을 더합니다. 이전 코드나 해설은 공유하지 않습니다."
-                 : "기본 지시문과 공통 출력 규칙을 외부 에이전트가 읽습니다. 앱에서 해설을 생성하지 않습니다.")
+                 : "기본 코드 해설 프로필입니다. 대본은 외부 에이전트가 작성하고, 이 앱에서는 편집·재생만 합니다.")
                 .font(.caption).foregroundStyle(.secondary)
             HStack {
-                Button("기본 지시 편집…") { showInstructionEditor = true }
+                Button("기본 해설 지시 편집…") { showInstructionEditor = true }
                 Button(showExactPreview ? "미리 보기 닫기" : "정확한 지시 미리 보기") { showExactPreview.toggle() }
                     .disabled(selectedSnapshot == nil)
                 Button(copiedRevision == selectedSnapshot?.revision && selectedSnapshot != nil ? "복사됨" : "지시 복사") {

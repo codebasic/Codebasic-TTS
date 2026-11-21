@@ -33,7 +33,7 @@ struct SettingsView: View {
             case .services: return "해설과 대본에 사용할 AI 서비스를 관리합니다."
             case .script: return "숫자와 코드도 자연스럽게 읽도록 다듬습니다."
             case .playback: return "재생 자막과 음성 캐시를 설정합니다."
-            case .shortcuts: return "어느 앱에서든 선택한 텍스트를 읽거나 해설합니다."
+            case .shortcuts: return "어느 앱에서든 선택한 텍스트를 읽습니다."
             }
         }
     }
@@ -209,7 +209,7 @@ struct SettingsView: View {
                 }
             }
             if app.endpoints.isEmpty {
-                Text("서비스를 추가하면 TTS·해설 화면에서 모델을 선택할 수 있습니다.").foregroundStyle(.secondary)
+                Text("서비스를 추가하면 TTS 및 앱 내 고급 해설에서 모델을 선택할 수 있습니다.").foregroundStyle(.secondary)
             }
             ForEach(app.endpoints) { endpoint in
                 HStack(spacing: 12) {
@@ -249,7 +249,7 @@ struct SettingsView: View {
         Group {
             Section("재생 자막") {
                 Toggle("읽어주기 자막 표시", isOn: saved(\.subtitleTTS))
-                Toggle("해설 자막 표시", isOn: saved(\.subtitleExplain))
+                Toggle("에이전트·해설 자막 표시", isOn: saved(\.subtitleExplain))
             }
             Section("음성 캐시") {
                 Toggle("같은 텍스트는 저장된 음성으로 재생", isOn: saved(\.useCache))
