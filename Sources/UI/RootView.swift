@@ -24,7 +24,15 @@ struct RootView: View {
     var body: some View {
         TabView(selection: tabSelection) {
             GenerateView().tabItem { Label("TTS", systemImage: "waveform") }.tag(0)
-            ExplainWorkspace(drafts: app.explanationDrafts).tabItem { Label("에이전트", systemImage: "person.crop.circle") }.tag(1)
+            Group {
+                // AppDelegate.shared is assigned before the main window (and this view) is created.
+                if let agent = AppDelegate.shared?.agentWorkspace {
+                    ExplainWorkspace(agent: agent)
+                } else {
+                    Text("에이전트 작업 공간을 시작할 수 없습니다.").foregroundStyle(.secondary)
+                }
+            }
+            .tabItem { Label("에이전트", systemImage: "person.crop.circle") }.tag(1)
             HistoryView().tabItem { Label("히스토리", systemImage: "clock.arrow.circlepath") }.tag(2)
             BacklogView().tabItem { Label("백로그", systemImage: "flag") }.tag(3)
             SettingsView().tabItem { Label("설정", systemImage: "slider.horizontal.3") }.tag(4)

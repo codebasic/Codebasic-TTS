@@ -33,8 +33,17 @@ build() {
     -o "$MACOS_DIR/$APP_NAME" \
     $(find "$HERE/Sources" -name '*.swift') \
     -framework AppKit -framework SwiftUI -framework AVFoundation \
-    -framework Carbon -framework ApplicationServices \
+    -framework Carbon -framework ApplicationServices -framework Security \
     -lsqlite3
+
+  echo "==> Compiling agent bridge helper"
+  BRIDGE="$MACOS_DIR/codebasic-tts-agent-bridge"
+  # shellcheck disable=SC2046
+  swiftc -O \
+    -o "$BRIDGE" \
+    $(find "$HERE/Integrations/AgentBridge" -name '*.swift') \
+    "$HERE/Sources/App/AgentPeerSignature.swift" \
+    -framework Security
 
   cp "$HERE/Resources/Info.plist" "$APP_DIR/Contents/Info.plist"
   [ -f "$HERE/Resources/AppIcon.icns" ] && cp "$HERE/Resources/AppIcon.icns" "$RES_DIR/AppIcon.icns"
@@ -51,10 +60,18 @@ build() {
   SIGN_ID="${CODESIGN_IDENTITY:-Codebasic TTS Local}"
   if security find-identity -p codesigning 2>/dev/null | grep -qF "$SIGN_ID"; then
     echo "==> Code signing with stable identity: $SIGN_ID"
-    codesign --force --deep --sign "$SIGN_ID" "$APP_DIR" >/dev/null 2>&1 || \
+    # Helper first, with its fixed identifier and hardened runtime. The app is then signed without
+    # --deep so the helper keeps that identifier; the app seal still covers the signed helper.
+    codesign --force --options runtime --identifier com.codebasic.tts.agent-bridge \
+      --sign "$SIGN_ID" "$BRIDGE" >/dev/null 2>&1 || \
+      echo "    (agent bridge codesign with '$SIGN_ID' failed: Agent pairing stays unavailable)"
+    codesign --force --sign "$SIGN_ID" "$APP_DIR" >/dev/null 2>&1 || \
       echo "    (codesign with '$SIGN_ID' failed)"
   else
     echo "==> Ad-hoc code signing  (no '$SIGN_ID' identity → Accessibility grant resets each rebuild)"
+    # Ad-hoc build: the bridge has no certificate, so the app refuses Agent pairing (manual paste only).
+    codesign --force --identifier com.codebasic.tts.agent-bridge --sign - "$BRIDGE" >/dev/null 2>&1 || \
+      echo "    (agent bridge ad-hoc codesign skipped/failed)"
     codesign --force --sign - "$APP_DIR" >/dev/null 2>&1 || \
       echo "    (codesign skipped/failed — fine for local runs)"
   fi
@@ -144,6 +161,29 @@ case "${1:-install}" in
       "$HERE/Sources/Core/Logging.swift" "$HERE/Sources/Core/MemoryDiagnostics.swift" "$HERE/Tests/ExplanationStyleTests.swift" \
       -framework AppKit -o "$BUILD_DIR/explanation-style-tests"
     "$BUILD_DIR/explanation-style-tests"
+    swiftc -O "$HERE/Sources/Core/AgentInstructionCatalog.swift" "$HERE/Sources/Core/AgentSessionAuthorization.swift" \
+      "$HERE/Sources/Core/ExplanationDraftWorkspace.swift" "$HERE/Sources/Core/ExplanationConversation.swift" \
+      "$HERE/Sources/Core/Logging.swift" "$HERE/Sources/Core/MemoryDiagnostics.swift" \
+      "$HERE/Sources/App/CodexPlan.swift" "$HERE/Sources/App/AntigravityPlan.swift" "$HERE/Sources/App/Secrets.swift" \
+      "$HERE/Sources/TTS/TextNormalizer.swift" "$HERE/Tests/AgentCatalogCoreTests.swift" \
+      -framework AppKit -o "$BUILD_DIR/agent-catalog-core-tests"
+    "$BUILD_DIR/agent-catalog-core-tests"
+    # Fresh bridge build in the test directory. It is only probed offline over stdio with no
+    # configuration, so it cannot reach an app, a socket or any service.
+    # shellcheck disable=SC2046
+    swiftc -O $(find "$HERE/Integrations/AgentBridge" -name '*.swift') "$HERE/Sources/App/AgentPeerSignature.swift" \
+      -framework Security -o "$BUILD_DIR/codebasic-tts-agent-bridge"
+    BRIDGE_PROBE="$(printf '%s\n' \
+      '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"build-test","version":"0"}}}' \
+      '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+      '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+      | env -u CODEBASIC_TTS_APP_BUNDLE_ID -u CODEBASIC_TTS_SIGNER_SHA1 "$BUILD_DIR/codebasic-tts-agent-bridge" || true)"
+    printf '%s' "$BRIDGE_PROBE" | grep -q 'get_tts_instructions'
+    # Protocol tests against the same fresh binary: synthetic only, no pin, no provider, no install.
+    AGENT_BRIDGE_ABS="$(cd "$BUILD_DIR" && pwd)/codebasic-tts-agent-bridge"
+    env -u CODEBASIC_TTS_APP_BUNDLE_ID -u CODEBASIC_TTS_SIGNER_SHA1 AGENT_BRIDGE_BIN="$AGENT_BRIDGE_ABS" \
+      python3 "$HERE/Tests/test_agent_bridge_protocol.py"
+    echo "agent bridge offline probe and protocol tests passed"
     ;;
   clean) rm -rf "$BUILD_DIR"; echo "cleaned" ;;
   install|"") build; install_and_register ;;

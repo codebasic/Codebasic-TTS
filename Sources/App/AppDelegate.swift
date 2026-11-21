@@ -16,12 +16,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var localSpeechSocket: LocalSpeechSocket?
     private var localSpeechGate: LocalSpeechGate?
     private var localSpeechMenu: NSMenuItem?
-    private var localInstructionSocket: LocalInstructionSocket?
-    private var localInstructionMenu: NSMenuItem?
-    private var localInstructionExpiry: DispatchWorkItem?
-    private var draftReceiptSocket: LocalExplanationDraftSocket?
-    private var draftReceiptExpiry: DispatchWorkItem?
-    private var draftReceiptMenu: NSMenuItem?
+    private var agentWorkspaceStorage: AgentWorkspaceController?
+
+    /// Created on first use (the Agent tab). Owns the instruction catalog, pairing and both leases.
+    var agentWorkspace: AgentWorkspaceController {
+        if let existing = agentWorkspaceStorage { return existing }
+        let created = AgentWorkspaceController(app: appState)
+        agentWorkspaceStorage = created
+        return created
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
@@ -61,133 +64,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         localSpeechGate = gate; localSpeechSocket = socket; localSpeechMenu?.state = .on
     }
 
-    // Separate consent: enabling speech must never publish instructions.
-    @objc private func toggleLocalInstructions() { toggleInstructionSharing() }
-
-    func toggleInstructionSharing(preselect: LocalInstructionProfile.Name? = nil) {
-        if localInstructionSocket != nil { revokeLocalInstructions(); return }
-        let selection = NSAlert()
-        selection.messageText = "로컬 MCP 지시 공유 (이번 실행)"
-        selection.informativeText = "연결하려는 지시 도우미의 PID와 공유할 프로필 한 개를 지정하세요. 자동 공유되지 않습니다."
-        selection.addButton(withTitle: "미리 보기")
-        selection.addButton(withTitle: "취소")
-        let pidField = NSTextField(frame: NSRect(x: 0, y: 33, width: 390, height: 24))
-        pidField.placeholderString = "지시 도우미 PID"
-        let picker = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 390, height: 26))
-        picker.addItems(withTitles: ["해설", "이어서 해설", "음성 대본 정규화 (사전·힌트 제외)"])
-        if let preselect, let index = LocalInstructionProfile.Name.allCases.firstIndex(of: preselect) {
-            picker.selectItem(at: index)
-            picker.isEnabled = false
-        }
-        let fields = NSView(frame: NSRect(x: 0, y: 0, width: 390, height: 60))
-        fields.addSubview(pidField); fields.addSubview(picker)
-        selection.accessoryView = fields
-        guard selection.runModal() == .alertFirstButtonReturn else { return }
-        let names = LocalInstructionProfile.Name.allCases
-        guard let pid = Int32(pidField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)),
-              let peer = LocalInstructionPeer.current(pid: pid), names.indices.contains(picker.indexOfSelectedItem),
-              let profile = appState.instructionSnapshot(names[picker.indexOfSelectedItem]) else {
-            showInstructionShareError("같은 계정에서 계속 실행 중인 도우미의 PID와 공유할 수 있는 길이의 지시가 필요합니다.")
-            return
-        }
-        let approval = NSAlert()
-        approval.messageText = "PID \(pid)에 아래 지시를 공유할까요?"
-        approval.informativeText = "최대 10분, 이 프로필만 읽습니다. 원격 모델을 사용하는 에이전트는 지시를 해당 서비스로 보낼 수 있습니다. 비밀이나 외부 공개할 수 없는 내용이 있으면 취소하세요."
-        approval.addButton(withTitle: "이 프로필만 공유")
-        approval.addButton(withTitle: "취소")
-        let scroll = NSTextView.scrollableTextView()
-        scroll.frame = NSRect(x: 0, y: 0, width: 430, height: 214)
-        guard let preview = scroll.documentView as? NSTextView else { return }
-        preview.isRichText = false
-        preview.string = profile.text; preview.isEditable = false; preview.isSelectable = true
-        approval.accessoryView = scroll
-        guard approval.runModal() == .alertFirstButtonReturn, localInstructionSocket == nil else { return }
-        guard appState.instructionSnapshot(profile.name)?.revision == profile.revision else {
-            showInstructionShareError("미리 보는 동안 지시가 바뀌었습니다. 새 내용을 확인한 뒤 다시 공유하세요.")
-            return
-        }
-        let socket = LocalInstructionSocket(peer: peer, profile: profile)
-        guard socket.start() else {
-            showInstructionShareError("도우미가 종료됐거나 이전 소켓 경로가 남아 있습니다. 새 도우미와 소켓 상태를 확인하세요.")
-            return
-        }
-        localInstructionSocket = socket
-        appState.sharedInstructionProfile = profile.name
-        localInstructionMenu?.state = .on
-        let expiry = DispatchWorkItem { [weak self, weak socket] in
-            guard let self, let socket, self.localInstructionSocket === socket else { return }
-            self.revokeLocalInstructions()
-        }
-        localInstructionExpiry = expiry
-        DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(600), execute: expiry)
-    }
-
-    private func showInstructionShareError(_ reason: String) {
-        let alert = NSAlert()
-        alert.messageText = "로컬 MCP 지시를 공유하지 않았습니다"
-        alert.informativeText = reason
-        alert.runModal()
-    }
-
-    private func revokeLocalInstructions() {
-        localInstructionExpiry?.cancel(); localInstructionExpiry = nil
-        localInstructionSocket?.stop(); localInstructionSocket = nil
-        appState.sharedInstructionProfile = nil
-        localInstructionMenu?.state = .off
-    }
-
-    @objc func toggleDraftReceipt() {
-        if draftReceiptSocket != nil { revokeDraftReceipt(); return }
-        let alert = NSAlert()
-        alert.messageText = "외부 에이전트 대본 받기"
-        alert.informativeText = "지정한 도우미의 대본만 최대 10분 동안 임시 보관함에 받습니다. 화면을 덮어쓰거나 재생하지 않으며, 지시문 조회도 허용하지 않습니다."
-        alert.addButton(withTitle: "이 도우미만 허용")
-        alert.addButton(withTitle: "취소")
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
-        field.placeholderString = "대본 도우미 PID"
-        alert.accessoryView = field
-        guard alert.runModal() == .alertFirstButtonReturn, draftReceiptSocket == nil else { return }
-        guard let pid = Int32(field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)),
-              let peer = LocalInstructionPeer.current(pid: pid) else {
-            showDraftReceiptError("같은 Mac 계정에서 현재 실행 중인 대본 도우미 PID가 필요합니다.")
-            return
-        }
-
-        let workspace = appState.explanationDrafts
-        let socket = LocalExplanationDraftSocket(peer: peer) { draft in workspace.receive(draft) }
-        guard socket.start() else {
-            showDraftReceiptError("도우미가 종료됐거나 대본 소켓 경로가 이미 사용 중입니다.")
-            return
-        }
-        draftReceiptSocket = socket
-        workspace.setReceiver(pid)
-        draftReceiptMenu?.state = .on
-        let expiry = DispatchWorkItem { [weak self, weak socket] in
-            guard let self, let socket, self.draftReceiptSocket === socket else { return }
-            self.revokeDraftReceipt()
-        }
-        draftReceiptExpiry = expiry
-        DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(600), execute: expiry)
-    }
-
-    private func showDraftReceiptError(_ message: String) {
-        let alert = NSAlert()
-        alert.messageText = "대본 받기를 허용하지 않았습니다"
-        alert.informativeText = message
-        alert.runModal()
-    }
-
-    private func revokeDraftReceipt() {
-        draftReceiptExpiry?.cancel(); draftReceiptExpiry = nil
-        draftReceiptSocket?.stop(); draftReceiptSocket = nil
-        appState.explanationDrafts.setReceiver(nil)
-        draftReceiptMenu?.state = .off
-    }
+    // Instruction reads (ai.sock) and draft receipt (ad.sock) are owned by AgentWorkspaceController.
+    // The legacy i.sock / d.sock endpoints are never started by the app.
 
     func applicationWillTerminate(_ notification: Notification) {
         localSpeechSocket?.stop()
-        revokeLocalInstructions()
-        revokeDraftReceipt()
+        agentWorkspaceStorage?.shutdown()
     }
 
     @objc private func openWindow() { mainWindow.show() }
@@ -207,12 +89,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Playback overlay
 
     private func observeState() {
-        appState.$explainPrompt.dropFirst()
-            .removeDuplicates(by: { $0.utf8.elementsEqual($1.utf8) })
-            .sink { [weak self] _ in self?.revokeLocalInstructions() }.store(in: &cancellables)
-        appState.$normalizePrompt.dropFirst()
-            .removeDuplicates(by: { $0.utf8.elementsEqual($1.utf8) })
-            .sink { [weak self] _ in self?.revokeLocalInstructions() }.store(in: &cancellables)
         appState.$phase
             .receive(on: RunLoop.main)
             .sink { [weak self] phase in
@@ -275,14 +151,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                     action: #selector(toggleLocalSpeech), keyEquivalent: "")
         local.target = self
         localSpeechMenu = local
-        let instructions = appMenu.addItem(withTitle: "로컬 MCP 지시 공유 (이번 실행)…",
-                                           action: #selector(toggleLocalInstructions), keyEquivalent: "")
-        instructions.target = self
-        localInstructionMenu = instructions
-        let draftReceipt = appMenu.addItem(withTitle: "외부 대본 받기 허용 (이번 실행)…",
-                                           action: #selector(toggleDraftReceipt), keyEquivalent: "")
-        draftReceipt.target = self
-        draftReceiptMenu = draftReceipt
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Codebasic TTS 가리기", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         appMenu.addItem(withTitle: "다른 항목 가리기",
