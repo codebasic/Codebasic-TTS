@@ -6,7 +6,7 @@ import sys
 
 # Import these repo-local shared protocol functions also in Python -I.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from mcp_speech import KEY, Session, run, send_local
+from mcp_speech import KEY, Session, run
 
 MAX_TEXT_BYTES = 8 * 1024
 MAX_FRAME = 100 * 1024
@@ -33,6 +33,7 @@ TOOL = {
                     "idempotentHint": True, "openWorldHint": False},
 }
 STATUSES = {
+    "upgrade_required": "This draft client has no delivery proof. Use the signed Agent helper or paste the draft manually.",
     "accepted": "Added to the local inbox. Nothing has been applied to the editor or played.",
     "duplicate": "That draft was previously accepted. Nothing new was added or played.",
     "conflict": "That key was already used for a different draft.",
@@ -43,10 +44,6 @@ STATUSES = {
     "unsafe": "The pinned app peer could not be verified. No draft was sent.",
     "unconfirmed": "Receipt could not be verified. Reuse the same key and text if retrying.",
 }
-
-
-def socket_path():
-    return Path("/private/tmp") / ("codebasic-tts-mcp-%d" % os.geteuid()) / "d.sock"
 
 
 def valid_arguments(args):
@@ -72,7 +69,9 @@ def valid_arguments(args):
 
 
 def submit(arguments):
-    return send_local(arguments, socket_path(), max_ipc_frame=MAX_FRAME)
+    # Keep discovery/tool name for existing configurations, but never transmit
+    # unproven text to the versioned production receipt socket.
+    return "upgrade_required"
 
 
 class DraftSession(Session):

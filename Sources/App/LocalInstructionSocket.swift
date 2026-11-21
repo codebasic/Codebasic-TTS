@@ -64,12 +64,14 @@ final class LocalInstructionSocket {
 
     func start() -> Bool { transport.start() }
     func stop() { transport.stop() }
+    var requiresPathInspection: Bool { transport.requiresPathInspection }
 }
 
 /// Private Unix transport for one explicitly approved live process. Endpoint
 /// instances have disjoint paths, handlers, and leases.
 final class LocalApprovedSocket {
     static var defaultDirectory: String { "/private/tmp/codebasic-tts-mcp-\(getuid())" }
+    static let unknownPathMessage = "기존 소켓의 출처를 확인할 수 없어 그대로 두었습니다. 이전 앱을 종료하고 다시 시도하거나 복사·붙여넣기를 사용하세요."
     private let directory: String
     private let endpoint: String
     private var path: String { directory + "/" + endpoint }
@@ -77,19 +79,30 @@ final class LocalApprovedSocket {
     private let lock = NSLock()
     private let approvedPeer: LocalInstructionPeer
     private let maxFrame: Int
+    private let verified: (Int32) -> Bool
+    private let didDeliver: (Data) -> Void
+    private let deliveryGate: (@escaping () -> Void) -> Void
     private let expires: DispatchTime
     private let handle: (Data, @escaping () -> Bool) -> Data?
     private var source: DispatchSourceRead?
-    private var inode: ino_t = 0
+    private var pathLease: SocketPathLease?
+    private var identity: String?
     private var revoked = false
+    private(set) var requiresPathInspection = false
 
     init(peer: LocalInstructionPeer, endpoint: String, directory: String,
          lifetime: DispatchTimeInterval, maxFrame: Int,
+         verified: @escaping (Int32) -> Bool = { _ in true },
+         deliveryGate: @escaping (@escaping () -> Void) -> Void = { $0() },
+         didDeliver: @escaping (Data) -> Void = { _ in },
          handle: @escaping (Data, @escaping () -> Bool) -> Data?) {
         approvedPeer = peer
         self.endpoint = endpoint
         self.directory = directory
         self.maxFrame = maxFrame
+        self.verified = verified
+        self.deliveryGate = deliveryGate
+        self.didDeliver = didDeliver
         self.handle = handle
         queue = DispatchQueue(label: "com.codebasic.tts.approved-ipc." + endpoint)
         expires = .now() + lifetime
@@ -97,29 +110,33 @@ final class LocalApprovedSocket {
 
     /// Start/stop are owned by the AppDelegate's main actor. Requests are serialized separately.
     func start() -> Bool {
+        requiresPathInspection = false
         guard source == nil, LocalInstructionPeer.current(pid: approvedPeer.pid) == approvedPeer else { return false }
-        if mkdir(directory, 0o700) != 0 && errno != EEXIST { return false }
-        var st = stat()
-        guard lstat(directory, &st) == 0, (st.st_mode & S_IFMT) == S_IFDIR,
-              st.st_uid == getuid(), (st.st_mode & 0o777) == 0o700,
-              lstat(path, &st) != 0, errno == ENOENT else { return false }
         var addr = sockaddr_un()
         let bytes = Array(path.utf8CString)
-        guard bytes.count <= MemoryLayout.size(ofValue: addr.sun_path) else { return false }
+        guard bytes.count <= MemoryLayout.size(ofValue: addr.sun_path),
+              let pathLease = SocketPathLease(directory: directory, endpoint: endpoint) else { return false }
         addr.sun_family = sa_family_t(AF_UNIX)
         addr.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
         withUnsafeMutableBytes(of: &addr.sun_path) { dst in bytes.withUnsafeBytes { dst.copyBytes(from: $0) } }
+        switch pathLease.prepare(&addr) {
+        case .clear: break
+        case .unmanaged: requiresPathInspection = true; return false
+        case .busyOrUnsafe: return false
+        }
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { return false }
         let bound = withUnsafePointer(to: &addr) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
         }
         guard bound == 0 else { close(fd); return false }
-        guard lstat(path, &st) == 0, (st.st_mode & S_IFMT) == S_IFSOCK, st.st_uid == getuid() else { close(fd); return false }
-        inode = st.st_ino
-        guard chmod(path, 0o600) == 0, listen(fd, 4) == 0, fcntl(fd, F_SETFL, O_NONBLOCK) == 0 else {
-            close(fd); unlinkOwnSocket(); return false
+        guard let identity = pathLease.currentSocket(), pathLease.remember(identity) else { close(fd); return false }
+        guard pathLease.makePrivate(identity),
+              listen(fd, 4) == 0, fcntl(fd, F_SETFL, O_NONBLOCK) == 0 else {
+            close(fd); pathLease.remove(identity); return false
         }
+        self.pathLease = pathLease
+        self.identity = identity
         let listener = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
         listener.setEventHandler { [weak self] in self?.acceptOne(fd) }
         listener.setCancelHandler { close(fd) }
@@ -131,13 +148,9 @@ final class LocalApprovedSocket {
     func stop() {
         lock.lock(); revoked = true; lock.unlock()
         source?.cancel(); source = nil
-        unlinkOwnSocket()
-    }
-
-    private func unlinkOwnSocket() {
-        var st = stat()
-        if inode != 0, lstat(path, &st) == 0, (st.st_mode & S_IFMT) == S_IFSOCK,
-           st.st_uid == getuid(), st.st_ino == inode { unlink(path) }
+        if let identity { pathLease?.remove(identity) }
+        identity = nil
+        pathLease = nil
     }
 
     private func acceptOne(_ listener: Int32) {
@@ -145,21 +158,26 @@ final class LocalApprovedSocket {
         guard fd >= 0 else { return }
         defer { close(fd) }
         var noSigPipe: Int32 = 1
-        guard LocalInstructionPeer.connected(fd) == approvedPeer,
+        guard LocalInstructionPeer.connected(fd) == approvedPeer, verified(fd),
               setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size)) == 0,
               fcntl(fd, F_SETFL, O_NONBLOCK) == 0 else { return }
         let deadline = DispatchTime.now() + .milliseconds(600)
         guard let bytes = readFrame(fd, deadline: deadline),
-              LocalInstructionPeer.connected(fd) == approvedPeer,
+              LocalInstructionPeer.connected(fd) == approvedPeer, verified(fd),
               active(),
               var out = handle(bytes, { [weak self] in self?.active() == true }) else { return }
         out.append(10)
+        deliveryGate { self.sendFrame(out, fd: fd) }
+    }
+
+    private func sendFrame(_ out: Data, fd: Int32) {
         lock.lock()
         defer { lock.unlock() }
         // Keep the lease checked across the write. Stop can wait only for the short send deadline.
-        guard !revoked, DispatchTime.now() < expires, LocalInstructionPeer.connected(fd) == approvedPeer else { return }
+        guard !revoked, DispatchTime.now() < expires, LocalInstructionPeer.connected(fd) == approvedPeer,
+              verified(fd) else { return }
         let sendDeadline = DispatchTime.now() + .milliseconds(100)
-        _ = out.withUnsafeBytes { (view: UnsafeRawBufferPointer) -> Bool in
+        let delivered = out.withUnsafeBytes { (view: UnsafeRawBufferPointer) -> Bool in
             guard let base = view.baseAddress else { return false }
             var sent = 0
             while sent < view.count {
@@ -170,6 +188,7 @@ final class LocalApprovedSocket {
             }
             return true
         }
+        if delivered { didDeliver(out) }
     }
 
     private func active() -> Bool {
@@ -207,5 +226,112 @@ final class LocalApprovedSocket {
         let ms = Int32((deadline.uptimeNanoseconds - now + 999_999) / 1_000_000)
         var target = pollfd(fd: fd, events: event, revents: 0)
         return poll(&target, 1, ms) > 0 && target.revents & event != 0
+    }
+}
+
+/// Keep a kernel-released lock for each socket's entire bound lifetime and
+/// remember its exact identity. Only a known non-listening inode can be
+/// recovered. An unmanaged/ambiguous old path is deliberately left untouched.
+private final class SocketPathLease {
+    enum Readiness { case clear, unmanaged, busyOrUnsafe }
+    private let directory: String
+    private let endpoint: String
+    private let directoryFD: Int32
+    private let leaseFD: Int32
+    private let directoryStat: stat
+    private let leaseStat: stat
+
+    init?(directory: String, endpoint: String) {
+        guard ["i.sock", "d.sock"].contains(endpoint) else { return nil }
+        if mkdir(directory, 0o700) != 0 && errno != EEXIST { return nil }
+        let dir = Darwin.open(directory, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard dir >= 0 else { return nil }
+        var keepDir = false
+        defer { if !keepDir { close(dir) } }
+        var info = stat()
+        guard fstat(dir, &info) == 0, info.st_uid == getuid(), info.st_mode & 0o777 == 0o700 else { return nil }
+        let fd = openat(dir, "." + endpoint + ".lease", O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK, 0o600)
+        guard fd >= 0 else { return nil }
+        var keepFD = false
+        defer { if !keepFD { close(fd) } }
+        var lock = stat()
+        guard fstat(fd, &lock) == 0, (lock.st_mode & S_IFMT) == S_IFREG,
+              lock.st_uid == getuid(), lock.st_nlink == 1, lock.st_mode & 0o777 == 0o600,
+              flock(fd, LOCK_EX | LOCK_NB) == 0 else { return nil }
+        self.directory = directory
+        self.endpoint = endpoint
+        directoryFD = dir
+        leaseFD = fd
+        directoryStat = info
+        leaseStat = lock
+        keepFD = true
+        keepDir = true
+    }
+
+    deinit { close(leaseFD); close(directoryFD) }
+
+    private func namespaceUnchanged() -> Bool {
+        var current = stat()
+        return lstat(directory, &current) == 0 && (current.st_mode & S_IFMT) == S_IFDIR &&
+            current.st_uid == getuid() && current.st_mode & 0o777 == 0o700 &&
+            current.st_dev == directoryStat.st_dev && current.st_ino == directoryStat.st_ino &&
+            fstatat(directoryFD, "." + endpoint + ".lease", &current, AT_SYMLINK_NOFOLLOW) == 0 &&
+            (current.st_mode & S_IFMT) == S_IFREG && current.st_uid == getuid() &&
+            current.st_nlink == 1 && current.st_mode & 0o777 == 0o600 &&
+            current.st_dev == leaseStat.st_dev && current.st_ino == leaseStat.st_ino
+    }
+
+    private func identity(_ st: stat) -> String? {
+        guard (st.st_mode & S_IFMT) == S_IFSOCK, st.st_uid == getuid(), st.st_nlink == 1,
+              st.st_birthtimespec.tv_sec > 0 else { return nil }
+        return "\(st.st_dev):\(st.st_ino):\(st.st_birthtimespec.tv_sec):\(st.st_birthtimespec.tv_nsec)\n"
+    }
+
+    func currentSocket() -> String? {
+        var st = stat()
+        guard namespaceUnchanged(), fstatat(directoryFD, endpoint, &st, AT_SYMLINK_NOFOLLOW) == 0 else { return nil }
+        return identity(st)
+    }
+
+    func remember(_ identity: String) -> Bool {
+        let bytes = Array(identity.utf8)
+        return currentSocket() == identity && bytes.withUnsafeBytes {
+            pwrite(leaseFD, $0.baseAddress, $0.count, 0) == $0.count
+        } && ftruncate(leaseFD, off_t(bytes.count)) == 0 && fsync(leaseFD) == 0
+    }
+
+    func makePrivate(_ expected: String) -> Bool {
+        currentSocket() == expected &&
+            fchmodat(directoryFD, endpoint, 0o600, AT_SYMLINK_NOFOLLOW) == 0 &&
+            currentSocket() == expected
+    }
+
+    func prepare(_ address: inout sockaddr_un) -> Readiness {
+        var st = stat()
+        guard namespaceUnchanged() else { return .busyOrUnsafe }
+        if fstatat(directoryFD, endpoint, &st, AT_SYMLINK_NOFOLLOW) != 0 {
+            return errno == ENOENT ? .clear : .busyOrUnsafe
+        }
+        guard let expected = identity(st) else { return .unmanaged }
+        var marker = [UInt8](repeating: 0, count: 128)
+        let count = marker.withUnsafeMutableBytes { pread(leaseFD, $0.baseAddress, $0.count, 0) }
+        guard count == expected.utf8.count, marker.prefix(count).elementsEqual(expected.utf8) else { return .unmanaged }
+        let probe = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard probe >= 0 else { return .busyOrUnsafe }
+        defer { close(probe) }
+        guard fcntl(probe, F_SETFL, O_NONBLOCK) == 0 else { return .busyOrUnsafe }
+        let result = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                connect(probe, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        // A refusal plus the matching marker and still-held lock is the only stale case.
+        guard result < 0, errno == ECONNREFUSED else { return .busyOrUnsafe }
+        return remove(expected) ? .clear : .busyOrUnsafe
+    }
+
+    @discardableResult
+    func remove(_ expected: String) -> Bool {
+        currentSocket() == expected && unlinkat(directoryFD, endpoint, 0) == 0
     }
 }

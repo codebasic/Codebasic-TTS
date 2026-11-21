@@ -165,6 +165,10 @@ enum PronunciationCase {
         precondition(inbox.open(item.id, replace: true) && inbox.pending.isEmpty)
         precondition(inbox.display == Case.visual && inbox.speech == Case.spoken)
         precondition(inbox.receive(item) == .duplicate && inbox.pending.isEmpty)
+        precondition(inbox.speechNeedsReview && inbox.playback() == nil)
+        app.playExplanationDraft()
+        precondition(app.phase == .idle && Case.log.snapshot().1.count == 3)
+        inbox.confirmSpeech()
         app.playExplanationDraft()
         try await awaitPayload(app, count: 4)
         precondition(app.subtitleText == Case.visual && Case.log.snapshot().1.last == Case.spoken)
@@ -195,7 +199,11 @@ enum PronunciationCase {
         precondition(inbox.receive(ExplanationDraft(id: "overflow", display: "빈 자리", speech: nil)!) == .accepted)
         precondition(inbox.display == edited && inbox.pending.count == ExplanationDraftWorkspace.maxPending)
         inbox.editDisplay(CodeExplanation.noChange)
-        precondition(inbox.playback() == nil && inbox.playback(displayOnly: true) == nil)
+        precondition(inbox.playback() == nil && inbox.playback(displayOnly: true)?.speech == CodeExplanation.noChange)
+        inbox.editDisplay("먼저 <break time=\"1s\" /> 읽습니다")
+        precondition(inbox.playback(displayOnly: true) == nil)
+        app.playExplanationDraft(displayOnly: true)
+        precondition(app.phase == .idle && Case.log.snapshot().1.count == 6)
         print("draft workspace: queued/retried/no overwrite; stale voice blocked; explicit literal playback separates subtitle and speech, no normalizer")
     }
 }

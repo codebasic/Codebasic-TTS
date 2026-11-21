@@ -70,7 +70,7 @@ def stop(proc):
 build = REPO / "build"
 cache = build / "clt-check" / "cache"
 cache.mkdir(parents=True, exist_ok=True)
-with tempfile.TemporaryDirectory(prefix="cbtts-instruction-", dir="/private/tmp") as temp:
+with tempfile.TemporaryDirectory(prefix="i", dir=build) as temp:
     root = Path(temp)
     env = {"PATH":"/usr/bin:/bin", "HOME":str(root)}
     sdk = subprocess.check_output(["/usr/bin/xcrun", "--sdk", "macosx26.5", "--show-sdk-path"], text=True).strip()
@@ -102,7 +102,7 @@ with tempfile.TemporaryDirectory(prefix="cbtts-instruction-", dir="/private/tmp"
     wrong_signer = start_stdio(script, {**env, "CODEBASIC_TTS_SIGNER_SHA1": wrong_pin})
 
     def launch(approved_pid):
-        return subprocess.Popen([str(binary), str(approved_pid), str(root)], env=env, stdin=subprocess.PIPE,
+        return subprocess.Popen([str(binary), str(approved_pid), str(root)], cwd=REPO, env=env, stdin=subprocess.PIPE,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
     server = None

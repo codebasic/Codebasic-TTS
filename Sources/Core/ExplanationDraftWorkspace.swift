@@ -8,8 +8,10 @@ struct ExplanationDraft: Identifiable, Sendable {
     let id: String
     let display: String
     let speech: String?
+    let provenance: AgentDraftOrigin?
+    var displayHash: String { AgentBytes.hash(Data(display.utf8)) }
 
-    init?(id: String, display: String, speech: String?) {
+    init?(id: String, display: String, speech: String?, provenance: AgentDraftOrigin? = nil) {
         guard (1...128).contains(id.utf8.count),
               id.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0)
                   || (97...122).contains($0) || $0 == 45 || $0 == 46 || $0 == 95 }),
@@ -17,6 +19,7 @@ struct ExplanationDraft: Identifiable, Sendable {
         self.id = id
         self.display = display
         self.speech = speech
+        self.provenance = provenance
     }
 
     private static func validText(_ value: String) -> Bool {
@@ -27,7 +30,8 @@ struct ExplanationDraft: Identifiable, Sendable {
     var fingerprint: SHA256.Digest {
         // The separator cannot occur in either field. Missing speech is distinct
         // from every valid (nonblank) supplied speech string.
-        SHA256.hash(data: Data((display + "\0" + (speech ?? "")).utf8))
+        let scope = provenance.map { "\($0.principal.uuidString)\0\($0.selector)\0\($0.revision.uuidString)\0" } ?? ""
+        return SHA256.hash(data: Data((scope + display + "\0" + (speech ?? "")).utf8))
     }
 }
 
@@ -47,6 +51,9 @@ final class ExplanationDraftWorkspace: ObservableObject {
     @Published private(set) var display = ""
     @Published private(set) var speech = ""
     @Published private(set) var speechNeedsReview = false
+    @Published private(set) var provenance: AgentDraftOrigin?
+    private var confirmedDisplayHash: String?
+    private var confirmedSpeechHash: String?
     @Published private(set) var origin: Origin?
     @Published private(set) var hasManualEdits = false
     @Published private(set) var receiverPID: Int32?
@@ -57,11 +64,18 @@ final class ExplanationDraftWorkspace: ObservableObject {
 
     func setReceiver(_ pid: Int32?) { receiverPID = pid }
 
-    func receive(_ draft: ExplanationDraft) -> Receipt {
+    func preflight(_ draft: ExplanationDraft) -> Receipt {
         if let known = recent[draft.id] ?? pending.first(where: { $0.id == draft.id })?.fingerprint {
             return known == draft.fingerprint ? .duplicate : .conflict
         }
-        guard pending.count < Self.maxPending else { return .busy }
+        if draft.provenance != nil && (recent.values.contains(draft.fingerprint)
+            || pending.contains(where: { $0.fingerprint == draft.fingerprint })) { return .duplicate }
+        return pending.count < Self.maxPending ? .accepted : .busy
+    }
+
+    func receive(_ draft: ExplanationDraft) -> Receipt {
+        let preview = preflight(draft)
+        guard preview == .accepted else { return preview }
         recent[draft.id] = draft.fingerprint
         receiptOrder.append(draft.id)
         if receiptOrder.count > Self.maxRecent { recent.removeValue(forKey: receiptOrder.removeFirst()) }
@@ -76,7 +90,10 @@ final class ExplanationDraftWorkspace: ObservableObject {
         let value = pending.remove(at: index)
         display = value.display
         speech = value.speech ?? ""
-        speechNeedsReview = false
+        confirmedDisplayHash = nil
+        confirmedSpeechHash = nil
+        speechNeedsReview = value.speech.map { !AgentBytes.same(value.display, $0) } ?? false
+        provenance = value.provenance
         origin = .received
         hasManualEdits = false
         return true
@@ -87,6 +104,8 @@ final class ExplanationDraftWorkspace: ObservableObject {
     func editDisplay(_ value: String, pasted: Bool = false) {
         guard !display.utf8.elementsEqual(value.utf8) else { return }
         if !speech.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { speechNeedsReview = true }
+        confirmedDisplayHash = nil
+        confirmedSpeechHash = nil
         display = value
         if pasted { origin = .pasted }
         else if origin == nil { origin = .manual }
@@ -96,17 +115,27 @@ final class ExplanationDraftWorkspace: ObservableObject {
     func editSpeech(_ value: String) {
         guard !speech.utf8.elementsEqual(value.utf8) else { return }
         speech = value
-        if value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { speechNeedsReview = false }
+        confirmedDisplayHash = nil
+        confirmedSpeechHash = nil
+        let nonblank = !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        speechNeedsReview = nonblank && (speechNeedsReview || !AgentBytes.same(value, display))
         if origin == nil { origin = .manual }
         hasManualEdits = true
     }
 
-    func confirmSpeech() { speechNeedsReview = false }
+    func confirmSpeech() {
+        confirmedDisplayHash = AgentBytes.hash(Data(display.utf8))
+        confirmedSpeechHash = AgentBytes.hash(Data(speech.utf8))
+        speechNeedsReview = false
+    }
 
     func clearEditor() {
         display = ""
         speech = ""
         speechNeedsReview = false
+        confirmedDisplayHash = nil
+        confirmedSpeechHash = nil
+        provenance = nil
         origin = nil
         hasManualEdits = false
     }
@@ -116,11 +145,17 @@ final class ExplanationDraftWorkspace: ObservableObject {
     func playback(displayOnly: Bool = false) -> (display: String, speech: String)? {
         let screen = display.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !screen.isEmpty, !display.utf8.contains(0) else { return nil }
-        if screen == CodeExplanation.noChange { return nil }
-        guard !displayOnly else { return (display, display) }
-        guard !speechNeedsReview else { return nil }
-        if speech.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return (display, display) }
-        guard !speech.utf8.contains(0) else { return nil }
-        return (display, speech)
+        if screen == CodeExplanation.noChange, provenance?.selector == "continue" { return nil }
+        let hasSpeech = !speech.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let spoken = displayOnly || !hasSpeech ? display : speech
+        if !displayOnly && hasSpeech {
+            guard !speechNeedsReview else { return nil }
+            if !AgentBytes.same(display, speech) {
+                guard confirmedDisplayHash == AgentBytes.hash(Data(display.utf8)),
+                      confirmedSpeechHash == AgentBytes.hash(Data(speech.utf8)) else { return nil }
+            }
+        }
+        guard AgentBytes.safeForSpeech(spoken) else { return nil }
+        return (display, spoken)
     }
 }

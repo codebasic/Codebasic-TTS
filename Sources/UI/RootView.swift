@@ -24,7 +24,7 @@ struct RootView: View {
     var body: some View {
         TabView(selection: tabSelection) {
             GenerateView().tabItem { Label("TTS", systemImage: "waveform") }.tag(0)
-            ExplainWorkspace(drafts: app.explanationDrafts).tabItem { Label("에이전트", systemImage: "person.crop.circle") }.tag(1)
+            ExplainWorkspace(drafts: app.explanationDrafts, catalog: app.agentCatalog, access: app.agentAccess).tabItem { Label("에이전트", systemImage: "person.crop.circle") }.tag(1)
             HistoryView().tabItem { Label("히스토리", systemImage: "clock.arrow.circlepath") }.tag(2)
             BacklogView().tabItem { Label("백로그", systemImage: "flag") }.tag(3)
             SettingsView().tabItem { Label("설정", systemImage: "slider.horizontal.3") }.tag(4)
