@@ -117,6 +117,11 @@ case "${1:-install}" in
   test)
     echo "==> Compiling + running unit tests"
     mkdir -p "$BUILD_DIR"
+    /usr/bin/python3 -B -m unittest discover -s "$HERE/Tests" -p 'test_mcp*.py' -v
+    swiftc -O "$HERE/Sources/Core/TextSplitter.swift" "$HERE/Sources/App/LocalSpeechSocket.swift" \
+      "$HERE/Tests/LocalSpeechGateTests.swift" -o "$BUILD_DIR/local-speech-gate-tests"
+    "$BUILD_DIR/local-speech-gate-tests"
+    mkdir -p "$BUILD_DIR"
     swiftc -O "$HERE/Sources/Core/TextSplitter.swift" "$HERE/Sources/Core/CrawlLayout.swift" \
       "$HERE/Sources/App/Endpoints.swift" "$HERE/Tests/main.swift" -o "$BUILD_DIR/tests"
     "$BUILD_DIR/tests"

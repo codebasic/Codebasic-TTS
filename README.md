@@ -56,8 +56,10 @@ macOS용 TTS 앱: **텍스트를 선택하고 단축키 한 번으로 AI 음성 
 |---|---|
 | 선택 텍스트 읽기 | ⌃⌥⌘R 또는 우클릭 → Services → "Codebasic TTS" |
 | 선택 코드 해설 후 읽기 | ⌃⌥⌘E 또는 Services → "Codebasic TTS: 코드 해설" |
-| 일시정지 / 정지 | 재생 HUD 또는 메뉴 막대 아이콘 메뉴 |
-| 스크립트 편집 · 해설 보기 | 메뉴 막대 아이콘 클릭 → 관리 창 |
+| 일시정지 / 정지 | 재생 HUD에서 일시정지·중지 / 앱 메뉴에서 재생 중지 |
+| 스크립트 편집 · 해설 보기 | Dock 아이콘 클릭 → 관리 창 |
+
+창을 닫아도 Dock 아이콘과 실행 중인 앱은 유지됩니다. Dock에서 다시 열거나 `⌘Q`로 앱을 완전히 종료하세요.
 
 ## 설정
 
@@ -281,9 +283,9 @@ Sidecar/tts -m 4bit              # 양자화 선택 (4bit|5bit|6bit|8bit|bf16)
 ```
 Codebasic-TTS/
 ├── build.sh                        # swiftc 빌드 + 번들 조립 + Launch Services 등록
-├── Resources/Info.plist            # LSUIElement + NSServices 정의
+├── Resources/Info.plist            # Dock 앱 정보 및 NSServices 정의
 ├── Sources/
-│   ├── App/                        # 진입점, 메뉴 막대, 전역 단축키, 엔드포인트/시크릿
+│   ├── App/                        # 진입점, 앱 메뉴, 전역 단축키, 엔드포인트/시크릿
 │   ├── Service/ServiceProvider.swift  # NSServices 핸들러 (read/explain)
 │   ├── Core/                       # 문장 분할, 캐시, 큐 재생, 원문 정규화
 │   ├── TTS/                        # TTSBackend 프로토콜 + ElevenLabs/로컬 Qwen3 백엔드

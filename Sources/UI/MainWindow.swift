@@ -4,7 +4,7 @@ import SwiftUI
 /// Owns the management window (a SwiftUI view hosted in an NSWindow). Created
 /// lazily; reused across opens.
 @MainActor
-final class MainWindow: NSObject, NSWindowDelegate {
+final class MainWindow {
     private let diagnosticID = MemoryDiagnostics.begin("mainWindow.instance")
     deinit { MemoryDiagnostics.end(diagnosticID) }
     private var window: NSWindow?
@@ -21,17 +21,11 @@ final class MainWindow: NSObject, NSWindowDelegate {
             w.title = "Codebasic TTS"
             w.center()
             w.isReleasedWhenClosed = false
-            w.delegate = self
             w.contentView = NSHostingView(rootView: RootView(app: appState).environmentObject(appState))
             window = w
         }
-        NSApp.setActivationPolicy(.regular)        // Dock icon + app menu while the window is up
         NSApp.activate(ignoringOtherApps: true)
+        if window?.isMiniaturized == true { window?.deminiaturize(nil) }
         window?.makeKeyAndOrderFront(nil)
-    }
-
-    func windowWillClose(_ notification: Notification) {
-        // Back to a focus-safe agent so background Services playback can't steal focus.
-        NSApp.setActivationPolicy(.accessory)
     }
 }

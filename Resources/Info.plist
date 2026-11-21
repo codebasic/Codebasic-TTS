@@ -21,12 +21,6 @@
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
 
-    <!-- Start as a focus-safe agent; MainWindow flips to a Dock app (.regular)
-         while its window is open. Keeps background Services playback from
-         stealing focus. -->
-    <key>LSUIElement</key>
-    <true/>
-
     <!-- macOS Services registration. NSMessage maps to the selector
          readSelectedText:userData:error: in ServiceProvider.swift. -->
     <key>NSServices</key>

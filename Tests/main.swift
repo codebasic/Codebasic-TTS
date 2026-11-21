@@ -32,6 +32,23 @@ eq("cleanInput drops leaked math prefix", TextSplitter.cleanInput("k\nk는 상�
 eq("cleanInput drops multi-line leaked math run", TextSplitter.cleanInput("k\n=\n1\nk=1은 상수입니다."), "k=1은 상수입니다.")
 eq("cleanInput keeps non-prefix math", TextSplitter.cleanInput("x\ny는 다릅니다."), "x y는 다릅니다.")
 
+print("TTS synthesis input — literal MCP vs existing manual cleanup")
+let originalMCP = "  k\nk는 __init__의 기호 @이며 값은 0.84입니다.\n\nkeep(x_values, 0.91)  "
+let literal = TextSplitter.synthesisInput(originalMCP, displayText: nil, preserveLiteral: true, maxChars: 700)
+eq("MCP keeps original spoken source", literal?.text, originalMCP)
+eq("MCP subtitle stays exact including newlines", literal?.displayText, originalMCP)
+eq("MCP chunks retain repeated math tokens, identifiers, and visible values", literal?.chunks,
+   ["k", "k는 __init__의 기호 @이며 값은 0.84입니다.", "keep(x_values, 0.91)"])
+let literalDisplay = "  **원문** __init__ @ 0.91  "
+eq("MCP does not clean a separate display source", TextSplitter.synthesisInput(originalMCP, displayText: literalDisplay,
+   preserveLiteral: true, maxChars: 700)?.displayText, literalDisplay)
+let manual = TextSplitter.synthesisInput(originalMCP, displayText: "q\nq는 화면 문자입니다.", preserveLiteral: false, maxChars: 700)
+eq("manual still removes pasted-math leak", manual?.chunks, ["k는 __init__의 기호 @이며 값은 0.84입니다.", "keep(x_values, 0.91)"])
+eq("manual still cleans subtitle separately", manual?.displayText, "q는 화면 문자입니다.")
+check("both paths reject blank spoken source", [true, false].allSatisfy {
+    TextSplitter.synthesisInput("  \n  ", displayText: "자막", preserveLiteral: $0, maxChars: 700) == nil
+})
+
 print("TextSplitter.sentenceIndex — map overall progress onto the subtitle text")
 let sents = ["가나다.", "라마바사.", "아자차카타파하."]   // lengths 4, 5, 8 (incl. period)
 eq("start → 0", TextSplitter.sentenceIndex(at: 0, in: sents), 0)

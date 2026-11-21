@@ -12,83 +12,168 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let appState = AppState()
     private lazy var mainWindow = MainWindow(appState: appState)
     private lazy var overlay = OverlayWindow(app: appState)
-    private var statusItem: NSStatusItem!
     private var cancellables = Set<AnyCancellable>()
+    private var localSpeechSocket: LocalSpeechSocket?
+    private var localSpeechGate: LocalSpeechGate?
+    private var localSpeechMenu: NSMenuItem?
+    private var localInstructionSocket: LocalInstructionSocket?
+    private var localInstructionMenu: NSMenuItem?
+    private var localInstructionExpiry: DispatchWorkItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
 
         setUpMainMenu()
-        setUpStatusItem()
         registerServices()
         registerHotKeys()
         observeState()
 
         // Review-only 해설 (auto-play off): surface the window so it can be checked.
-        appState.onRequestReview = { [weak self] in
-            self?.mainWindow.show()
-            NSApp.activate(ignoringOtherApps: true)
-        }
+        appState.onRequestReview = { [weak self] in self?.mainWindow.show() }
         if appState.keyPresent { appState.refreshVoices() }
         mainWindow.show()                       // open the management window on launch
 
         Log.app.info("Codebasic TTS launched. Backend: \(self.appState.backendIdentity, privacy: .public)")
     }
 
-    // MARK: - Status item (persistent, focus-safe affordance to reopen the UI)
+    // MARK: - Local MCP opt-in
 
-    /// Menu-bar glyph: a monochrome SF Symbol template (adapts to light/dark
-    /// menu bar), swapped per playback phase.
-    private func setStatusSymbol(_ name: String) {
-        let img = NSImage(systemSymbolName: name, accessibilityDescription: "Codebasic TTS")
-        img?.isTemplate = true
-        statusItem.button?.image = img
-        statusItem.button?.title = ""
+    @objc private func toggleLocalSpeech() {
+        if let socket = localSpeechSocket {
+            socket.stop(); localSpeechSocket = nil; localSpeechGate = nil
+            localSpeechMenu?.state = .off
+            return
+        }
+        let gate = LocalSpeechGate()
+        let socket = LocalSpeechSocket { [weak self, gate] text, key in
+            guard let self, self.localSpeechGate === gate else { return "disabled" }
+            return gate.accept(text: text, key: key, app: self.appState)
+        }
+        guard socket.start() else {
+            let alert = NSAlert()
+            alert.messageText = "로컬 MCP 음성 입력을 시작할 수 없습니다"
+            alert.informativeText = "소켓 경로가 이미 있거나 안전하지 않습니다. 기존 실행과 경로를 확인하세요."
+            alert.runModal()
+            return
+        }
+        localSpeechGate = gate; localSpeechSocket = socket; localSpeechMenu?.state = .on
     }
 
-    private func setUpStatusItem() {
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        setStatusSymbol("waveform")
+    // Separate consent: enabling speech must never publish instructions.
+    @objc private func toggleLocalInstructions() {
+        if localInstructionSocket != nil { revokeLocalInstructions(); return }
+        let selection = NSAlert()
+        selection.messageText = "로컬 MCP 지시 공유 (이번 실행)"
+        selection.informativeText = "연결하려는 지시 도우미의 PID와 공유할 프로필 한 개를 지정하세요. 자동 공유되지 않습니다."
+        selection.addButton(withTitle: "미리 보기")
+        selection.addButton(withTitle: "취소")
+        let pidField = NSTextField(frame: NSRect(x: 0, y: 33, width: 390, height: 24))
+        pidField.placeholderString = "지시 도우미 PID"
+        let picker = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 390, height: 26))
+        picker.addItems(withTitles: ["해설", "이어서 해설", "음성 대본 정규화 (사전·힌트 제외)"])
+        let fields = NSView(frame: NSRect(x: 0, y: 0, width: 390, height: 60))
+        fields.addSubview(pidField); fields.addSubview(picker)
+        selection.accessoryView = fields
+        guard selection.runModal() == .alertFirstButtonReturn else { return }
+        let names = LocalInstructionProfile.Name.allCases
+        guard let pid = Int32(pidField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)),
+              let peer = LocalInstructionPeer.current(pid: pid), names.indices.contains(picker.indexOfSelectedItem),
+              let profile = instructionSnapshot(names[picker.indexOfSelectedItem]) else {
+            showInstructionShareError("같은 계정에서 계속 실행 중인 도우미의 PID와 공유할 수 있는 길이의 지시가 필요합니다.")
+            return
+        }
+        let approval = NSAlert()
+        approval.messageText = "PID \(pid)에 아래 지시를 공유할까요?"
+        approval.informativeText = "최대 10분, 이 프로필만 읽습니다. 원격 모델을 사용하는 에이전트는 지시를 해당 서비스로 보낼 수 있습니다. 비밀이나 외부 공개할 수 없는 내용이 있으면 취소하세요."
+        approval.addButton(withTitle: "이 프로필만 공유")
+        approval.addButton(withTitle: "취소")
+        let scroll = NSTextView.scrollableTextView()
+        scroll.frame = NSRect(x: 0, y: 0, width: 430, height: 214)
+        guard let preview = scroll.documentView as? NSTextView else { return }
+        preview.isRichText = false
+        preview.string = profile.text; preview.isEditable = false; preview.isSelectable = true
+        approval.accessoryView = scroll
+        guard approval.runModal() == .alertFirstButtonReturn else { return }
+        guard instructionSnapshot(profile.name)?.revision == profile.revision else {
+            showInstructionShareError("미리 보는 동안 지시가 바뀌었습니다. 새 내용을 확인한 뒤 다시 공유하세요.")
+            return
+        }
+        let socket = LocalInstructionSocket(peer: peer, profile: profile)
+        guard socket.start() else {
+            showInstructionShareError("도우미가 종료됐거나 이전 소켓 경로가 남아 있습니다. 새 도우미와 소켓 상태를 확인하세요.")
+            return
+        }
+        localInstructionSocket = socket
+        localInstructionMenu?.state = .on
+        let expiry = DispatchWorkItem { [weak self, weak socket] in
+            guard let self, let socket, self.localInstructionSocket === socket else { return }
+            self.revokeLocalInstructions()
+        }
+        localInstructionExpiry = expiry
+        DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(600), execute: expiry)
+    }
 
-        let menu = NSMenu()
-        menu.autoenablesItems = false
-        let open = NSMenuItem(title: "Codebasic TTS 열기", action: #selector(openWindow), keyEquivalent: "")
-        open.target = self
-        menu.addItem(open)
-        menu.addItem(.separator())
-        let stop = NSMenuItem(title: "재생 중지", action: #selector(stopSpeaking), keyEquivalent: "")
-        stop.target = self
-        menu.addItem(stop)
-        menu.addItem(.separator())
-        menu.addItem(withTitle: "종료", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        statusItem.menu = menu
+    private func instructionSnapshot(_ name: LocalInstructionProfile.Name) -> LocalInstructionProfile? {
+        let text: String
+        switch name {
+        case .explain:
+            text = CodeExplanation.effectiveInstruction(appState.explainPrompt)
+        case .continue:
+            text = CodeExplanation.effectiveInstruction(appState.explainPrompt) + "\n\n" + CodeExplanation.continueInstruction
+        case .normalize:
+            text = appState.normalizePrompt.isEmpty ? TextNormalizer.defaultInstruction : appState.normalizePrompt
+        }
+        return LocalInstructionProfile(name: name, text: text)
+    }
+
+    private func showInstructionShareError(_ reason: String) {
+        let alert = NSAlert()
+        alert.messageText = "로컬 MCP 지시를 공유하지 않았습니다"
+        alert.informativeText = reason
+        alert.runModal()
+    }
+
+    private func revokeLocalInstructions() {
+        localInstructionExpiry?.cancel(); localInstructionExpiry = nil
+        localInstructionSocket?.stop(); localInstructionSocket = nil
+        localInstructionMenu?.state = .off
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        localSpeechSocket?.stop()
+        revokeLocalInstructions()
     }
 
     @objc private func openWindow() { mainWindow.show() }
+    @objc private func openSettings() { appState.selectedTab = 4; mainWindow.show() }
+    @objc private func openHistory() { appState.selectedTab = 2; mainWindow.show() }
     @objc private func stopSpeaking() { appState.stop() }
 
-    /// Keep running as a background TTS service after the window is closed, so the
-    /// Services menu still works.
+    /// Close hides only the window; the same Dock process keeps Services and MCP available.
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
-    /// Clicking the Dock icon with no window reopens the management window.
+    /// Route Dock reopen to the management window, even when only the HUD is visible.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if !flag { mainWindow.show() }
-        return true
+        mainWindow.show()
+        return false // window ordering was handled here
     }
 
-    // MARK: - State → status icon + overlay
+    // MARK: - Playback overlay
 
     private func observeState() {
+        appState.$explainPrompt.dropFirst()
+            .removeDuplicates(by: { $0.utf8.elementsEqual($1.utf8) })
+            .sink { [weak self] _ in self?.revokeLocalInstructions() }.store(in: &cancellables)
+        appState.$normalizePrompt.dropFirst()
+            .removeDuplicates(by: { $0.utf8.elementsEqual($1.utf8) })
+            .sink { [weak self] _ in self?.revokeLocalInstructions() }.store(in: &cancellables)
         appState.$phase
             .receive(on: RunLoop.main)
             .sink { [weak self] phase in
                 guard let self else { return }
                 switch phase {
-                case .idle:         self.setStatusSymbol("waveform"); self.overlay.hide()
-                case .synthesizing: self.setStatusSymbol("ellipsis"); self.overlay.show()
-                case .playing:      self.setStatusSymbol("speaker.wave.2.fill"); self.overlay.show()
-                case .paused:       self.setStatusSymbol("pause.fill"); self.overlay.show()
+                case .idle: self.overlay.hide()
+                case .synthesizing, .playing, .paused: self.overlay.show()
                 }
             }
             .store(in: &cancellables)
@@ -148,8 +233,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Called by ServiceProvider when the user picks "Codebasic TTS": synthesize
-    /// the selected text (cache-first) and play it. With the app idling as an
-    /// .accessory agent (window closed), background playback never steals focus.
+    /// the selected text (cache-first) and play it without opening the window.
     func handleSelectedText(_ text: String) {
         let preview = text.replacingOccurrences(of: "\n", with: " ").prefix(60)
         Log.app.info("handleSelectedText: \(text.count) chars — \"\(preview, privacy: .public)\"")
@@ -175,8 +259,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let appItem = NSMenuItem()
         main.addItem(appItem)
-        let appMenu = NSMenu()
+        let appMenu = NSMenu(title: "Codebasic TTS")
         appItem.submenu = appMenu
+        appMenu.addItem(withTitle: "설정…", action: #selector(openSettings), keyEquivalent: ",").target = self
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "재생 중지", action: #selector(stopSpeaking), keyEquivalent: "").target = self
+        let local = appMenu.addItem(withTitle: "로컬 MCP 음성 입력 허용 (이번 실행)",
+                                    action: #selector(toggleLocalSpeech), keyEquivalent: "")
+        local.target = self
+        localSpeechMenu = local
+        let instructions = appMenu.addItem(withTitle: "로컬 MCP 지시 공유 (이번 실행)…",
+                                           action: #selector(toggleLocalInstructions), keyEquivalent: "")
+        instructions.target = self
+        localInstructionMenu = instructions
+        appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Codebasic TTS 가리기", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         appMenu.addItem(withTitle: "다른 항목 가리기",
                         action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
@@ -204,6 +300,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         windowItem.submenu = windowMenu
         windowMenu.addItem(withTitle: "최소화", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
         windowMenu.addItem(withTitle: "닫기", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        windowMenu.addItem(.separator())
+        windowMenu.addItem(withTitle: "Codebasic TTS 열기", action: #selector(openWindow), keyEquivalent: "").target = self
+        windowMenu.addItem(withTitle: "재생 기록", action: #selector(openHistory), keyEquivalent: "").target = self
         NSApp.windowsMenu = windowMenu
 
         NSApp.mainMenu = main

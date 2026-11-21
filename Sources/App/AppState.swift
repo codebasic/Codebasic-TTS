@@ -485,23 +485,14 @@ final class AppState: ObservableObject {
     /// `displayText` is the human-readable source to show as the subtitle (원문 for
     /// TTS, 해설 prose for commentary) while `text` is what's actually synthesized
     /// (the 대본). When omitted, the subtitle is the spoken text.
-    func synthesize(_ text: String, displayText: String? = nil) {
-        // cleanInput both sides: collapse the stray line breaks a web selection or
-        // an LLM 대본 carries (esp. math/markdown), so paragraph chunking is by
-        // blank lines — otherwise the spoken and display chunk counts diverge and
-        // the subtitle falls back to the 대본.
-        let t = TextSplitter.cleanInput(text)
-        guard !t.isEmpty else { return }
-        let chunks = TextSplitter.paragraphs(t, maxChars: maxChunkChars)
-        guard !chunks.isEmpty else { return }
-
+    func synthesize(_ text: String, displayText: String? = nil, preserveLiteral: Bool = false) {
+        guard let input = TextSplitter.synthesisInput(text, displayText: displayText, preserveLiteral: preserveLiteral,
+                                                     maxChars: maxChunkChars) else { return }
+        let chunks = input.chunks
         cancelActiveWork()                       // supersede any prior command (LLM/synthesis/playback)
-        currentText = t                          // overlay label (the spoken text); do NOT touch inputText
-        spokenChunks = chunks                    // spoken 대본 chunks (drive crawlFraction)
-        // Subtitle is the human-readable source, decoupled from the audio chunking
-        // — so it's always the 원본/해설, never the 대본, regardless of how the LLM
-        // reformatted paragraphs (web-selected math, etc.).
-        subtitleText = TextSplitter.cleanInput(displayText ?? t)
+        currentText = input.text                 // overlay label; do not touch inputText
+        spokenChunks = chunks
+        subtitleText = input.displayText         // human-readable source, not necessarily the spoken script
         chunkSentenceTimes = Array(repeating: [], count: chunks.count)
         telemetry.reset()
         player.start(expected: chunks.count)
@@ -547,6 +538,7 @@ final class AppState: ObservableObject {
                                 try Task.checkCancellation(); data.append(c)
                             }
                         }
+                        try Task.checkCancellation() // provider may finish without yielding or after cancel
                         MemoryDiagnostics.sample("audio.ready", details: "audioBytes=\(data.count) timingValues=\(times.count)")
                         self.chunkSentenceTimes[ci] = times
                         if self.useCache {
@@ -570,8 +562,10 @@ final class AppState: ObservableObject {
                 }
                 self.historyRevision += 1
             } catch is CancellationError {
-                self.finish()
+                if !Task.isCancelled { self.finish() }
             } catch {
+                // A superseded task must not tear down a newer run or overwrite its status.
+                guard !Task.isCancelled else { return }
                 // Tear playback down like finish() (stop the timer + player) but keep
                 // the error message. Without stopTimer() a mid-playback synthesis
                 // error left the 10 Hz timer running forever, growing memory at idle.

@@ -9,6 +9,24 @@ import Foundation
 enum TextSplitter {
     static let defaultMaxChars = 700
 
+    struct SynthesisInput {
+        let text: String
+        let chunks: [String]
+        let displayText: String
+    }
+
+    /// Local MCP submits final text; do not run normalizers or the pasted-math
+    /// cleanup on it. Chunking can still trim surrounding whitespace. Manual
+    /// input keeps the existing cleanup on both the spoken and display sides.
+    static func synthesisInput(_ text: String, displayText: String?, preserveLiteral: Bool,
+                               maxChars: Int) -> SynthesisInput? {
+        let spoken = preserveLiteral ? text : cleanInput(text)
+        let chunks = paragraphs(spoken, maxChars: maxChars)
+        guard !chunks.isEmpty else { return nil }
+        let display = displayText ?? spoken
+        return SynthesisInput(text: spoken, chunks: chunks, displayText: preserveLiteral ? display : cleanInput(display))
+    }
+
     /// Split a paragraph into sentences for the karaoke-style subtitle. Breaks on
     /// sentence terminators (. ! ? … and newlines); doesn't split a "." that sits
     /// inside a token (np.where, file.txt, self.x, a decimal like 0.5). Used for
