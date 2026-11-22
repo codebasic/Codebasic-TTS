@@ -91,6 +91,17 @@ extension NSAlert {
         }
 
         assertOff()
+        delegate.selectAgentInstruction("4aa2c775-2dd6-4b91-b317-b6ffa11220b3")
+        precondition(delegate.appState.agentAccess.selectionStatus == .catalogUnavailable)
+        delegate.selectAgentInstruction("normalize")
+        precondition(delegate.appState.agentAccess.selectionStatus == .pairingUnavailable)
+        click([choice, confirm]); assertOn()
+        delegate.selectAgentInstruction("normalize")
+        precondition(delegate.appState.agentAccess.selectionStatus == .legacySharing)
+        assertOn() // failed new selection does not break the legacy grant
+        click([]); assertOff()
+        print("actual selection callback reports missing catalog item, unavailable helper and legacy grant without dialog")
+
         click([{ alert in
             precondition(alert.buttons.map(\.title) == ["미리 보기", "취소"])
             return .alertSecondButtonReturn

@@ -13,10 +13,10 @@ enum CodeExplanation { static let noChange = "변경 없음" }
     var edits = AgentInstructionEditBuffer()
     let alternate = AgentInstructionSnapshot(selector: "continue", generation: UUID(), text: "두 번째 합성 지시")
 
-    init(directory: String, expectedHelper: String) {
+    init(directory: String, expectedHelper: String, wait: Duration) {
         access = AgentSessionController(directory: directory, bundledHelper: {
             AgentPeerSigning.signedHash(at: URL(fileURLWithPath: expectedHelper))
-        })
+        }, selectionWaiting: wait)
         current = AgentInstructionSnapshot(selector: selector, generation: UUID(), text: original)
         drafts.editDisplay("manual untouched")
     }
@@ -55,6 +55,12 @@ enum CodeExplanation { static let noChange = "변경 없음" }
             report("ok")
         case "revert-buffer": edits.revert(selector); report("ok")
         case "revoke": access.revokeSelection(); report("ok")
+        case "reject":
+            access.rejectSelection(.catalogUnavailable)
+            report("ok")
+        case "invalidate-pending":
+            access.invalidate(selector, deleted: false)
+            report("ok")
         case "change", "revert", "delete":
             let verb = pieces[0]
             access.invalidate(selector, deleted: verb == "delete")
@@ -63,6 +69,8 @@ enum CodeExplanation { static let noChange = "변경 없음" }
             report("ok")
         case "snapshot":
             let body: [String: Any] = [
+                "selection": access.selectionStatus.rawValue,
+                "diagnostics": access.selectionDiagnostics.map(\.rawValue),
                 "previews": drafts.immediatePreviews.map(\.display), "paired": access.pair != nil, "count": drafts.pending.count, "editor": drafts.display, "shared": access.shared != nil,
                 "receiving": access.receiving, "old": drafts.pending.map { $0.provenance?.older ?? false },
                 "labels": drafts.pending.map { $0.provenance?.agentLabel ?? "" },
@@ -78,7 +86,8 @@ enum CodeExplanation { static let noChange = "변경 없음" }
 @main struct LocalExplanationDraftSocketProbe {
     @MainActor static func main() {
         let fixture = AgentFixture(directory: CommandLine.arguments[1],
-                                   expectedHelper: CommandLine.arguments.dropFirst(2).first ?? "helper")
+                                   expectedHelper: CommandLine.arguments.dropFirst(2).first ?? "helper",
+                                   wait: .milliseconds(Int64(CommandLine.arguments.dropFirst(3).first ?? "90000") ?? 90000))
         print("ready"); fflush(stdout)
         DispatchQueue.global().async {
             while let cmd = readLine() { DispatchQueue.main.async { fixture.command(cmd) } }

@@ -6,6 +6,44 @@ import Foundation
 /// The UI's name is descriptive only. The authenticated principal is a new
 /// app-local ID tied to one verified live helper, for both disjoint grants.
 @MainActor final class AgentSessionController: ObservableObject {
+    enum SelectionStatus: String {
+        case notSelected, waitingForHelper, active, canceled, expired, changed
+        case legacySharing, catalogUnavailable, invalidInstruction, pairingUnavailable, instructionGrantFailed, draftGrantFailed
+
+        var message: String {
+            switch self {
+            case .notSelected: return "아직 공유하지 않음 · 지시문을 선택하세요."
+            case .waitingForHelper: return "선택 완료 · 에이전트에서 MCP를 시작하면 연결됩니다."
+            case .active: return "지시 공유 및 대본 수신 중"
+            case .canceled: return "지시 공유를 취소했습니다."
+            case .expired: return "선택 대기 시간이 지났습니다. 지시를 다시 선택하세요."
+            case .changed: return "저장된 지시가 바뀌었습니다. 공유할 지시를 다시 선택하세요."
+            case .legacySharing: return "기존 지시 공유를 끈 뒤 다시 선택하세요."
+            case .catalogUnavailable: return "저장된 지시를 열 수 없습니다. 다른 지시를 선택하세요."
+            case .invalidInstruction: return "빈 지시이거나 너무 깁니다. 저장본을 확인하세요."
+            case .pairingUnavailable: return "MCP를 시작할 수 없습니다. 앱을 다시 여세요."
+            case .instructionGrantFailed: return "지시 공유를 시작하지 못했습니다. 연결을 확인하고 다시 선택하세요."
+            case .draftGrantFailed: return "대본 수신을 시작하지 못했습니다. 연결을 확인하고 다시 선택하세요."
+            }
+        }
+
+        var isProblem: Bool {
+            switch self {
+            case .legacySharing, .catalogUnavailable, .invalidInstruction, .pairingUnavailable, .instructionGrantFailed, .draftGrantFailed: return true
+            default: return false
+            }
+        }
+    }
+
+    private struct PendingSelection {
+        let id = UUID()
+        let snapshot: AgentInstructionSnapshot
+        let current: @MainActor (String) -> AgentInstructionSnapshot?
+        let workspace: ExplanationDraftWorkspace
+        let deliveryGate: (@escaping () -> Void) -> Void
+        let deadline: ContinuousClock.Instant
+    }
+
     struct Pair {
         let id = UUID()
         let label: String
@@ -20,6 +58,12 @@ import Foundation
     @Published private(set) var shared: AgentInstructionSnapshot?
     @Published private(set) var receiving = false
     @Published private(set) var status = ""
+    @Published private(set) var selectionStatus: SelectionStatus = .notSelected
+    // Bounded in-memory event codes only, with no user strings or identifiers.
+    private(set) var selectionDiagnostics: [SelectionStatus] = []
+    private var pendingSelection: PendingSelection?
+    private var pendingTask: Task<Void, Never>?
+    private let selectionWaiting: Duration
     private var pairingSocket: LocalApprovedSocket?
     private var shareSocket: LocalApprovedSocket?
     private var receiptSocket: LocalApprovedSocket?
@@ -32,9 +76,11 @@ import Foundation
     private let bundledHelper: () -> Data?
 
     init(directory: String = LocalApprovedSocket.defaultDirectory,
-         bundledHelper: @escaping () -> Data? = AgentPeerSigning.bundledHelperHash) {
+         bundledHelper: @escaping () -> Data? = AgentPeerSigning.bundledHelperHash,
+         selectionWaiting: Duration = .seconds(90)) {
         self.directory = directory
         self.bundledHelper = bundledHelper
+        self.selectionWaiting = selectionWaiting
     }
 
     @discardableResult
@@ -95,28 +141,81 @@ import Foundation
         watch = watcher
         watcher.resume()
         if LocalInstructionPeer.current(pid: pid) != peer { disconnect(); return false }
-        status = "자동 연결됨. 연결할 지시를 선택하기 전에는 어떤 내용도 공유하지 않습니다."
+        status = ""
+        activatePending()
         return true
     }
 
-    /// The only UI activation: one deliberately selected snapshot, one verified
-    /// live helper. A previous selection and all its receipts are revoked first.
+    /// An explicit choice is consumed by one verified live helper, never by a
+    /// default highlight. It is not persisted or carried into another session.
+    @discardableResult
     func select(_ snapshot: AgentInstructionSnapshot,
                 current: @escaping @MainActor (String) -> AgentInstructionSnapshot?,
                 workspace: ExplanationDraftWorkspace,
                 deliveryGate: @escaping (@escaping () -> Void) -> Void = { $0() }) -> Bool {
-        revokeSelection()
-        guard share(snapshot, deliveryGate: deliveryGate) else { return false }
-        guard receive(current: current, workspace: workspace) else {
-            stopShare()
-            return false
+        clearSelection()
+        guard snapshot.shareable else { note(.invalidInstruction); return false }
+        guard pairingSocket != nil else { note(.pairingUnavailable); return false }
+        let deadline = ContinuousClock.now.advanced(by: selectionWaiting)
+        let pending = PendingSelection(snapshot: snapshot, current: current, workspace: workspace,
+                                       deliveryGate: deliveryGate, deadline: deadline)
+        pendingSelection = pending
+        if pair != nil {
+            activatePending()
+            return selectionStatus == .active
+        }
+        note(.waitingForHelper)
+        pendingTask = Task { [weak self] in
+            do { try await ContinuousClock().sleep(until: deadline) } catch { return }
+            guard let self, self.pendingSelection?.id == pending.id else { return }
+            self.clearSelection()
+            self.note(.expired)
         }
         return true
     }
 
+    private func activatePending() {
+        guard let pending = pendingSelection, pair != nil else { return }
+        cancelPending()
+        guard ContinuousClock.now < pending.deadline else { note(.expired); return }
+        guard pending.current(pending.snapshot.selector) == pending.snapshot else { note(.changed); return }
+        guard share(pending.snapshot, deliveryGate: pending.deliveryGate) else {
+            note(.instructionGrantFailed)
+            return
+        }
+        guard receive(current: pending.current, workspace: pending.workspace) else {
+            stopShare()
+            note(.draftGrantFailed)
+            return
+        }
+        note(.active)
+    }
+
+    func rejectSelection(_ reason: SelectionStatus) {
+        clearSelection()
+        note(reason)
+    }
+
     func revokeSelection() {
+        clearSelection()
+        note(.canceled)
+    }
+
+    private func clearSelection() {
+        cancelPending()
         stopShare()
         stopReceipt()
+    }
+
+    private func cancelPending() {
+        pendingTask?.cancel(); pendingTask = nil
+        pendingSelection = nil
+    }
+
+    private func note(_ change: SelectionStatus) {
+        selectionStatus = change
+        selectionDiagnostics.append(change)
+        if selectionDiagnostics.count > 12 { selectionDiagnostics.removeFirst(selectionDiagnostics.count - 12) }
     }
 
     func share(_ snapshot: AgentInstructionSnapshot,
@@ -161,7 +260,8 @@ import Foundation
         shared = snapshot
         shareTask = Task { [weak self] in
             do { try await ContinuousClock().sleep(until: deadline) } catch { return }
-            self?.revokeSelection()
+            self?.clearSelection()
+            self?.note(.expired)
         }
         return true
     }
@@ -240,7 +340,10 @@ import Foundation
     private weak var receiptWorkspace: ExplanationDraftWorkspace?
 
     func invalidate(_ selector: String, deleted: Bool) {
-        if shared?.selector == selector { revokeSelection() }
+        if shared?.selector == selector || pendingSelection?.snapshot.selector == selector {
+            clearSelection()
+            note(.changed)
+        }
         // Previously received previews remain, but cannot reactivate access.
     }
 
@@ -263,10 +366,10 @@ import Foundation
 
     func disconnect() {
         watch?.cancel(); watch = nil
-        stopShare()
-        stopReceipt()
+        clearSelection()
         pair = nil
         status = ""
+        note(.notSelected)
     }
 
     private nonisolated static func verifier(leaf: String, hash: Data) -> (Int32) -> Bool {

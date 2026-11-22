@@ -114,10 +114,8 @@ struct ExplainWorkspace: View {
                 Button("새 지시…") { catalogEdit = .init(record: nil) }
                     .disabled(catalog.readError || catalog.records.count >= AgentLimits.profiles)
             }
-            if access.pair != nil {
-                Text("고른 지시는 연결된 에이전트에 공유됩니다. 원격 모델을 쓰는 에이전트는 받은 지시를 모델 서비스에 보낼 수 있습니다.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
+            Text("고른 지시는 연결되는 에이전트에 공유됩니다. 원격 모델을 쓰는 에이전트는 받은 지시를 모델 서비스에 보낼 수 있습니다.")
+                .font(.caption).foregroundStyle(.secondary)
             if catalog.readError || !catalogError.isEmpty {
                 Text(catalog.readError ? AgentCatalog.Failure.unreadable.localizedDescription : catalogError)
                     .font(.caption).foregroundStyle(.orange)
@@ -133,7 +131,9 @@ struct ExplainWorkspace: View {
                     Button("지시 삭제…", role: .destructive) { removeProfile = entry; showRemove = true }
                 }
                 Spacer()
-                if access.shared != nil {
+                if access.selectionStatus == .waitingForHelper {
+                    Button("선택 취소") { access.revokeSelection() }
+                } else if access.shared != nil {
                     Button("공유 및 수신 중지") { access.revokeSelection() }
                 }
             }
@@ -147,16 +147,17 @@ struct ExplainWorkspace: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
-            if let active = access.shared {
-                Text("공유 중: \(title(active.selector))")
+            Text(access.selectionStatus.message)
+                .font(.caption)
+                .foregroundStyle(access.selectionStatus.isProblem ? Color.orange : Color.secondary)
+                .accessibilityLabel("지시 연결 상태: \(access.selectionStatus.message)")
+            if let legacy = app.sharedInstructionProfile {
+                Text("기존 지시 공유 중: \(name(legacy))")
                     .font(.caption).foregroundStyle(.secondary)
-            } else if let legacy = app.sharedInstructionProfile {
-                Text("호환용 기본 조회 허용: \(name(legacy)) · 앱 메뉴에서 해제할 수 있습니다.")
-                    .font(.caption).foregroundStyle(.secondary)
-            } else {
-                Text("MCP 조회 허용 안 함").font(.caption).foregroundStyle(.secondary)
             }
-            if !access.status.isEmpty { Text(access.status).font(.caption).foregroundStyle(.secondary) }
+            if access.selectionStatus == .notSelected, !access.status.isEmpty {
+                Text(access.status).font(.caption).foregroundStyle(.orange)
+            }
             mcpSetup
         }
     }
@@ -341,7 +342,6 @@ struct ExplainWorkspace: View {
     private func chooseProfile(_ selector: String) {
         showProfileChooser = false
         profile = selector
-        guard access.pair != nil else { return } // browsing without a connected helper never creates a grant
         AppDelegate.shared?.selectAgentInstruction(selector)
     }
 

@@ -9,6 +9,7 @@ import socket
 import shutil
 import subprocess
 import tempfile
+import time
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
@@ -131,8 +132,8 @@ def main():
             process.append(proc)
             return proc
 
-        def start_server(name="server", helper="helper"):
-            proc = start(name, "ipc", str(root / helper))
+        def start_server(name="server", helper="helper", waiting=90000):
+            proc = start(name, "ipc", str(root / helper), str(waiting))
             assert read(proc) == "ready"
             return proc
 
@@ -170,6 +171,50 @@ def main():
                     os.chdir(previous)
             assert not json.loads(command(server,"snapshot"))["paired"]
             assert command(server, "end") == "ok"
+            # Waiting activation is a deliberate, one-shot choice scoped to this app.
+            server = start_server(waiting=180)
+            assert command(server, "pair") == "ok"
+            assert command(server, "select") == "ok"
+            assert json.loads(command(server, "snapshot"))["selection"] == "waitingForHelper"
+            time.sleep(0.3)
+            assert json.loads(command(server, "snapshot"))["selection"] == "expired"
+            assert status(a) == "approval_required" # elapsed selection cannot be shared
+            assert command(server, "end") == "ok"
+            server = start_server()
+            assert command(server, "pair") == "ok"
+            assert command(server, "select") == "ok"
+            assert command(server, "invalidate-pending") == "ok"
+            assert json.loads(command(server, "snapshot"))["selection"] == "changed"
+            assert command(server, "select") == "ok"
+            assert command(server, "revoke") == "ok"
+            assert json.loads(command(server, "snapshot"))["selection"] == "canceled"
+            for _ in range(15): assert command(server, "reject") == "ok"
+            info = json.loads(command(server, "snapshot"))
+            assert info["selection"] == "catalogUnavailable"
+            assert info["diagnostics"] == ["catalogUnavailable"] * 12
+            assert status(a) == "approval_required"
+            assert command(server, "end") == "ok"
+            server = start_server()
+            assert command(server, "pair") == "ok"
+            assert command(server, "select") == "ok"
+            assert status(other) == "app_unavailable"
+            assert json.loads(command(server, "snapshot"))["selection"] == "waitingForHelper"
+            assert status(a) == "ready" # first verified bundled helper consumes the deliberate selection
+            assert json.loads(command(server, "snapshot"))["diagnostics"] == ["waitingForHelper", "active"]
+            assert status(b) == "other_agent" # intent never transfers to another session
+            assert command(server, "end") == "ok"
+
+            # Force an unavailable local grant without changing any real socket.
+            obstruction = root / "ipc/i.sock"
+            obstruction.write_text("synthetic obstruction")
+            server = start_server()
+            assert command(server, "pair") == "ok"
+            assert status(a) == "approval_required"
+            assert command(server, "select") == "no"
+            assert json.loads(command(server, "snapshot"))["selection"] == "instructionGrantFailed"
+            assert obstruction.read_text() == "synthetic obstruction"
+            assert command(server, "end") == "ok"
+            obstruction.unlink()
             server = start_server()
             assert command(server, "pair") == "ok"
             assert status(other) == "app_unavailable"  # same identifier/signer, wrong helper code hash
