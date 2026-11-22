@@ -4,8 +4,8 @@ import Foundation
 import Security
 
 enum AgentPeerSigning {
-    static let appID = "com.seongjoo.SelectedTextTTS"
-    static let helperID = "com.seongjoo.SelectedTextTTS.agent-helper"
+    static let appID = TTSRuntime.appID
+    static let helperID = TTSRuntime.helperID
 
     static func ownLeaf() -> String? {
         var code: SecCode?

@@ -9,10 +9,11 @@ import Foundation
             fputs("Invalid probe arguments\n", stderr); exit(2)
         }
         let directory = CommandLine.arguments[2]
-        let build = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-            .appendingPathComponent("build").resolvingSymlinksInPath()
+        let build = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).resolvingSymlinksInPath()
         let target = URL(fileURLWithPath: directory).resolvingSymlinksInPath()
-        guard target.deletingLastPathComponent().path == build.path, target.lastPathComponent.hasPrefix("i") else { exit(2) }
+        guard build.lastPathComponent == "build",
+              target.deletingLastPathComponent().path == build.path,
+              target.lastPathComponent.hasPrefix("i") else { exit(2) }
         let listener = LocalInstructionSocket(peer: peer, profile: profile, directory: directory)
         guard listener.start() else { print("socket-unavailable"); exit(3) }
         print("ready"); fflush(stdout)

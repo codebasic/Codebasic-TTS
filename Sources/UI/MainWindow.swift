@@ -18,7 +18,7 @@ final class MainWindow {
                 contentRect: NSRect(x: 0, y: 0, width: 880, height: 560),
                 styleMask: [.titled, .closable, .miniaturizable, .resizable],
                 backing: .buffered, defer: false)
-            w.title = "Codebasic TTS"
+            w.title = TTSRuntime.displayName
             w.center()
             w.isReleasedWhenClosed = false
             w.contentView = NSHostingView(rootView: RootView(app: appState).environmentObject(appState))

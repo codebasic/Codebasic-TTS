@@ -146,7 +146,7 @@ final class AppState: ObservableObject {
     /// The external agent has already done the text work. Only the current
     /// voice engine may be used, and only on this explicit editor action.
     func playExplanationDraft(displayOnly: Bool = false) {
-        guard !isBusy, !explaining, !normalizing,
+        guard !TTSRuntime.isPreview, !isBusy, !explaining, !normalizing,
               let input = explanationDrafts.playback(displayOnly: displayOnly),
               AgentBytes.safeForSpeech(input.speech) else { return }
         playbackMode = .explain

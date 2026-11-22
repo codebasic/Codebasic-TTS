@@ -67,8 +67,10 @@ struct ExplainWorkspace: View {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 12) {
                             editor
-                            Button("고급: 앱에서 직접 해설 생성…") { showAdvanced = true }
-                                .controlSize(.small)
+                            if !TTSRuntime.isPreview {
+                                Button("고급: 앱에서 직접 해설 생성…") { showAdvanced = true }
+                                    .controlSize(.small)
+                            }
                         }
                         .padding()
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -440,6 +442,17 @@ struct ExplainWorkspace: View {
                 Text("재생할 글에서는 SSML·태그·인코딩된 태그를 제거하세요.")
                     .font(.caption).foregroundStyle(.orange)
             }
+            if TTSRuntime.isPreview {
+                Text("프리뷰에서는 대본 수신과 편집을 확인할 수 있습니다. 음성 합성은 꺼져 있습니다.")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                playbackControls
+            }
+        }
+    }
+
+    private var playbackControls: some View {
+        VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Button { app.playExplanationDraft() } label: { Label("그대로 재생", systemImage: "play.fill") }
                     .buttonStyle(.borderedProminent)

@@ -42,11 +42,11 @@ with tempfile.TemporaryDirectory(prefix="u", dir=REPO / "build") as temp:
         return (view.editorSelection, view.sharingSelection)
     }
 }\n''')
-    socket = sources / "App" / "LocalInstructionSocket.swift"
-    source = socket.read_text()
-    gate = r'"/private/tmp/codebasic-tts-mcp-\(getuid())"'
+    runtime = sources / "Core" / "TTSRuntime.swift"
+    source = runtime.read_text()
+    gate = 'static var socketDirectory: String { socketDirectory(uid: getuid()) }'
     assert source.count(gate) == 1
-    socket.write_text(source.replace(gate, 'ProcessInfo.processInfo.environment["TTS_APPROVAL_FIXTURE_ROOT"]!'))
+    runtime.write_text(source.replace(gate, 'static var socketDirectory: String { ProcessInfo.processInfo.environment["TTS_APPROVAL_FIXTURE_ROOT"]! }'))
     paths = [str(x) for x in sorted(sources.rglob("*.swift")) if x.name != "main.swift"]
     executable = root / "approval-test"
     sdk = subprocess.check_output(["/usr/bin/xcrun", "--sdk", "macosx26.5", "--show-sdk-path"], text=True).strip()

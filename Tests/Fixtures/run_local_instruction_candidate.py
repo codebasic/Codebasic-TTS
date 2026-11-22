@@ -37,8 +37,8 @@ def rpc(proc, request_id, method, params=None):
     return response
 
 
-def start_stdio(script, env):
-    return subprocess.Popen(["/usr/bin/python3", "-I", "-B", str(script)], env=env,
+def start_stdio(script, env, cwd):
+    return subprocess.Popen(["/usr/bin/python3", "-I", "-B", str(script)], env=env, cwd=cwd,
                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
 
@@ -75,7 +75,7 @@ with tempfile.TemporaryDirectory(prefix="i", dir=build) as temp:
     env = {"PATH":"/usr/bin:/bin", "HOME":str(root)}
     sdk = subprocess.check_output(["/usr/bin/xcrun", "--sdk", "macosx26.5", "--show-sdk-path"], text=True).strip()
     binary = root / "probe"
-    subprocess.run(["/usr/bin/swiftc", str(REPO / "Sources/App/LocalInstructionSocket.swift"),
+    subprocess.run(["/usr/bin/swiftc", str(REPO / "Sources/Core/TTSRuntime.swift"), str(REPO / "Sources/App/LocalInstructionSocket.swift"),
                     str(HERE / "LocalInstructionSocketProbe.swift"), "-o", str(binary)], check=True, timeout=90,
                    env={**env, "SDKROOT":sdk, "CLANG_MODULE_CACHE_PATH":str(cache)})
     # Use an existing locally trusted signing identity; do not mint a test identity.
@@ -89,20 +89,21 @@ with tempfile.TemporaryDirectory(prefix="i", dir=build) as temp:
     subprocess.run(["/usr/bin/codesign", "--force", "--sign", "Codebasic TTS Local", "--identifier",
                     "com.seongjoo.SelectedTextTTS", str(binary)], check=True, timeout=12)
     env["CODEBASIC_TTS_SIGNER_SHA1"] = anchor.group(1)
-    # Only replace the socket destination in this disposable copy; never hit the real app socket.
+    # A relative socket under the fixture's build directory also fits AF_UNIX
+    # when the checkout is in a deeply nested worktree.
     script = root / "mcp_tts_instructions.py"
     original = (REPO / "scripts/mcp_tts_instructions.py").read_text()
     needle = 'return Path("/private/tmp") / ("codebasic-tts-mcp-%d" % os.geteuid()) / "i.sock"'
     assert original.count(needle) == 1
-    script.write_text(original.replace(needle, 'return Path('+json.dumps(str(root/"i.sock"))+')'))
+    script.write_text(original.replace(needle, 'return Path('+json.dumps(root.name + "/i.sock")+')'))
     (root / "mcp_speech.py").write_bytes((REPO / "scripts/mcp_speech.py").read_bytes())
     (root / "tts_mcp_app_identity.py").write_bytes((REPO / "scripts/tts_mcp_app_identity.py").read_bytes())
     wrong_pin = "0" * 40 if anchor.group(1) != "0" * 40 else "1" * 40
-    allowed, unrelated = start_stdio(script, env), start_stdio(script, env)
-    wrong_signer = start_stdio(script, {**env, "CODEBASIC_TTS_SIGNER_SHA1": wrong_pin})
+    allowed, unrelated = start_stdio(script, env, build), start_stdio(script, env, build)
+    wrong_signer = start_stdio(script, {**env, "CODEBASIC_TTS_SIGNER_SHA1": wrong_pin}, build)
 
     def launch(approved_pid):
-        return subprocess.Popen([str(binary), str(approved_pid), str(root)], cwd=REPO, env=env, stdin=subprocess.PIPE,
+        return subprocess.Popen([str(binary), str(approved_pid), root.name], cwd=build, env=env, stdin=subprocess.PIPE,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
     server = None

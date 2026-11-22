@@ -83,7 +83,7 @@ final class LocalInstructionSocket {
 /// Private Unix transport for one explicitly approved live process. Endpoint
 /// instances have disjoint paths, handlers, and leases.
 final class LocalApprovedSocket {
-    static var defaultDirectory: String { "/private/tmp/codebasic-tts-mcp-\(getuid())" }
+    static var defaultDirectory: String { TTSRuntime.socketDirectory }
     static let unknownPathMessage = "기존 소켓의 출처를 확인할 수 없어 그대로 두었습니다. 이전 앱을 종료하고 다시 시도하거나 복사·붙여넣기를 사용하세요."
     private let directory: String
     private let endpoint: String

@@ -18,7 +18,7 @@ struct AgentMCPConfiguration {
     init?(command: String, bundleID: String) {
         guard command.hasPrefix("/"), !command.utf8.contains(0), !bundleID.isEmpty else { return nil }
         self.command = command
-        if bundleID == "com.seongjoo.SelectedTextTTS" {
+        if bundleID == TTSRuntime.productionAppID {
             serverName = "codebasic_tts_agent"
         } else {
             // Every review bundle gets a different key from production and other previews.

@@ -12,7 +12,7 @@ import Foundation
     static let maxProofs = AgentLimits.proofCount
     // Derive the peer pin from this trusted bundled executable, never the socket.
     static let pin = AgentPeerSigning.ownLeaf()
-    static let directory = "/private/tmp/codebasic-tts-mcp-\(getuid())"
+    static let directory = TTSRuntime.socketDirectory
 
     struct Proof {
         let profile: String
@@ -47,9 +47,9 @@ import Foundation
                 initialized = true
                 let requested = params["protocolVersion"] as? String ?? ""
                 let version = ["2025-11-25", "2025-06-18", "2025-03-26"].contains(requested) ? requested : "2025-11-25"
-                result(id, ["protocolVersion":version, "serverInfo":["name":"codebasic-tts-agent", "version":"2.0"],
+                result(id, ["protocolVersion":version, "serverInfo":["name":TTSRuntime.mcpServerName, "version":"2.0"],
                             "capabilities":["tools":["listChanged":false]],
-                            "instructions":"Open Codebasic TTS → Agent (에이전트), then enable the session. With no instruction selected, use submit_tts_draft without reading anything. If an instruction is selected, read it and use submit_explanation_draft. Incoming drafts open for editing without playback."])
+                            "instructions":"Open \(TTSRuntime.displayName) → Agent (에이전트), then enable the session. With no instruction selected, use submit_tts_draft without reading anything. If an instruction is selected, read it and use submit_explanation_draft. Incoming drafts open for editing without playback."])
             case "ping":
                 result(id, [:])
             case "tools/list" where ready:
@@ -83,7 +83,7 @@ import Foundation
                           let rev = reply["revision"] as? String, UUID(uuidString: rev) != nil,
                           let hash = reply["body_sha256"] as? String, hash == AgentBytes.hash(Data(text.utf8)),
                           let opaque = reply["proof"] as? String, UUID(uuidString: opaque) != nil else {
-                        tool(id, "That profile is not approved or its revision changed. Select it in Codebasic TTS → Agent (에이전트).", failed: true); continue
+                        tool(id, "That profile is not approved or its revision changed. Select it in \(TTSRuntime.displayName) → Agent (에이전트).", failed: true); continue
                     }
                     let proof = Proof(profile: selector, revision: rev, bodyHash: hash, token: opaque,
                                       expiry: .now.advanced(by: .seconds(AgentLimits.grantSeconds)))
@@ -116,7 +116,7 @@ import Foundation
                     let connection = pairingStatus()
                     guard connection == "ready" || connection == "receiving_only" || connection == "instruction_required" else {
                         let message = connection == "reading_only"
-                            ? "Draft receipt is not approved. Select an instruction in Codebasic TTS → Agent (에이전트)."
+                            ? "Draft receipt is not approved. Select an instruction in \(TTSRuntime.displayName) → Agent (에이전트)."
                             : describe(connection)
                         tool(id, message, failed: true); continue
                     }
@@ -189,15 +189,15 @@ import Foundation
 
     static func describe(_ status: String) -> String {
         switch status {
-        case "signing_required": return "Use the certificate-signed helper bundled with Codebasic TTS."
-        case "app_unavailable": return "Open Codebasic TTS and try again. The running app must match this signed helper."
-        case "other_agent": return "Another MCP session is connected. Close it or disconnect it in Codebasic TTS → Agent (에이전트), then retry."
-        case "approval_required": return "Connected. In Codebasic TTS → Agent (에이전트), enable draft receipt."
+        case "signing_required": return "Use the certificate-signed helper bundled with \(TTSRuntime.displayName)."
+        case "app_unavailable": return "Open \(TTSRuntime.displayName) and try again. The running app must match this signed helper."
+        case "other_agent": return "Another MCP session is connected. Close it or disconnect it in \(TTSRuntime.displayName) → Agent (에이전트), then retry."
+        case "approval_required": return "Connected. In \(TTSRuntime.displayName) → Agent (에이전트), enable draft receipt."
         case "reading_only": return "Connected. One instruction revision is approved. Draft receipt is off."
         case "receiving_only": return "Connected. Send with submit_tts_draft; there is no selected instruction."
         case "instruction_required": return "A saved instruction was selected but is no longer shareable. Ask the user to update or clear the selection."
         case "ready": return "Connected. Read the selected saved instruction and submit with submit_explanation_draft. Nothing plays automatically."
-        default: return "Connection not confirmed. Check Codebasic TTS → Agent (에이전트) and try again."
+        default: return "Connection not confirmed. Check \(TTSRuntime.displayName) → Agent (에이전트) and try again."
         }
     }
 

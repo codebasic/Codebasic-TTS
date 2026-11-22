@@ -29,6 +29,16 @@ command = "/absolute/path/to/Codebasic TTS.app/Contents/Helpers/CodebasicAgentMC
 - 보관함, 수신 증명, 도우미 승인 기록은 앱을 종료하면 사라집니다. 재생 후에는 기존 설정에 따라 음성 캐시·기록에 남을 수 있습니다.
 - 앱이 비정상 종료되면 앱 재시작 및 다음 승인 시 이 버전이 만든 것으로 확인되고 더 이상 연결되지 않는 소켓에 한해 자동으로 복구합니다. “기존 소켓의 출처를 확인할 수 없어 그대로 두었습니다”가 보이면, 이전 **Codebasic TTS** 앱을 종료하고 새 앱에서 같은 동작을 다시 시도하세요. 계속 막히면 복사·붙여넣기를 사용하세요. 관리자가 정확한 경로가 종료된 이전 앱의 소켓임을 별도로 확인한 경우에만 그 항목을 다른 곳으로 옮길 수 있습니다. 경로 전체나 출처를 모르는 파일은 삭제하지 마세요.
 
+## 로컬 에이전트 프리뷰
+
+`./build.sh preview`는 안정적인 로컬 서명으로 `build/preview/Codebasic TTS Preview.app`을 만듭니다. 빌드 명령은 앱을 실행하거나 설치하지 않습니다.
+
+프리뷰는 에이전트 작업 공간에서 대본 수신과 편집을 확인하는 용도입니다. 별도 앱 ID와 도우미 ID, `~/Library/Application Support/Codebasic TTS Preview` 및 `/private/tmp/codebasic-tts-preview-mcp-<uid>`를 사용합니다. 프리뷰에 포함된 MCP 도우미를 사용하세요. 프리뷰에서는 시스템 서비스, 전역 단축키, 기존 MCP 음성·지시 메뉴, 계정 로그인 및 음성 합성을 끕니다.
+
+프리뷰 앱과 도우미의 빌드 타깃 및 프리뷰 앱의 `LSMinimumSystemVersion`은 macOS 14.0입니다. 제품의 macOS 13 지원 표기와 별개입니다. 현재 제품 소스의 SwiftUI `onChange(of:initial:_:)` 호출은 13.0 타깃에서 컴파일되지 않아 제품 지원 확인에는 별도의 호환성 작업이 필요합니다.
+
 ## 합성 데이터로 확인
 
 `TTS_REQUIRE_STABLE_SIGNING=1 ./build.sh build`는 앱과 도우미의 안정적인 서명과 강화 런타임을 확인합니다. `./build.sh test`는 둘 이상의 프로세스에서 로컬 저장 충돌과 소켓 재시작을 포함한 테스트를 실행합니다. `Tests/Fixtures/run_local_draft_candidate.py`는 작업트리 `build/` 안에서 서명된 실제 stdio 프로토콜로 자동 연결, 앱 재시작, 기본 차단, 신뢰할 수 없는 프로세스 거절, 실제 조회 증명, 재수신, 편집·되돌리기·삭제 및 취소를 검증합니다. 실제 설치 앱, 저장된 사용자 지시, 음성 제공자 및 재생은 사용하지 않습니다.
+
+`python3 Tests/Fixtures/run_local_draft_candidate.py --preview`는 합성 제품·프리뷰 리스너를 동시에 띄워 소켓과 서명 ID가 분리되는지 확인합니다. `python3 Tests/Fixtures/run_tts_preview_isolation.py`는 임시 프로필에서 설정, 키 파일, SQLite, 지시 저장소와 계정 연결 차단을 확인합니다.

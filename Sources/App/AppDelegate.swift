@@ -25,8 +25,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         AppDelegate.shared = self
 
         setUpMainMenu()
-        registerServices()
-        registerHotKeys()
+        if !TTSRuntime.isPreview {
+            registerServices()
+            registerHotKeys()
+        }
         observeState()
         appState.agentAccess.startPairing()
 
@@ -34,12 +36,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // loads voice/model inventory when the user opens it.
         mainWindow.show()                       // open the management window on launch
 
-        Log.app.info("Codebasic TTS launched. Backend: \(self.appState.backendIdentity, privacy: .public)")
+        Log.app.info("\(TTSRuntime.displayName, privacy: .public) launched. Backend: \(self.appState.backendIdentity, privacy: .public)")
     }
 
     // MARK: - Local MCP opt-in
 
     @objc private func toggleLocalSpeech() {
+        guard !TTSRuntime.isPreview else { return }
         if let socket = localSpeechSocket {
             socket.stop(); localSpeechSocket = nil; localSpeechGate = nil
             localSpeechMenu?.state = .off
@@ -64,6 +67,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func toggleLocalInstructions() { toggleInstructionSharing() }
 
     func toggleInstructionSharing(preselect: LocalInstructionProfile.Name? = nil) {
+        guard !TTSRuntime.isPreview else { return }
         if localInstructionSocket != nil { revokeLocalInstructions(); return }
         guard appState.agentAccess.shared == nil else {
             showInstructionShareError("활성 에이전트 지시 조회를 먼저 해제하세요.")
@@ -241,7 +245,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Global hotkeys (read/explain the selection from any app)
 
-    private let hotKeys = HotKeyCenter()
+    private lazy var hotKeys = HotKeyCenter()
 
     /// ⌃⌥⌘R → read the selection aloud. The selection is
     /// grabbed via a clipboard-preserving copy, so it works even where the
@@ -267,6 +271,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Called by ServiceProvider when the user picks "Codebasic TTS": synthesize
     /// the selected text (cache-first) and play it without opening the window.
     func handleSelectedText(_ text: String) {
+        guard !TTSRuntime.isPreview else { return }
         let preview = text.replacingOccurrences(of: "\n", with: " ").prefix(60)
         Log.app.info("handleSelectedText: \(text.count) chars — \"\(preview, privacy: .public)\"")
         appState.captureHUDTarget()
@@ -280,25 +285,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let appItem = NSMenuItem()
         main.addItem(appItem)
-        let appMenu = NSMenu(title: "Codebasic TTS")
+        let appMenu = NSMenu(title: TTSRuntime.displayName)
         appItem.submenu = appMenu
-        appMenu.addItem(withTitle: "설정…", action: #selector(openSettings), keyEquivalent: ",").target = self
-        appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "재생 중지", action: #selector(stopSpeaking), keyEquivalent: "").target = self
-        let local = appMenu.addItem(withTitle: "로컬 MCP 음성 입력 허용 (이번 실행)",
-                                    action: #selector(toggleLocalSpeech), keyEquivalent: "")
-        local.target = self
-        localSpeechMenu = local
-        let instructions = appMenu.addItem(withTitle: "로컬 MCP 지시 공유 (이번 실행)…",
-                                           action: #selector(toggleLocalInstructions), keyEquivalent: "")
-        instructions.target = self
-        localInstructionMenu = instructions
+        if !TTSRuntime.isPreview {
+            appMenu.addItem(withTitle: "설정…", action: #selector(openSettings), keyEquivalent: ",").target = self
+            appMenu.addItem(.separator())
+            appMenu.addItem(withTitle: "재생 중지", action: #selector(stopSpeaking), keyEquivalent: "").target = self
+            let local = appMenu.addItem(withTitle: "로컬 MCP 음성 입력 허용 (이번 실행)",
+                                        action: #selector(toggleLocalSpeech), keyEquivalent: "")
+            local.target = self
+            localSpeechMenu = local
+            let instructions = appMenu.addItem(withTitle: "로컬 MCP 지시 공유 (이번 실행)…",
+                                               action: #selector(toggleLocalInstructions), keyEquivalent: "")
+            instructions.target = self
+            localInstructionMenu = instructions
+        }
         let draftReceipt = appMenu.addItem(withTitle: "외부 대본 받기 허용 (이번 실행)",
                                            action: #selector(toggleDraftReceipt), keyEquivalent: "")
         draftReceipt.target = self
         draftReceiptMenu = draftReceipt
         appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "Codebasic TTS 가리기", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        appMenu.addItem(withTitle: "\(TTSRuntime.displayName) 가리기", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         appMenu.addItem(withTitle: "다른 항목 가리기",
                         action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
             .keyEquivalentModifierMask = [.command, .option]
@@ -324,8 +331,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         windowMenu.addItem(withTitle: "최소화", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
         windowMenu.addItem(withTitle: "닫기", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         windowMenu.addItem(.separator())
-        windowMenu.addItem(withTitle: "Codebasic TTS 열기", action: #selector(openWindow), keyEquivalent: "").target = self
-        windowMenu.addItem(withTitle: "재생 기록", action: #selector(openHistory), keyEquivalent: "").target = self
+        windowMenu.addItem(withTitle: "\(TTSRuntime.displayName) 열기", action: #selector(openWindow), keyEquivalent: "").target = self
+        if !TTSRuntime.isPreview {
+            windowMenu.addItem(withTitle: "재생 기록", action: #selector(openHistory), keyEquivalent: "").target = self
+        }
         NSApp.windowsMenu = windowMenu
 
         NSApp.mainMenu = main

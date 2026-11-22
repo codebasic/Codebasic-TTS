@@ -47,6 +47,7 @@ final class CodexPlanRPC {
     }
 
     init(executable suppliedExecutable: URL? = nil, home suppliedHome: URL? = nil) throws {
+        guard !TTSRuntime.isPreview else { throw connectionError("프리뷰에서는 Codex 계정 연결을 사용할 수 없습니다.") }
         guard let executable = suppliedExecutable ?? Self.executable else { throw connectionError("Codex CLI가 필요합니다. 설치 안내를 확인하세요.") }
         let home = suppliedHome ?? URL(fileURLWithPath: Secrets.appSupportDir).appendingPathComponent("codex-plan", isDirectory: true)
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)

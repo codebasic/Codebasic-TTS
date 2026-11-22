@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Native signed CLI + app-side gate, offscreen/synthetic; all files in build/."""
+import argparse
 import json
 import os
 from pathlib import Path
@@ -57,9 +58,9 @@ def call(proc, name, **kwargs):
     return rpc(proc, "tools/call", {"name":name, "arguments":kwargs})
 
 
-def initialize(proc):
+def initialize(proc, server_name="codebasic-tts-agent"):
     res = rpc(proc, "initialize", {"protocolVersion":"2025-11-25", "capabilities":{}})
-    assert res["serverInfo"]["name"] == "codebasic-tts-agent"
+    assert res["serverInfo"]["name"] == server_name
     write(proc, '{"jsonrpc":"2.0","method":"notifications/initialized"}')
     assert {t["name"] for t in rpc(proc, "tools/list")["tools"]} == {"tts_agent_status","get_tts_instructions","submit_explanation_draft","submit_tts_draft"}
 
@@ -73,43 +74,58 @@ def message(result):
     return result["content"][0]["text"]
 
 
-def main():
+def main(preview):
+    app_id = APP_ID + ".preview" if preview else APP_ID
+    server_name = "codebasic-tts-agent-preview" if preview else "codebasic-tts-agent"
+    display_name = "Codebasic TTS Preview" if preview else "Codebasic TTS"
+    ipc = ("codebasic-tts-preview-mcp-" if preview else "codebasic-tts-mcp-") + str(os.getuid())
     BUILD.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="v", dir=BUILD) as temp:
         root = Path(temp)
-        new_helper = root / "AgentCatalogMCP.swift"
-        original = (REPO/"Helpers/AgentCatalogMCP.swift").read_text()
-        path = r'"/private/tmp/codebasic-tts-mcp-\(getuid())"'
+        helper_src = REPO / "Helpers/AgentCatalogMCP.swift"
+        runtime = root / "TTSRuntime.swift"
+        original = (SOURCES / "Core/TTSRuntime.swift").read_text()
+        path = r'"/private/tmp/\(prefix)-\(uid)"'
         assert original.count(path) == 1
-        new_helper.write_text(original.replace(path, '"ipc"'))
+        runtime.write_text(original.replace(path, r'"\(prefix)-\(uid)"'))
         sdk = subprocess.check_output(["/usr/bin/xcrun","--sdk","macosx26.5","--show-sdk-path"], text=True).strip()
         env = {"PATH":"/usr/bin:/bin", "HOME":str(root), "TMPDIR":str(root)}
         compile_env = {**env, "SDKROOT":sdk, "CLANG_MODULE_CACHE_PATH":str(BUILD/"module-cache")}
-        common = [SOURCES/"App/AgentPeerSigning.swift", SOURCES/"Core/AgentCatalog.swift"]
+        common = [runtime, SOURCES/"App/AgentPeerSigning.swift", SOURCES/"Core/AgentCatalog.swift"]
         server_src = [SOURCES/"App/LocalInstructionSocket.swift", SOURCES/"App/AgentSessionController.swift",
                       SOURCES/"Core/AgentDeliveryProofs.swift", SOURCES/"Core/ExplanationDraftWorkspace.swift",
                       SOURCES/"Core/AgentInstructionEditing.swift",
                       HERE / "LocalExplanationDraftSocketProbe.swift"]
         other_src = root / "Other.swift"
-        other_src.write_text(new_helper.read_text().replace('version":"2.0"', 'version":"2.0-other"'))
-        for binary, identifier, files in ((root/"helper", APP_ID+".agent-helper",[new_helper]),
-                                           (root/"server", APP_ID,server_src),
-                                           (root/"other", APP_ID+".agent-helper",[other_src])):
-            subprocess.run(["/usr/bin/swiftc","-framework","Security",*map(str,common+files),"-o",str(binary)],
+        other_src.write_text(helper_src.read_text().replace('version":"2.0"', 'version":"2.0-other"'))
+
+        def compile_signed(name, identifier, files, preview_build):
+            binary = root / name
+            flags = ["-D", "TTS_LOCAL_PREVIEW"] if preview_build else []
+            subprocess.run(["/usr/bin/swiftc",*flags,"-framework","Security",*map(str,common+files),"-o",str(binary)],
                            check=True, timeout=120, env=compile_env)
             subprocess.run(["/usr/bin/codesign","--force","--options","runtime","--timestamp=none",
                             "--sign",os.environ.get("CODESIGN_IDENTITY","Codebasic TTS Local"),
                             "--identifier",identifier,str(binary)], check=True, timeout=15)
             subprocess.run(["/usr/bin/codesign", "--verify", "--strict", str(binary)], check=True, timeout=15)
+
+        for name, identifier, files in (("helper",app_id+".agent-helper",[helper_src]),
+                                        ("server",app_id,server_src),
+                                        ("other",app_id+".agent-helper",[other_src])):
+            compile_signed(name, identifier, files, preview)
+        if preview:
+            compile_signed("product-helper", APP_ID+".agent-helper", [helper_src], False)
+            compile_signed("product-server", APP_ID, server_src, False)
+            compile_signed("wrong-id", APP_ID+".agent-helper", [helper_src], True)
         shutil.copy2(root / "server", root / "unhardened")
         subprocess.run(["/usr/bin/codesign","--force","--timestamp=none",
                         "--sign",os.environ.get("CODESIGN_IDENTITY","Codebasic TTS Local"),
-                        "--identifier",APP_ID,str(root / "unhardened")], check=True, timeout=15)
+                        "--identifier",app_id,str(root / "unhardened")], check=True, timeout=15)
         # Known zero-capability value; explicitly does not enable a network client.
         marker = {"com.apple.security.network.client": False}
         entitlements = root / "TestEntitlements.plist"
         entitlements.write_bytes(plistlib.dumps(marker))
-        for base, identifier in (("helper", APP_ID+".agent-helper"), ("server", APP_ID)):
+        for base, identifier in (("helper", app_id+".agent-helper"), ("server", app_id)):
             entitled = root / ("entitled-" + base)
             shutil.copy2(root / base, entitled)
             subprocess.run(["/usr/bin/codesign","--force","--timestamp=none","--options","runtime",
@@ -132,8 +148,8 @@ def main():
             process.append(proc)
             return proc
 
-        def start_server(name="server", helper="helper", waiting=90000):
-            proc = start(name, "ipc", str(root / helper), str(waiting))
+        def start_server(name="server", helper="helper", waiting=90000, directory=ipc):
+            proc = start(name, directory, str(root / helper), str(waiting))
             assert read(proc) == "ready"
             return proc
 
@@ -142,9 +158,31 @@ def main():
 
         a, b, other, entitled_helper = [start(name) for name in ("helper", "helper", "other", "entitled-helper")]
         try:
-            for h in a,b,other,entitled_helper: initialize(h)
+            for h in a,b,other,entitled_helper: initialize(h, server_name)
             assert status(a) == "app_unavailable"
-            assert "Open Codebasic TTS" in message(call(a, "get_tts_instructions", profile=FIXTURE_SELECTOR))
+            assert f"Open {display_name}" in message(call(a, "get_tts_instructions", profile=FIXTURE_SELECTOR))
+            if preview:
+                product = start("product-helper")
+                initialize(product)
+                product_ipc = "codebasic-tts-mcp-" + str(os.getuid())
+                product_server = start_server("product-server", "product-helper", directory=product_ipc)
+                assert command(product_server, "pair") == "ok" and command(product_server, "enable") == "ok"
+                assert status(product) == "receiving_only" and status(a) == "app_unavailable"
+                rejected = start_server(helper="wrong-id")
+                wrong_id = start("wrong-id")
+                initialize(wrong_id, server_name)
+                assert command(rejected, "pair") == "ok" and command(rejected, "enable") == "ok"
+                assert status(wrong_id) == "app_unavailable"
+                assert not json.loads(command(rejected, "snapshot"))["paired"]
+                assert command(rejected, "end") == "ok"
+                local = start_server()
+                assert command(local, "pair") == "ok" and command(local, "enable") == "ok"
+                assert status(a) == status(product) == "receiving_only"
+                assert call(a,"submit_tts_draft",idempotency_key="cross",display_text="synthetic preview")["structuredContent"]["status"] == "accepted"
+                assert json.loads(command(local, "snapshot"))["editor"] == "synthetic preview"
+                assert json.loads(command(product_server, "snapshot"))["editor"] == ""
+                assert command(local, "end") == command(product_server, "end") == "ok"
+                print("coexisting signed product and preview listeners are isolated by socket namespace and helper identifier")
             for rejected in ("unhardened", "entitled-server"):
                 server = start_server(rejected)
                 assert command(server, "pair") == "no"
@@ -160,7 +198,7 @@ def main():
                 previous = Path.cwd()
                 try:
                     os.chdir(root)
-                    probe.connect("ipc/p.sock")
+                    probe.connect(ipc + "/p.sock")
                     probe.sendall(b'{"schema_version":2}\n')
                     probe.shutdown(socket.SHUT_WR)
                     try:
@@ -388,4 +426,6 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--preview", action="store_true", help="validate the preview namespace and core draft contract")
+    main(parser.parse_args().preview)
