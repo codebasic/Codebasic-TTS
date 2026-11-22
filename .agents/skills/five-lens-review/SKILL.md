@@ -27,10 +27,20 @@ Start one named subagent for each lens. Use fresh contexts where possible and ke
 | Defensive security · 방어적 보안 | `five_lens_security` |
 | Deployment · 배포 | `five_lens_deployment` |
 
-For each report, record the role, actual harness and model evidence when exposed, inspected artifacts, and verification limits. Give each finding a severity, affected scenario and consequence, exact revision and source location, and evidence. Identify source inference, existing logs, synthetic fixtures, actual UI, and real provider observations as such. Say when no finding was established or a lens could not run. Follow the authorized scope for any checks, and keep defensive security within static review and existing evidence.
+## Report claims with evidence
+
+Each reviewer records their role, observed harness and model metadata when available, inspected artifacts, and verification limits. Give each finding a severity, affected scenario, and consequence. For every material claim in a first report or the synthesis, cite the exact reviewed commit SHA and source `file:line`. Add the verification command and observed result, or link the specific screen capture, recording, log, or other artifact supporting the claim. Attribute existing evidence to its original run. If no source location applies, give the precise artifact location and describe any gap in its link to the commit.
+
+Label material claims by how they were established:
+
+- **Direct execution · 직접 실행** — Record the command and result, or the observed UI steps and supporting artifact. Identify whether the environment was a synthetic fixture, actual UI, or a real provider.
+- **Static inference · 정적 추론** — Cite the exact source path and lines and state what they imply. Identify any supporting evidence from prior runs.
+- **Unverified · 미확인** — State the exact gap and the evidence needed to resolve it. An unresolved hypothesis belongs here.
+
+Say when no finding was established or a lens could not run. Follow the authorized scope for checks and keep defensive security within static review and existing evidence.
 
 ## Synthesize the evidence
 
 - After first reports are fixed, reconcile issues by underlying mechanism. Preserve contradictory evidence and explain the disposition of duplicates, false positives, and unverified hypotheses. Put verified and material findings first and identify the corresponding fix or decision when available.
 - Make separate preview and release decisions using `pass`, `blocked`, or `unverified`. Name the evidence for each decision and the unresolved condition that could change it. Preview concerns the proposed isolated experience. Release also considers the applicable distribution, operational readiness, and real-environment evidence. These are review decisions with separate authorization for any action.
-- If comparing Sol with another provider, give both teams the same source revisions, evidence, scope, and five lenses. Save both independent first reports before either team sees the other's findings. Evaluate practical incremental value using unique reproduced or otherwise verified defects, changes actually made or release decisions affected, and counts of duplicates, false positives, and unverified hypotheses. Record extra elapsed time and execution cost when measured, and mark missing values as unknown. Draw the conclusion from impact and marginal evidence.
+- If comparing Sol with another provider, give both teams the same source revisions, evidence, scope, and five lenses. Save both independent first reports before either team sees the other's findings. Credit only verified unique defects and documented outcomes, such as a fix actually made or a preview or release decision that changed. Track review comment volume, duplicates, false positives, and unverified hypotheses as diagnostics, with no performance credit. Record extra elapsed time and execution cost when measured, and mark missing values as unknown. Draw the conclusion from impact and marginal evidence.
