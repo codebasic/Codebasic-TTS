@@ -17,7 +17,7 @@
 command = "/absolute/path/to/Codebasic TTS.app/Contents/Helpers/CodebasicAgentMCP"
 ```
 
-다른 stdio MCP 클라이언트에도 같은 절대 경로를 실행 명령으로 지정하면 됩니다. 앱을 옮기거나 이름을 바꾸면 이 명령 경로만 수정하세요. 전역 에이전트 설정은 앱이 변경하지 않습니다.
+앱의 **MCP 설정 복사** 메뉴로 현재 번들 경로가 포함된 Codex 설정이나 Claude Code 사용자 범위 등록 명령을 복사할 수 있습니다. 복사만으로 설정 파일을 바꾸거나 명령을 실행하지 않습니다. 다른 stdio MCP 클라이언트에도 같은 절대 경로를 실행 명령으로 지정하면 됩니다. 앱을 옮기거나 이름을 바꾸면 이 명령 경로만 수정하세요. 전역 에이전트 설정은 앱이 변경하지 않습니다.
 
 - `tts_agent_status`: 앱 연결과 두 권한의 상태를 확인합니다. 지시나 대본은 읽지 않습니다.
 - `get_tts_instructions`: 인자 없이 호출하면 앱이 승인한 선택을 읽습니다. 정확한 `profile` ID를 지정하는 기존 호출도 지원합니다. 기존 기본 ID는 `explain`, `continue`, `normalize`입니다. 답변의 `revision`과 `body_sha256`은 정확한 버전과 UTF-8 원문을 식별합니다. 수신 증명은 도우미 내부에서만 관리됩니다.

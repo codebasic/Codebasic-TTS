@@ -21,6 +21,7 @@ struct ExplainWorkspace: View {
     @State private var pendingReplacement: String?
     @State private var confirmEditorChange = false
     @State private var copiedRevision: String?
+    @State private var copiedMCPClient: String?
 
     private var selectedSnapshot: AgentInstructionSnapshot? { app.agentSnapshot(profile) }
     private var canUsePlayer: Bool { !app.isBusy && !app.explaining && !app.normalizing }
@@ -198,6 +199,7 @@ struct ExplainWorkspace: View {
                 Text("MCP 조회 허용 안 함").font(.caption).foregroundStyle(.secondary)
             }
             if !access.status.isEmpty { Text(access.status).font(.caption).foregroundStyle(.secondary) }
+            mcpSetup
             if let snapshot = selectedSnapshot {
                 if !snapshot.shareable {
                     Text("이 지시는 공유 한도(UTF-8 8KB)를 초과했거나 유효하지 않습니다. 원문은 그대로 보존됩니다.")
@@ -219,6 +221,41 @@ struct ExplainWorkspace: View {
                 }
             }
         }
+    }
+
+    private var mcpSetup: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            if let setup = AgentMCPConfiguration.bundled() {
+                HStack {
+                    Menu("MCP 설정 복사") {
+                        Button("Codex · config.toml") {
+                            copyMCP(setup.codexTOML, client: "Codex")
+                        }
+                        if let command = setup.claudeCodeCommand {
+                            Button("Claude Code · 터미널 등록 명령") {
+                                copyMCP(command, client: "Claude Code")
+                            }
+                        }
+                    }
+                    .accessibilityLabel("MCP 설정 복사")
+                    .accessibilityHint("같은 Mac에 있는 Codex 또는 Claude Code용 설정을 클립보드에 복사합니다.")
+                    if let copiedMCPClient {
+                        Text("\(copiedMCPClient) 설정 복사됨").font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                Text("같은 Mac에서만 사용합니다. Codex는 config.toml에 붙여넣고, Claude Code는 터미널에서 직접 실행하세요. 앱이 다른 위치로 이동하면 설정을 다시 복사하세요.")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                Text("앱에 실행 가능한 MCP 도우미가 없어 설정을 복사할 수 없습니다.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func copyMCP(_ text: String, client: String) {
+        let clipboard = NSPasteboard.general
+        clipboard.clearContents()
+        if clipboard.setString(text, forType: .string) { copiedMCPClient = client }
     }
 
     private func title(_ selector: String) -> String {
