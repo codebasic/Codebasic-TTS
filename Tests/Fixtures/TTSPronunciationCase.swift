@@ -205,5 +205,26 @@ enum PronunciationCase {
         app.playExplanationDraft(displayOnly: true)
         precondition(app.phase == .idle && Case.log.snapshot().1.count == 6)
         print("draft workspace: queued/retried/no overwrite; stale voice blocked; explicit literal playback separates subtitle and speech, no normalizer")
+
+        let incoming = ExplanationDraft(id: "live", display: Case.visual, speech: Case.spoken)!
+        let manualID = inbox.editorDocumentID
+        precondition(inbox.receiveDocument(incoming) == .accepted)
+        inbox.clearEditor(expectedDocumentID: manualID)
+        precondition(inbox.display == Case.visual && inbox.speech == Case.spoken)
+        precondition(app.phase == .idle && Case.log.snapshot().1.count == 6)
+        inbox.editDisplay(edited)
+        app.agentAccess.disableReceive()
+        app.playExplanationDraft()
+        precondition(app.phase == .idle && Case.log.snapshot().1.count == 6)
+        app.playExplanationDraft(displayOnly: true)
+        try await awaitPayload(app, count: 7)
+        precondition(app.subtitleText == edited && Case.log.snapshot().1.last == edited)
+        inbox.editSpeech(corrected)
+        inbox.confirmSpeech()
+        app.playExplanationDraft()
+        try await awaitPayload(app, count: 8)
+        precondition(app.subtitleText == edited && Case.log.snapshot().1.last == corrected)
+        precondition(Case.log.snapshot().0.count == 1)
+        print("live document: receipt and stale clear caused no synthesis; explicit actions after screen edit and receipt disable captured the expected subtitle and speech")
     }
 }

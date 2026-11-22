@@ -153,6 +153,8 @@ import Foundation
         case "duplicate": tool(id, "Already received. Nothing new was opened or played.", extra: ["status": "duplicate"])
         case "conflict": tool(id, "Retry key already used for different content.", failed: true)
         case "busy": tool(id, "Open documents have reached their limit. Close a tab and retry with the same key.", failed: true, extra: ["status": "busy"])
+        case "session_limit":
+            tool(id, "This helper session has reached its draft-key limit. Ask the user to disconnect and enable a new session.", failed: true, extra: ["status": "session_limit"])
         case "rate_limited": tool(id, "This session’s receipt rate limit was reached.", failed: true)
         case "instruction_required":
             tool(id, "A saved instruction is selected. Read the current selection and send with submit_explanation_draft, or ask the user to clear the selection.", failed: true, extra: ["status": "instruction_required"])

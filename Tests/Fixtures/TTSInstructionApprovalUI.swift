@@ -95,6 +95,18 @@ extension NSAlert {
         precondition(delegate.appState.agentAccess.selectionStatus == .catalogUnavailable)
         delegate.selectAgentInstruction("normalize")
         precondition(delegate.appState.agentAccess.selectionStatus == .pairingUnavailable)
+        let catalog = delegate.appState.agentCatalog
+        let original = try! catalog.save(label: "삭제할 합성 지시", body: "합성 저장본")
+        delegate.selectAgentInstruction(original.selector)
+        precondition(delegate.appState.agentAccess.instructionScope == original.selector)
+        let renamed = try! catalog.save(id: original.id, expected: original.editVersion,
+                                        label: "이름이 바뀐 합성 지시", body: original.body)
+        precondition(renamed.generation == original.generation)
+        precondition(delegate.appState.agentAccess.instructionScope == original.selector)
+        try! catalog.delete(renamed.id, expected: renamed.editVersion)
+        precondition(delegate.appState.agentAccess.instructionScope == nil)
+        precondition(delegate.appState.agentAccess.selectionStatus == .notSelected)
+        print("selection follows the saved profile across a rename and clears when that profile is deleted")
         click([choice, confirm]); assertOn()
         delegate.selectAgentInstruction("normalize")
         precondition(delegate.appState.agentAccess.selectionStatus == .legacySharing)

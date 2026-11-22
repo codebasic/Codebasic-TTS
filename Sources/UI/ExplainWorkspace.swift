@@ -19,7 +19,7 @@ struct ExplainWorkspace: View {
     @State private var catalogError = ""
     @State private var showSpeech = false
     @State private var showAdvanced = false
-    @State private var closeDocumentID: String?
+    @State private var editorChange: EditorChange?
     @State private var confirmEditorChange = false
     @State private var instructionEdits = AgentInstructionEditBuffer()
     @State private var copiedMCPClient: String?
@@ -28,7 +28,27 @@ struct ExplainWorkspace: View {
     private var canUsePlayer: Bool { !app.isBusy && !app.explaining && !app.normalizing }
     private var selectedRecord: AgentCatalogRecord? { catalog.record(profile) }
 
+    private enum EditorChange {
+        case clear(String)
+        case close(String)
+
+        var isClosing: Bool {
+            if case .close = self { return true }
+            return false
+        }
+    }
+
     var body: some View {
+        workspace
+            .onChange(of: access.instructionScope) { old, new in
+                if new == nil, old == profile { profile = "" }
+            }
+            .onChange(of: drafts.activeDocumentID) { _, _ in
+                showSpeech = !drafts.speech.isEmpty
+            }
+    }
+
+    @ViewBuilder private var workspace: some View {
         if showAdvanced {
             VStack(alignment: .leading, spacing: 0) {
                 HStack {
@@ -63,12 +83,6 @@ struct ExplainWorkspace: View {
                 }
             }
             .onAppear { _ = catalog.refresh() }
-            .onChange(of: access.hasInstructionScope) { old, new in
-                if old && !new { profile = "" }
-            }
-            .onChange(of: drafts.activeDocumentID) { _, _ in
-                showSpeech = !drafts.speech.isEmpty
-            }
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
                 _ = catalog.refresh()
             }
@@ -86,7 +100,7 @@ struct ExplainWorkspace: View {
                     do {
                         try catalog.delete(old.id, expected: old.editVersion)
                         instructionEdits.revert(old.selector)
-                        profile = ""
+                        if profile == old.selector { profile = "" }
                         catalogError = ""
                     } catch { catalogError = error.localizedDescription }
                     removeProfile = nil
@@ -97,15 +111,16 @@ struct ExplainWorkspace: View {
                      ? "이미 받은 대본은 보관함에 남지만, 이 지시 버전의 새 대본은 받을 수 없습니다."
                      : "이 지시의 저장하지 않은 변경도 함께 사라집니다. 이미 받은 대본은 그대로 남습니다.")
             }
-            .confirmationDialog(closeDocumentID == nil ? "편집기의 글을 비울까요?" : "저장하지 않은 대본을 닫을까요?",
-                                isPresented: $confirmEditorChange, titleVisibility: .visible) {
-                Button(closeDocumentID == nil ? "비우기" : "닫기", role: .destructive) {
-                    if let id = closeDocumentID { drafts.closeInactiveDocument(id) }
-                    else if drafts.activeOriginal != nil { drafts.editDisplay(""); drafts.editSpeech("") }
-                    else { drafts.clearEditor() }
-                    closeDocumentID = nil
+            .confirmationDialog(editorChange?.isClosing == true ? "저장하지 않은 대본을 닫을까요?" : "편집기의 글을 비울까요?",
+                                isPresented: $confirmEditorChange, titleVisibility: .visible, presenting: editorChange) { change in
+                Button(change.isClosing ? "닫기" : "비우기", role: .destructive) {
+                    switch change {
+                    case .clear(let id): drafts.clearEditor(expectedDocumentID: id)
+                    case .close(let id): drafts.closeInactiveDocument(id)
+                    }
+                    editorChange = nil
                 }
-                Button("취소", role: .cancel) { closeDocumentID = nil }
+                Button("취소", role: .cancel) { editorChange = nil }
             }
         }
     }
@@ -126,6 +141,9 @@ struct ExplainWorkspace: View {
                 Spacer(minLength: 8)
                 Button(access.receiving ? "연결 끄기" : access.waitingForReceiveHelper ? "연결 취소" : "연결 켜기") {
                     AppDelegate.shared?.toggleDraftReceipt()
+                }
+                if access.pair != nil {
+                    Button("연결 해제") { access.disconnect() }
                 }
             }
             if !access.status.isEmpty { Text(access.status).font(.caption).foregroundStyle(.orange) }
@@ -373,7 +391,10 @@ struct ExplainWorkspace: View {
                     }
                 }
                 .help("텍스트가 이미 있으면 끝에 추가합니다.")
-                Button("비우기…") { closeDocumentID = nil; confirmEditorChange = true }
+                Button("비우기…") {
+                    editorChange = .clear(drafts.editorDocumentID)
+                    confirmEditorChange = true
+                }
                     .disabled(!drafts.hasEditorContent)
             }
             TextEditor(text: Binding(get: { drafts.display }, set: { drafts.editDisplay($0) }))
@@ -447,7 +468,10 @@ struct ExplainWorkspace: View {
                         .accessibilityAddTraits(tab.id == drafts.activeDocumentID ? .isSelected : [])
                         if tab.id != drafts.activeDocumentID {
                             Button {
-                                if tab.dirty { closeDocumentID = tab.id; confirmEditorChange = true }
+                                if tab.dirty {
+                                    editorChange = .close(tab.id)
+                                    confirmEditorChange = true
+                                }
                                 else { drafts.closeInactiveDocument(tab.id) }
                             } label: {
                                 Image(systemName: "xmark").accessibilityLabel("대본 탭 닫기")

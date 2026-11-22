@@ -116,6 +116,18 @@ enum CodeExplanation { static let noChange = "변경 없음" }
         precondition(draft.speechNeedsReview && draft.playback() == nil)
         draft.editSpeech("&lt;break&gt;"); draft.confirmSpeech()
         precondition(draft.playback() == nil)
+
+        let documents = ExplanationDraftWorkspace()
+        documents.editDisplay("미저장 수동 대본")
+        let manualID = documents.editorDocumentID
+        precondition(documents.receiveDocument(first) == .accepted)
+        documents.clearEditor(expectedDocumentID: manualID)
+        precondition(documents.display == first.display && documents.speech == first.speech)
+        documents.selectDocument(manualID)
+        precondition(documents.display == "미저장 수동 대본")
+        documents.clearEditor(expectedDocumentID: manualID)
+        precondition(documents.display.isEmpty && documents.editorDocumentID != manualID)
+        print("Agent documents: an untitled editor keeps its identity when parked; stale clear cannot affect a receipt")
         print("Agent catalog: atomic persistence/failure, stable identity, oversized preservation, exact generations, proof cap/epoch/TTL, rate, speech guard passed")
     }
 

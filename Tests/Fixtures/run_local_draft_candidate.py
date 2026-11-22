@@ -199,21 +199,36 @@ def main():
             assert info["editor"] == info["original"] == "첫 번째 대본"
             assert not info["canRevert"] and info["associated"] == ""
             assert command(server, "edit-document") == "ok"
-            second = dict(idempotency_key="doc-2", display_text="두 번째 대본")
+            assert command(server, "begin-clear") == "ok"
+            first_id = json.loads(command(server, "snapshot"))["editorID"]
+            second = dict(idempotency_key="doc-2", display_text="두 번째 대본 e\u0301\n",
+                          speech_text="  음성 원문 e\u0301\n")
             assert call(a,"submit_tts_draft",**second)["structuredContent"]["status"] == "accepted"
             assert command(server, "edit-document") == "ok"
+            assert command(server, "edit-speech") == "ok"
             third = dict(idempotency_key="doc-3", display_text="세 번째 대본")
             assert call(a,"submit_tts_draft",**third)["structuredContent"]["status"] == "accepted"
+            assert command(server, "confirm-clear") == "ok"
             info = json.loads(command(server, "snapshot"))
-            assert info["editor"] == "세 번째 대본"
-            assert info["tabs"] == ["첫 번째 대본", "두 번째 대본", "세 번째 대본"] and info["dirty"] == [True, True, False]
+            assert info["editor"] == "세 번째 대본" and info["editorID"] != first_id
+            assert info["tabs"] == ["첫 번째 대본", "두 번째 대본 e\u0301", "세 번째 대본"]
+            assert info["dirty"] == [True, True, False]
             assert command(server, "switch-tab 1") == "ok"
             info = json.loads(command(server, "snapshot"))
-            assert info["editor"] == "직접 수정: 두 번째 대본" and info["canRevert"]
+            assert info["editor"] == "직접 수정: " + second["display_text"] and info["canRevert"]
+            assert info["speech"] == "음성 수정: " + second["speech_text"]
             assert command(server, "revert-document") == "ok"
-            assert json.loads(command(server, "snapshot"))["editor"] == "두 번째 대본"
+            info = json.loads(command(server, "snapshot"))
+            assert info["editor"].encode() == second["display_text"].encode()
+            assert info["speech"].encode() == second["speech_text"].encode()
             assert command(server, "switch-tab 0") == "ok"
-            assert json.loads(command(server, "snapshot"))["editor"] == "직접 수정: 첫 번째 대본"
+            info = json.loads(command(server, "snapshot"))
+            assert info["editor"] == "직접 수정: 첫 번째 대본" and info["editorID"] == first_id
+            assert command(server, "begin-clear") == "ok" and command(server, "confirm-clear") == "ok"
+            assert json.loads(command(server, "snapshot"))["editor"] == ""
+            assert command(server, "revert-document") == "ok"
+            assert json.loads(command(server, "snapshot"))["editor"] == draft["display_text"]
+            print("fixed clear: two arrivals leave the current document and parked edits intact; target clear and exact two-field revert passed")
 
             # Optional instruction is separate, pins only the selected saved revision, and cannot be bypassed.
             assert command(server, "select") == "ok" and status(a) == "ready"
@@ -225,6 +240,13 @@ def main():
             fields = dict(profile=FIXTURE_SELECTOR, revision=prior["revision"], idempotency_key="linked", display_text="연결된 대본")
             assert call(a,"submit_explanation_draft",**fields)["structuredContent"]["status"] == "accepted"
             assert json.loads(command(server, "snapshot"))["associated"] == FIXTURE_SELECTOR
+            assert call(a,"submit_explanation_draft",**fields)["structuredContent"]["status"] == "duplicate"
+            assert call(a,"submit_explanation_draft",**{**fields,"idempotency_key":"linked-repeat"})["structuredContent"]["status"] == "accepted"
+            assert command(server, "select-alternate") == "ok"
+            assert call(a,"submit_explanation_draft",**fields)["structuredContent"]["status"] == "unproven"
+            assert command(server, "select") == "ok"
+            assert call(a,"submit_explanation_draft",**fields)["structuredContent"]["status"] == "unproven"
+            assert call(a,"get_tts_instructions")["structuredContent"] == prior
             assert command(server,"edit-buffer") == "ok"
             assert call(a,"get_tts_instructions")["structuredContent"] == prior
             assert command(server,"save-buffer") == "ok"
@@ -234,10 +256,27 @@ def main():
             assert command(server,"select") == "ok"
             revised = call(a,"get_tts_instructions")["structuredContent"]
             assert revised["revision"] != prior["revision"] and revised["instructions"] == "저장하지 않은 합성 지시"
+            assert command(server,"invalidate-pending") == "ok"  # The selected scope survives an edit.
+            assert status(a) == "instruction_required"
             assert command(server,"delete") == "ok"
-            assert call(a,"submit_tts_draft",**plain)["structuredContent"]["status"] == "instruction_required"
-            assert command(server,"revoke") == "ok" and status(a) == "receiving_only"
+            assert status(a) == "receiving_only"
+            assert json.loads(command(server, "snapshot"))["scope"] == ""
+            stale = {**fields, "revision":revised["revision"], "idempotency_key":"stale-deleted"}
+            snapshot = json.loads(command(server, "snapshot"))
+            assert call(a,"submit_explanation_draft",**stale)["structuredContent"]["status"] == "unproven"
+            assert json.loads(command(server, "snapshot")) == snapshot
             assert call(a,"submit_tts_draft",**plain)["structuredContent"]["status"] == "accepted"
+            print("fixed deletion: edited selection clears on deletion, generic draft opens and stale linked draft is refused")
+
+            assert command(server, "disable") == "ok"
+            assert status(a) == "approval_required" and call(a,"submit_tts_draft",**plain)["isError"]
+            assert command(server, "enable") == "ok"
+            assert call(a,"submit_tts_draft",**plain)["structuredContent"]["status"] == "duplicate"
+            alias = {**plain, "idempotency_key":"intentional-repeat"}
+            assert call(a,"submit_tts_draft",**alias)["structuredContent"]["status"] == "accepted"
+            assert call(a,"submit_tts_draft",**alias)["structuredContent"]["status"] == "duplicate"
+            assert "Retry key already used" in message(call(a,"submit_tts_draft",**{**alias,"display_text":"changed"}))
+            print("fixed key policy: distinct key opens intentional repeat, and reused key with changed text conflicts")
 
             server.kill()
             server.wait(timeout=3)
@@ -245,6 +284,7 @@ def main():
             server = start_server()
             assert command(server, "pair") == "ok"
             assert status(a) == "approval_required"
+            assert not json.loads(command(server, "snapshot"))["paired"]
             assert call(a,"submit_tts_draft",**draft)["isError"]
             assert command(server,"enable") == "ok" and status(a) == "receiving_only"
             assert call(a,"submit_explanation_draft",**fields)["isError"] # old proof cannot authorize a new instance
@@ -252,15 +292,71 @@ def main():
                 args = {"idempotency_key":f"cap-{index}","display_text":f"합성 문서 {index}"}
                 assert call(a,"submit_tts_draft",**args)["structuredContent"]["status"] == "accepted"
                 assert command(server,"edit-document") == "ok"
+                assert command(server,"edit-speech") == "ok"
             full = call(a,"submit_tts_draft",idempotency_key="cap-overflow",display_text="넘치는 문서")
             assert full["isError"] and full["structuredContent"]["status"] == "busy"
             snapshot = json.loads(command(server,"snapshot"))
             assert len(snapshot["tabs"]) == 6 and all(snapshot["dirty"])
             assert snapshot["editor"] == "직접 수정: 합성 문서 5"
-            stop(a)
-            assert status(b) == "approval_required" # permission does not move to another verified helper
+            for index in range(6):
+                assert command(server, f"switch-tab {index}") == "ok"
+                snapshot = json.loads(command(server, "snapshot"))
+                assert snapshot["editor"] == f"직접 수정: 합성 문서 {index}" and snapshot["speech"] == "음성 수정: "
+            assert command(server, "disconnect") == "ok"
+            assert status(a) == "approval_required" and status(b) == "approval_required"
+            assert call(b,"submit_tts_draft",**draft)["isError"]
+            assert not json.loads(command(server,"snapshot"))["paired"]
             assert not json.loads(command(server,"snapshot"))["receiving"]
+            assert command(server, "enable") == "ok" and status(b) == "receiving_only"
+            assert status(a) == "other_agent"
+            stop(b)
+            assert status(a) == "approval_required"
+            assert not json.loads(command(server,"snapshot"))["receiving"]
+            print("fixed disconnect: either helper stays unpaired until explicit approval; second helper can take over, and exit revokes its grant")
             assert command(server, "end") == "ok"
+
+            # Deleting an unrelated profile cannot change an absent or different scope.
+            for select_other in (False, True):
+                server = start_server()
+                assert command(server, "pair") == "ok" and command(server, "enable") == "ok"
+                assert status(a) == "receiving_only"
+                if select_other:
+                    assert command(server, "select-alternate") == "ok"
+                    assert call(a,"get_tts_instructions")["structuredContent"]["profile"] == "continue"
+                before = json.loads(command(server, "snapshot"))
+                assert command(server, "delete") == "ok"
+                assert json.loads(command(server, "snapshot")) == before
+                assert status(a) == ("ready" if select_other else "receiving_only")
+                assert command(server, "end") == "ok"
+
+            server = start_server()
+            assert command(server, "pair") == "ok" and command(server, "enable") == "ok"
+            assert status(a) == "receiving_only" and command(server, "select") == "ok"
+            assert command(server, "delete") == "ok" and status(a) == "receiving_only"
+            assert command(server, "end") == "ok"
+
+            server = start_server()
+            assert command(server, "pair") == "ok" and command(server, "select") == "ok"
+            assert command(server, "delete") == "ok"
+            assert command(server, "enable") == "ok" and status(a) == "receiving_only"
+            assert command(server, "end") == "ok"
+
+            server = start_server()
+            assert command(server, "pair") == "ok" and command(server, "enable") == "ok"
+            assert status(a) == "receiving_only"
+            for index in range(128):
+                if index and index % 6 == 0:
+                    assert command(server, "disable") == "ok" and command(server, "enable") == "ok"
+                assert call(a,"submit_tts_draft",idempotency_key=f"key-{index}",
+                            display_text=f"document {index}")["structuredContent"]["status"] == "accepted"
+            assert call(a,"submit_tts_draft",idempotency_key="overflow",
+                        display_text="overflow")["structuredContent"]["status"] == "session_limit"
+            assert call(a,"submit_tts_draft",idempotency_key="key-0",
+                        display_text="document 0")["structuredContent"]["status"] == "duplicate"
+            assert "Retry key already used" in message(call(a,"submit_tts_draft",idempotency_key="key-0",
+                                                           display_text="different"))
+            assert command(server, "end") == "ok"
+            print("bounded key ledger: capacity blocks new keys and still remembers the first successful key")
             print("signed stdio MCP: no-profile first receipt, wrong helper and restart disabled, bounded inputs, idempotency, linked/stale scope, dirty tabs, exact revert and no playback")
         finally:
             for proc in process: stop(proc)

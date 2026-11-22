@@ -11,6 +11,7 @@ enum CodeExplanation { static let noChange = "변경 없음" }
     let original = "합성 지시 e\u{301}\n"
     var current: AgentInstructionSnapshot?
     var edits = AgentInstructionEditBuffer()
+    var clearDocumentID: String?
     let alternate = AgentInstructionSnapshot(selector: "continue", generation: UUID(), text: "두 번째 합성 지시")
 
     init(directory: String, expectedHelper: String, wait: Duration) {
@@ -40,6 +41,13 @@ enum CodeExplanation { static let noChange = "변경 없음" }
                 access.select(chosen, current: { [weak self] in self?.resolve($0) })
             } == true ? "ok" : "no")
         case "edit-document": drafts.editDisplay("직접 수정: " + drafts.display); report("ok")
+        case "edit-speech": drafts.editSpeech("음성 수정: " + drafts.speech); report("ok")
+        case "begin-clear": clearDocumentID = drafts.editorDocumentID; report("ok")
+        case "confirm-clear":
+            guard let id = clearDocumentID else { report("no"); return }
+            clearDocumentID = nil
+            drafts.clearEditor(expectedDocumentID: id)
+            report("ok")
         case "switch-tab":
             guard pieces.count == 2, let index = Int(pieces[1]), drafts.documentTabs.indices.contains(index) else {
                 report("no"); return
@@ -66,7 +74,7 @@ enum CodeExplanation { static let noChange = "변경 없음" }
         case "revert-buffer": edits.revert(selector); report("ok")
         case "revoke": access.revokeSelection(); report("ok")
         case "reject":
-            access.rejectSelection(.catalogUnavailable)
+            access.rejectSelection(selector, reason: .catalogUnavailable)
             report("ok")
         case "invalidate-pending":
             access.invalidate(selector, deleted: false)
@@ -80,7 +88,8 @@ enum CodeExplanation { static let noChange = "변경 없음" }
         case "snapshot":
             let body: [String: Any] = [
                 "selection": access.selectionStatus.rawValue, "diagnostics": access.selectionDiagnostics.map(\.rawValue),
-                "paired": access.pair != nil, "editor": drafts.display, "shared": access.shared != nil,
+                "paired": access.pair != nil, "editor": drafts.display, "speech": drafts.speech,
+                "editorID": drafts.editorDocumentID, "shared": access.shared != nil, "scope": access.instructionScope ?? "",
                 "receiving": access.receiving, "waiting": access.waitingForReceiveHelper,
                 "tabs": drafts.documentTabs.map(\.title), "dirty": drafts.documentTabs.map(\.dirty),
                 "canRevert": drafts.canRevertReceived, "original": drafts.activeOriginal?.display ?? "",

@@ -118,8 +118,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         localInstructionSocket = socket
-        if appState.agentAccess.selectionStatus == .waitingForHelper {
-            appState.agentAccess.rejectSelection(.legacySharing)
+        if appState.agentAccess.selectionStatus == .waitingForHelper,
+           let selector = appState.agentAccess.instructionScope {
+            appState.agentAccess.rejectSelection(selector, reason: .legacySharing)
         }
         appState.sharedInstructionProfile = profile.name
         localInstructionMenu?.state = .on
@@ -149,19 +150,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let access = appState.agentAccess
         let custom = LocalInstructionProfile.Name(rawValue: selector) == nil
         guard localInstructionSocket == nil else {
-            access.rejectSelection(.legacySharing)
+            access.rejectSelection(selector, reason: .legacySharing)
             return
         }
         guard !custom || appState.agentCatalog.refresh() else {
-            access.rejectSelection(.catalogUnavailable)
+            access.rejectSelection(selector, reason: .catalogUnavailable)
             return
         }
         guard let snapshot = appState.agentSnapshot(selector) else {
-            access.rejectSelection(.catalogUnavailable)
+            access.rejectSelection(selector, reason: .catalogUnavailable)
             return
         }
         guard snapshot.shareable else {
-            access.rejectSelection(.invalidInstruction)
+            access.rejectSelection(selector, reason: .invalidInstruction)
             return
         }
         _ = access.select(snapshot, current: { [weak self] in self?.currentAgentSnapshot($0) },

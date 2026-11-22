@@ -9,10 +9,9 @@ struct ExplanationDraft: Identifiable, Sendable {
     let display: String
     let speech: String?
     let provenance: AgentDraftOrigin?
-    let sourceSession: UUID?
     var displayHash: String { AgentBytes.hash(Data(display.utf8)) }
 
-    init?(id: String, display: String, speech: String?, provenance: AgentDraftOrigin? = nil, sourceSession: UUID? = nil) {
+    init?(id: String, display: String, speech: String?, provenance: AgentDraftOrigin? = nil) {
         guard (1...128).contains(id.utf8.count),
               id.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0)
                   || (97...122).contains($0) || $0 == 45 || $0 == 46 || $0 == 95 }),
@@ -21,7 +20,6 @@ struct ExplanationDraft: Identifiable, Sendable {
         self.display = display
         self.speech = speech
         self.provenance = provenance
-        self.sourceSession = sourceSession
     }
 
     private static func validText(_ value: String) -> Bool {
@@ -32,7 +30,7 @@ struct ExplanationDraft: Identifiable, Sendable {
     var fingerprint: SHA256.Digest {
         // The separator cannot occur in either field. Missing speech is distinct
         // from every valid (nonblank) supplied speech string.
-        let scope = provenance.map { "\($0.principal.uuidString)\0\($0.selector)\0\($0.revision.uuidString)\0" } ?? sourceSession.map { "\($0.uuidString)\0unassociated\0" } ?? ""
+        let scope = provenance.map { "\($0.principal.uuidString)\0\($0.selector)\0\($0.revision.uuidString)\0" } ?? ""
         return SHA256.hash(data: Data((scope + display + "\0" + (speech ?? "")).utf8))
     }
 }
@@ -76,7 +74,9 @@ final class ExplanationDraftWorkspace: ObservableObject {
     @Published private(set) var activeOriginal: ExplanationDraft?
     @Published private var parked: [String: ParkedDocument] = [:]
     @Published private var tabOrder: [String] = []
+    private var untitledDocumentID = UUID().uuidString
 
+    var editorDocumentID: String { activeDocumentID ?? untitledDocumentID }
     var canRevertReceived: Bool { activeOriginal != nil && capturedDocument.dirty }
     var documentTabs: [DocumentTab] {
         tabOrder.compactMap { id in
@@ -122,39 +122,32 @@ final class ExplanationDraftWorkspace: ObservableObject {
         let retained = parked.values.compactMap(\.original) + [activeOriginal].compactMap { $0 }
         let previous = recent[draft.id] ?? (retained + pending).first(where: { $0.id == draft.id })?.fingerprint
         if let previous { return previous == draft.fingerprint ? .duplicate : .conflict }
-        if (draft.provenance != nil || draft.sourceSession != nil) && (recent.values.contains(draft.fingerprint)
+        if draft.provenance != nil && (recent.values.contains(draft.fingerprint)
             || (retained + pending).contains(where: { $0.fingerprint == draft.fingerprint })) { return .duplicate }
         return pending.count < Self.maxPending ? .accepted : .busy
     }
 
-    func preflightDocument(_ draft: ExplanationDraft) -> Receipt {
-        let result = preflight(draft)
-        guard result == .accepted else { return result }
+    func canReceiveDocument() -> Bool {
         let active = capturedDocument
         let preserve = active.dirty
-        guard parked.count + (preserve ? 2 : 1) <= Self.maxDocuments else { return .busy }
+        guard parked.count + (preserve ? 2 : 1) <= Self.maxDocuments else { return false }
         let bytes = parked.values.reduce(0) { $0 + $1.display.utf8.count + $1.speech.utf8.count }
-        guard !preserve || bytes + active.display.utf8.count + active.speech.utf8.count <= Self.maxParkedBytes else {
-            return .busy
-        }
-        return .accepted
+        return !preserve || bytes + active.display.utf8.count + active.speech.utf8.count <= Self.maxParkedBytes
     }
 
     /// Live agent receipt updates the visible editor and never starts playback.
     /// Only a clean active document may be replaced. Dirty documents turn into tabs.
     func receiveDocument(_ draft: ExplanationDraft) -> Receipt {
-        let result = preflightDocument(draft)
-        guard result == .accepted else { return result }
+        guard canReceiveDocument() else { return .busy }
         let active = capturedDocument
         let preserve = active.dirty
         if preserve {
-            let id = activeDocumentID ?? UUID().uuidString
+            let id = editorDocumentID
             if !tabOrder.contains(id) { tabOrder.append(id) }
             parked[id] = active
         } else if let id = activeDocumentID {
             tabOrder.removeAll { $0 == id }
         }
-        recordReceipt(draft)
         installReceived(draft)
         return .accepted
     }
@@ -162,7 +155,7 @@ final class ExplanationDraftWorkspace: ObservableObject {
     func selectDocument(_ id: String) {
         guard id != activeDocumentID, let next = parked[id] else { return }
         let active = capturedDocument
-        let currentID = activeDocumentID ?? UUID().uuidString
+        let currentID = editorDocumentID
         parked.removeValue(forKey: id)
         if activeDocumentID != nil || active.dirty {
             parked[currentID] = active
@@ -259,8 +252,15 @@ final class ExplanationDraftWorkspace: ObservableObject {
         speechNeedsReview = false
     }
 
-    func clearEditor() {
+    func clearEditor(expectedDocumentID: String) {
+        guard expectedDocumentID == editorDocumentID else { return }
+        if activeOriginal != nil {
+            editDisplay("")
+            editSpeech("")
+            return
+        }
         if let id = activeDocumentID { tabOrder.removeAll { $0 == id } }
+        untitledDocumentID = UUID().uuidString
         activeDocumentID = nil
         activeOriginal = nil
         display = ""
