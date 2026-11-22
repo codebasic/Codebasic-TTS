@@ -48,7 +48,7 @@ import Foundation
                 let version = ["2025-11-25", "2025-06-18", "2025-03-26"].contains(requested) ? requested : "2025-11-25"
                 result(id, ["protocolVersion":version, "serverInfo":["name":"codebasic-tts-agent", "version":"2.0"],
                             "capabilities":["tools":["listChanged":false]],
-                            "instructions":"Open Codebasic TTS → Agent (에이전트), choose an instruction profile, then approve access. Drafts are queued for review and never played automatically. Use tts_agent_status if needed."])
+                            "instructions":"Open Codebasic TTS → Agent (에이전트), explicitly choose an instruction to share and receive drafts. Drafts are queued for review and never played automatically. Use tts_agent_status if needed."])
             case "ping":
                 result(id, [:])
             case "tools/list" where ready:
@@ -82,7 +82,7 @@ import Foundation
                           let rev = reply["revision"] as? String, UUID(uuidString: rev) != nil,
                           let hash = reply["body_sha256"] as? String, hash == AgentBytes.hash(Data(text.utf8)),
                           let opaque = reply["proof"] as? String, UUID(uuidString: opaque) != nil else {
-                        tool(id, "That profile is not approved or its revision changed. Select it and approve it in Codebasic TTS → Agent (에이전트).", failed: true); continue
+                        tool(id, "That profile is not approved or its revision changed. Select it in Codebasic TTS → Agent (에이전트).", failed: true); continue
                     }
                     let proof = Proof(profile: selector, revision: rev, bodyHash: hash, token: opaque,
                                       expiry: .now.advanced(by: .seconds(AgentLimits.grantSeconds)))
@@ -105,7 +105,7 @@ import Foundation
                     let connection = pairingStatus()
                     guard connection == "ready" || connection == "receiving_only" else {
                         let message = connection == "reading_only"
-                            ? "Draft receipt is not approved. Allow it in Codebasic TTS → Agent (에이전트)."
+                            ? "Draft receipt is not approved. Select an instruction in Codebasic TTS → Agent (에이전트)."
                             : describe(connection)
                         tool(id, message, failed: true); continue
                     }
@@ -124,7 +124,7 @@ import Foundation
                     case "conflict": tool(id, "Retry key already used for different content.", failed: true)
                     case "busy": tool(id, "Inbox is full. Nothing was queued.", failed: true)
                     case "rate_limited": tool(id, "This grant’s receipt rate limit was reached.", failed: true)
-                    case "unproven": tool(id, "Revision proof expired, was revoked, or the profile was deleted. Read again or paste manually.", failed: true)
+                    case "unproven": tool(id, "The instruction selection or version changed, or its proof expired. Read the selected instruction again or paste manually.", failed: true)
                     default: tool(id, "Receipt not confirmed. Check TTS agent status, then retry with the same key or paste manually.", failed: true)
                     }
                 default:
@@ -161,7 +161,7 @@ import Foundation
         case "signing_required": return "Use the certificate-signed helper bundled with Codebasic TTS."
         case "app_unavailable": return "Open Codebasic TTS and try again. The running app must match this signed helper."
         case "other_agent": return "Another MCP session is connected. Close it or disconnect it in Codebasic TTS → Agent (에이전트), then retry."
-        case "approval_required": return "Connected. In Codebasic TTS → Agent (에이전트), pick a profile and approve access."
+        case "approval_required": return "Connected. In Codebasic TTS → Agent (에이전트), choose an instruction to share and receive drafts."
         case "reading_only": return "Connected. One instruction revision is approved. Draft receipt is off."
         case "receiving_only": return "Connected. Draft receipt is on; no instruction revision is currently shared."
         case "ready": return "Connected. One instruction revision and draft receipt are approved. Nothing plays automatically."

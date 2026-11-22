@@ -176,39 +176,48 @@ def main():
             assert status(a) == "approval_required"
             assert status(b) == "other_agent"
             assert call(a,"get_tts_instructions",profile=FIXTURE_SELECTOR)["isError"]
-            assert command(server, "share") == "ok"
-            assert status(a) == "reading_only"
+            assert command(server, "select") == "ok"
+            assert status(a) == "ready" # one selection enabled both grants
             assert call(b,"get_tts_instructions",profile=FIXTURE_SELECTOR)["isError"]
             assert call(a,"get_tts_instructions",profile="explain")["isError"]
             reply = call(a,"get_tts_instructions")
             assert reply["structuredContent"]["profile"] == FIXTURE_SELECTOR
             assert not reply["isError"] and reply["structuredContent"]["instructions"].encode() == "합성 지시 e\u0301\n".encode()
-            assert "proof" not in json.dumps(reply) and "Owner label" not in json.dumps(reply)
+            assert "proof" not in json.dumps(reply)
             old = reply["structuredContent"]["revision"]
-            fields = dict(profile=FIXTURE_SELECTOR, revision=old, idempotency_key="one",display_text="as_frame",speech_text="애즈 프레임")
-            assert call(a,"submit_explanation_draft",**fields)["isError"] # receiving still off
-            assert command(server, "receipt") == "ok"
-            assert command(server, "change") == "ok" and command(server, "revert") == "ok"
-            assert call(a,"get_tts_instructions",profile=FIXTURE_SELECTOR)["isError"] # edit/revert never restores
+            fields = dict(profile=FIXTURE_SELECTOR, revision=old, idempotency_key="one", display_text="as_frame", speech_text="애즈 프레임")
+            assert call(a,"submit_explanation_draft",display_text="text-only",idempotency_key="unproven")["isError"]
             assert call(b,"submit_explanation_draft",**fields)["isError"]
-            assert not call(a,"submit_explanation_draft",**fields)["isError"] # actual older proof
+            assert not call(a,"submit_explanation_draft",**fields)["isError"]
             assert "Already received" in message(call(a,"submit_explanation_draft",**fields))
             assert "Already received" in message(call(a,"submit_explanation_draft",**{**fields,"idempotency_key":"different-key"}))
             assert call(a,"submit_explanation_draft",**{**fields,"speech_text":"other"})["isError"]
+            another = {**fields, "idempotency_key":"two", "display_text":"두 번째 대본"}
+            assert not call(a,"submit_explanation_draft",**another)["isError"]
             snap = json.loads(command(server,"snapshot"))
-            assert snap["count"] == 1 and snap["editor"] == "manual untouched" and snap["old"] == [True]
-            assert snap["labels"] == ["로컬 MCP"] and len(snap["pairs"][0]) == 36
-            assert command(server,"share") == "ok"
-            new = call(a,"get_tts_instructions",profile=FIXTURE_SELECTOR)["structuredContent"]["revision"]
+            assert snap["count"] == 2 and snap["editor"] == "manual untouched"
+            assert snap["previews"] == ["두 번째 대본", "as_frame"] # immediate, both retained, newest first
+            assert snap["old"] == [False, False] and snap["labels"] == ["로컬 MCP", "로컬 MCP"]
+            assert command(server,"select-alternate") == "ok"
+            assert call(a,"get_tts_instructions",profile=FIXTURE_SELECTOR)["isError"]
+            assert call(a,"submit_explanation_draft",**{**fields,"idempotency_key":"one-old"})["isError"]
+            alt = call(a,"get_tts_instructions")["structuredContent"]
+            assert alt["profile"] == "continue"
+            assert not call(a,"submit_explanation_draft",profile="continue",revision=alt["revision"],
+                            display_text="다른 지시의 대본",idempotency_key="alt")["isError"]
+            assert command(server,"select") == "ok"
+            assert call(a,"submit_explanation_draft",**{**fields,"idempotency_key":"one-old"})["isError"] # even re-selecting same revision
+            assert call(a,"get_tts_instructions")["structuredContent"]["revision"] == old
+            assert command(server, "change") == "ok" and command(server, "revert") == "ok"
+            assert status(a) == "approval_required"
+            assert call(a,"get_tts_instructions")["isError"] # edit/revert never restores either grant
+            assert call(a,"submit_explanation_draft",**fields)["isError"]
+            assert command(server,"select") == "ok"
+            new = call(a,"get_tts_instructions")["structuredContent"]["revision"]
             assert new != old
-            assert command(server,"stopreceipt") == "ok" and command(server,"receipt") == "ok"
-            revoked = call(a,"submit_explanation_draft",**{**fields,"revision":new,"idempotency_key":"two"})
-            assert revoked["isError"] and "proof" in message(revoked)
-            read_again = call(a,"get_tts_instructions",profile=FIXTURE_SELECTOR)
-            assert read_again["structuredContent"]["revision"] == new
             assert command(server,"delete") == "ok"
-            assert call(a,"submit_explanation_draft",**{**fields,"revision":new,"idempotency_key":"two"})["isError"]
-            assert json.loads(command(server,"snapshot"))["count"] == 1
+            assert call(a,"submit_explanation_draft",**{**fields,"revision":new,"idempotency_key":"final"})["isError"]
+            assert json.loads(command(server,"snapshot"))["count"] == 3
             # Recover after an ungraceful app restart while the same helper remains alive.
             server.kill()
             server.wait(timeout=3)
@@ -216,7 +225,7 @@ def main():
             server = start_server()
             assert command(server, "pair") == "ok"
             assert status(a) == "approval_required"
-            assert command(server, "share") == "ok" and command(server, "receipt") == "ok"
+            assert command(server, "select") == "ok"
             assert status(a) == "ready"
             assert call(a,"submit_explanation_draft",**fields)["isError"] # old proof cannot authorize a new app instance
             assert json.loads(command(server,"snapshot"))["count"] == 0
@@ -224,7 +233,7 @@ def main():
             assert status(b) == "approval_required"
             assert not json.loads(command(server,"snapshot"))["receiving"]
             assert command(server, "end") == "ok"
-            print("signed stdio MCP: automatic discovery, closed app/restart recovery, default off, distinct grants, untrusted peers rejected, approved draft queued without playback, revocation, dedup, and unchanged editor")
+            print("signed stdio MCP: automatic discovery, closed app/restart recovery, default off, single selection, untrusted peers rejected, immediate previews, old proof and revised/deleted selection revoked, dedup, and unchanged editor")
         finally:
             for proc in process: stop(proc)
 

@@ -17,7 +17,6 @@ struct ExplainWorkspace: View {
     @State private var showInstructionEditor = false
     @State private var showExactPreview = false
     @State private var showSpeech = false
-    @State private var showInbox = false
     @State private var showAdvanced = false
     @State private var pendingReplacement: String?
     @State private var confirmEditorChange = false
@@ -41,9 +40,10 @@ struct ExplainWorkspace: View {
         } else {
             ScrollView {
                 VStack(alignment: .leading, spacing: 15) {
+                    inbox
+                    Divider()
                     instruction
                     Divider()
-                    inbox
                     editor
                     Divider()
                     HStack {
@@ -114,13 +114,14 @@ struct ExplainWorkspace: View {
             HStack(spacing: 8) {
                 Text("에이전트 지시문").font(.headline)
                 Spacer()
-                Picker("지시문 프로필", selection: $profile) {
-                    Text("전체 해설").tag("explain")
-                    Text("변경분만").tag("continue")
-                    Text("음성 대본 정규화").tag("normalize")
-                    ForEach(catalog.records) { record in Text(record.label).tag(record.selector) }
+                Menu(access.pair == nil ? "지시 둘러보기" : "에이전트에 연결할 지시 선택") {
+                    ForEach(LocalInstructionProfile.Name.allCases, id: \.rawValue) { preset in
+                        Button(name(preset)) { chooseProfile(preset.rawValue) }
+                    }
+                    ForEach(catalog.records) { record in
+                        Button(record.label) { chooseProfile(record.selector) }
+                    }
                 }
-                .labelsHidden().frame(width: 218)
                 Button("새 지시…") { catalogEdit = .init(record: nil) }
                     .disabled(catalog.readError || catalog.records.count >= AgentLimits.profiles)
             }
@@ -141,14 +142,16 @@ struct ExplainWorkspace: View {
                     } else {
                         Menu("\(matches.count)개 검색 결과") {
                             ForEach(matches) { match in
-                                Button(match.label) { profile = match.selector; profileSearch = "" }
+                                Button(match.label) { chooseProfile(match.selector); profileSearch = "" }
                             }
                         }
                         .fixedSize()
                     }
                 }
             }
-            Text("선택은 이 앱 안에서만 바뀝니다. 도우미가 볼 수 있게 하려면 지시의 정확한 버전을 따로 허용하세요.")
+            Text(access.pair == nil
+                 ? "둘러보거나 편집해도 외부로 공유되지 않습니다. 연결 후 사용할 지시를 직접 선택하세요."
+                 : "선택한 지시의 이 버전만 연결된 MCP에 공유하고, 그 버전의 대본만 최대 10분간 받습니다. 원격 모델을 쓰는 에이전트는 받은 지시를 해당 서비스에 보낼 수 있습니다.")
                 .font(.caption).foregroundStyle(.secondary)
             if catalog.readError || !catalogError.isEmpty {
                 Text(catalog.readError ? AgentCatalog.Failure.unreadable.localizedDescription : catalogError)
@@ -171,14 +174,14 @@ struct ExplainWorkspace: View {
                 }
                 .disabled(selectedSnapshot == nil)
                 Spacer()
-                Button(access.shared == nil ? "이 지시 공유…" : "조회 허용 해제") {
-                    AppDelegate.shared?.toggleAgentSharing(profile)
+                if access.shared != nil {
+                    Button("공유 및 수신 중지") { access.revokeSelection() }
                 }
-                .disabled(access.shared == nil && (selectedSnapshot?.shareable != true || access.pair == nil))
             }
             HStack {
-                if access.pair != nil {
+                if let pair = access.pair {
                     Text("MCP 자동 연결됨").font(.caption)
+                        .help(pair.hostPath ?? "MCP를 실행한 프로세스 경로를 확인할 수 없습니다.")
                     Button("권한 해제") { access.disconnect() }
                 } else {
                     Text("연결 대기 중 · MCP 클라이언트에서 Codebasic TTS 도우미를 시작하세요.")
@@ -186,7 +189,7 @@ struct ExplainWorkspace: View {
                 }
             }
             if let active = access.shared {
-                Text("조회 허용: \(title(active.selector)) · 이 버전만 · 최대 10분")
+                Text("공유 중: \(title(active.selector)) · 이 버전만 · 최대 10분")
                     .font(.caption).foregroundStyle(.secondary)
             } else if let legacy = app.sharedInstructionProfile {
                 Text("호환용 기본 조회 허용: \(name(legacy)) · 앱 메뉴에서 해제할 수 있습니다.")
@@ -223,50 +226,61 @@ struct ExplainWorkspace: View {
         return catalog.record(selector)?.label ?? selector
     }
 
+    private func chooseProfile(_ selector: String) {
+        profile = selector
+        copiedRevision = nil
+        guard access.pair != nil else { return } // browsing without a connected helper never creates a grant
+        AppDelegate.shared?.selectAgentInstruction(selector)
+    }
+
     private var inbox: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("받은 대본").font(.headline)
+                Text("받은 대본 미리 보기").font(.headline)
                 if !drafts.pending.isEmpty {
-                    Text("\(drafts.pending.count)개 대기").font(.caption).foregroundStyle(.secondary)
+                    Text("\(drafts.pending.count)개").font(.caption).foregroundStyle(.secondary)
                 }
-                Spacer()
-                Button(access.receiving ? "대본 받기 중지" : "대본 받기 허용…") {
-                    AppDelegate.shared?.toggleDraftReceipt()
-                }
-                .disabled(access.pair == nil)
             }
-            if access.receiving {
-                Text("연결된 MCP의 대본 받기 허용됨 · 최대 10분")
+            if drafts.pending.isEmpty {
+                Text(access.receiving
+                     ? "대본을 받으면 여기에 바로 표시됩니다. 자동으로 편집기에 적용하거나 재생하지 않습니다."
+                     : "연결할 지시를 선택하면 대본을 받을 수 있습니다. 직접 붙여넣기도 가능합니다.")
                     .font(.caption).foregroundStyle(.secondary)
             } else {
-                Text("자동 수신 꺼짐 · 붙여넣기와 직접 편집은 언제든 가능합니다.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            if !drafts.pending.isEmpty {
-                DisclosureGroup("받은 대본 확인", isExpanded: $showInbox) {
-                    VStack(spacing: 6) {
-                        ForEach(drafts.pending) { item in
-                            HStack(spacing: 8) {
-                                VStack(alignment: .leading) {
-                                    Text(verbatim: item.display).lineLimit(2)
+                ScrollViewReader { scroller in
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 10) {
+                            ForEach(drafts.immediatePreviews) { item in
+                                VStack(alignment: .leading, spacing: 6) {
                                     if let from = item.provenance {
-                                        Text("\(from.agentLabel) · \(title(from.selector)) · \(from.older ? "이전 버전" : "받은 버전") \(from.revision.uuidString.prefix(8))")
-                                            .font(.caption2).foregroundStyle(.secondary)
+                                        Text("\(from.agentLabel) · \(title(from.selector)) · 버전 \(from.revision.uuidString.prefix(8))")
+                                            .font(.caption).foregroundStyle(.secondary)
                                     }
-                                }.frame(maxWidth: .infinity, alignment: .leading)
-                                Button("열기…") {
-                                    if drafts.hasEditorContent {
-                                        pendingReplacement = item.id
-                                        confirmEditorChange = true
-                                    } else { openDraft(item.id) }
+                                    Text(verbatim: item.display)
+                                        .textSelection(.enabled)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                    HStack {
+                                        Button("편집기에 열기…") {
+                                            if drafts.hasEditorContent {
+                                                pendingReplacement = item.id
+                                                confirmEditorChange = true
+                                            } else { openDraft(item.id) }
+                                        }
+                                        Button("제거") { drafts.discard(item.id) }
+                                    }
                                 }
-                                Button("제거") { drafts.discard(item.id) }
+                                .id(item.id)
+                                .padding(8)
+                                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
                             }
-                            .padding(.vertical, 2)
                         }
+                        .padding(.trailing, 6)
                     }
-                    .padding(.top, 4)
+                    .frame(maxHeight: 220)
+                    .onChange(of: drafts.immediatePreviews.first?.id) { _, id in
+                        if let id { scroller.scrollTo(id, anchor: .top) }
+                    }
+                    .accessibilityLabel("받은 대본 미리 보기")
                 }
             }
         }

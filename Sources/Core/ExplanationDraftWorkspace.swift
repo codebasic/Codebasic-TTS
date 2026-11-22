@@ -60,6 +60,9 @@ final class ExplanationDraftWorkspace: ObservableObject {
     private var recent: [String: SHA256.Digest] = [:]
     private var receiptOrder: [String] = []
 
+    /// Immediately visible in the workspace, newest first; never replaces an editor.
+    var immediatePreviews: [ExplanationDraft] { Array(pending.reversed()) }
+
     var hasEditorContent: Bool { !display.isEmpty || !speech.isEmpty }
 
     func setReceiver(_ pid: Int32?) { receiverPID = pid }

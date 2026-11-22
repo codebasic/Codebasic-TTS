@@ -142,70 +142,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         localInstructionMenu?.state = .off
     }
 
-    func toggleAgentSharing(_ selector: String) {
-        let state = appState.agentAccess
-        if state.shared != nil { state.stopShare(); return }
-        guard localInstructionSocket == nil else {
-            showInstructionShareError("호환용 기본 지시 공유를 먼저 해제하세요.")
-            return
-        }
+    func selectAgentInstruction(_ selector: String) {
+        let access = appState.agentAccess
         let custom = LocalInstructionProfile.Name(rawValue: selector) == nil
-        guard !custom || appState.agentCatalog.refresh(),
-              let pair = state.pair, let snapshot = appState.agentSnapshot(selector), snapshot.shareable else {
-            showInstructionShareError("MCP 클라이언트를 시작하고 공유할 지시문을 선택하세요.")
+        guard localInstructionSocket == nil, access.pair != nil,
+              !custom || appState.agentCatalog.refresh(),
+              let snapshot = appState.agentSnapshot(selector), snapshot.shareable else {
+            access.revokeSelection()
             return
         }
-        let alert = NSAlert()
-        alert.messageText = "연결된 MCP에 아래 지시를 공유할까요?"
-        let host = pair.hostPath ?? "실행 경로를 확인할 수 없음"
-        alert.informativeText = "도우미를 실행한 프로세스: \(host)\n\n의도한 클라이언트인지 확인하세요. 이 지시의 이 버전만 최대 10분간 공유합니다. 대본을 받도록 허용하면 앱의 받은 대본에만 추가되며, 자동으로 적용하거나 재생하지 않습니다. 원격 모델을 쓰는 에이전트는 받은 지시문을 해당 서비스에 보낼 수 있습니다."
-        let scroll = NSTextView.scrollableTextView()
-        scroll.frame = NSRect(x: 0, y: 0, width: 425, height: 225)
-        guard let preview = scroll.documentView as? NSTextView else { return }
-        preview.isRichText = false; preview.isEditable = false; preview.isSelectable = true
-        preview.string = snapshot.text
-        alert.accessoryView = scroll
-        let canEnableReceipt = !state.receiving
-        alert.addButton(withTitle: canEnableReceipt ? "지시 공유 및 대본 받기" : "이 지시만 공유")
-        alert.addButton(withTitle: "취소")
-        if canEnableReceipt { alert.addButton(withTitle: "지시만 공유") }
-        let choice = alert.runModal()
-        guard choice == .alertFirstButtonReturn || (canEnableReceipt && choice == .alertThirdButtonReturn) else { return }
-        guard (!custom || appState.agentCatalog.refresh()), state.pair?.id == pair.id,
-              appState.agentSnapshot(selector) == snapshot, localInstructionSocket == nil else {
-            showInstructionShareError("선택한 도우미나 지시문이 바뀌었습니다. 다시 확인하세요.")
-            return
-        }
-        if !state.share(snapshot, deliveryGate: custom ? appState.agentCatalog.deliveryGate(for: snapshot) : { $0() }) {
-            showInstructionShareError(state.status.isEmpty ? "지시 조회를 허용할 수 없습니다." : state.status)
-        } else if canEnableReceipt && choice == .alertFirstButtonReturn && !enableAgentDraftReceipt() {
-            state.stopShare()
-            showInstructionShareError(state.status.isEmpty ? "대본 수신을 허용할 수 없습니다." : state.status)
-        }
-    }
-
-    @objc func toggleDraftReceipt() {
-        let state = appState.agentAccess
-        if state.receiving { state.stopReceipt(); draftReceiptMenu?.state = .off; return }
-        guard let pair = state.pair else {
-            showInstructionShareError("MCP 클라이언트를 먼저 시작하세요. 붙여넣기는 계속 사용할 수 있습니다.")
-            return
-        }
-        let alert = NSAlert()
-        alert.messageText = "\(pair.label) 도우미의 대본을 받을까요?"
-        alert.informativeText = "이 도우미에 실제 전달한 지시 버전의 대본만 최대 10분간 받습니다. 편집기를 덮어쓰거나 재생하지 않으며 지시문 조회도 따로 허용해야 합니다."
-        alert.addButton(withTitle: "이 도우미 대본만 받기"); alert.addButton(withTitle: "취소")
-        guard alert.runModal() == .alertFirstButtonReturn, state.pair?.id == pair.id else { return }
-        _ = enableAgentDraftReceipt()
-    }
-
-    private func enableAgentDraftReceipt() -> Bool {
-        appState.agentAccess.receive(current: { [weak self] selector in
+        _ = access.select(snapshot, current: { [weak self] selector in
             guard let self, LocalInstructionProfile.Name(rawValue: selector) != nil
                     || self.appState.agentCatalog.refresh() else { return nil }
             return self.appState.agentSnapshot(selector)
-        },
-                         workspace: appState.explanationDrafts)
+        }, workspace: appState.explanationDrafts,
+        deliveryGate: custom ? appState.agentCatalog.deliveryGate(for: snapshot) : { $0() })
+    }
+
+    @objc func toggleDraftReceipt() {
+        let access = appState.agentAccess
+        if access.receiving {
+            access.revokeSelection()
+        } else {
+            showInstructionShareError("에이전트 탭에서 연결할 지시를 선택하세요. 붙여넣기는 계속 사용할 수 있습니다.")
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {

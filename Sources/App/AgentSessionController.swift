@@ -95,8 +95,28 @@ import Foundation
         watch = watcher
         watcher.resume()
         if LocalInstructionPeer.current(pid: pid) != peer { disconnect(); return false }
-        status = "자동 연결됨. 지시 조회와 대본 수신은 승인 전까지 꺼져 있습니다."
+        status = "자동 연결됨. 연결할 지시를 선택하기 전에는 어떤 내용도 공유하지 않습니다."
         return true
+    }
+
+    /// The only UI activation: one deliberately selected snapshot, one verified
+    /// live helper. A previous selection and all its receipts are revoked first.
+    func select(_ snapshot: AgentInstructionSnapshot,
+                current: @escaping @MainActor (String) -> AgentInstructionSnapshot?,
+                workspace: ExplanationDraftWorkspace,
+                deliveryGate: @escaping (@escaping () -> Void) -> Void = { $0() }) -> Bool {
+        revokeSelection()
+        guard share(snapshot, deliveryGate: deliveryGate) else { return false }
+        guard receive(current: current, workspace: workspace) else {
+            stopShare()
+            return false
+        }
+        return true
+    }
+
+    func revokeSelection() {
+        stopShare()
+        stopReceipt()
     }
 
     func share(_ snapshot: AgentInstructionSnapshot,
@@ -141,7 +161,7 @@ import Foundation
         shared = snapshot
         shareTask = Task { [weak self] in
             do { try await ContinuousClock().sleep(until: deadline) } catch { return }
-            self?.stopShare()
+            self?.revokeSelection()
         }
         return true
     }
@@ -178,9 +198,14 @@ import Foundation
                       self.pair?.id == pair.id, self.receiving,
                       self.receiveDeadline == deadline, ContinuousClock.now < deadline else { return }
                 guard let proof = pair.proofs.resolve(token, selector: selector, revision: revision, digest: bodyHash),
-                      let current = current(selector) else { response.set("unproven"); return }
+                      let shared = self.shared, shared.selector == selector,
+                      let current = current(selector), current == shared,
+                      current.generation == proof.revision, current.digest == proof.digest,
+                      self.receiving, self.receiveDeadline == deadline, active() else {
+                    response.set("unproven"); return
+                }
                 let origin = AgentDraftOrigin(principal: pair.id, agentLabel: pair.label, selector: selector,
-                                              revision: revision, bodyHash: bodyHash, older: current.generation != proof.revision || current.digest != proof.digest)
+                                              revision: revision, bodyHash: bodyHash, older: false)
                 let scopedKey = AgentBytes.hash(Data((pair.id.uuidString + "\0" + clientKey).utf8))
                 guard let draft = ExplanationDraft(id: scopedKey, display: display, speech: speech,
                                                    provenance: origin) else { response.set("invalid"); return }
@@ -215,14 +240,14 @@ import Foundation
     private weak var receiptWorkspace: ExplanationDraftWorkspace?
 
     func invalidate(_ selector: String, deleted: Bool) {
-        if shared?.selector == selector { stopShare() }
-        // Deletion is a tombstone because current(selector) no longer resolves,
-        // even when a historical proof survives briefly. Queued drafts survive.
+        if shared?.selector == selector { revokeSelection() }
+        // Previously received previews remain, but cannot reactivate access.
     }
 
     func stopShare() {
         shareTask?.cancel(); shareTask = nil
         shareSocket?.stop(); shareSocket = nil
+        pair?.proofs.clear()
         shared = nil
     }
 

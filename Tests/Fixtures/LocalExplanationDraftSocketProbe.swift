@@ -10,6 +10,8 @@ enum CodeExplanation { static let noChange = "변경 없음" }
     let selector = "66666666-6666-4666-8666-666666666666"
     let original = "합성 지시 e\u{301}\n"
     var current: AgentInstructionSnapshot?
+    let alternate = AgentInstructionSnapshot(selector: "continue", generation: UUID(), text: "두 번째 합성 지시")
+
     init(directory: String, expectedHelper: String) {
         access = AgentSessionController(directory: directory, bundledHelper: {
             AgentPeerSigning.signedHash(at: URL(fileURLWithPath: expectedHelper))
@@ -24,14 +26,16 @@ enum CodeExplanation { static let noChange = "변경 없음" }
         switch pieces.first {
         case "pair": report(access.startPairing() ? "ok" : "no")
         case "disconnect": access.disconnect(); report("ok")
-        case "share":
-            report(current.map { access.share($0) } == true ? "ok" : "no")
-        case "receipt":
-            report(access.receive(current: { [weak self] value in
-                guard let self, self.current?.selector == value else { return nil }
-                return self.current
-            }, workspace: drafts) ? "ok" : "no")
-        case "stopreceipt": access.stopReceipt(); report("ok")
+        case "select", "select-alternate":
+            let selection = pieces.first == "select-alternate" ? alternate : current
+            report(selection.map { chosen in
+                access.select(chosen, current: { [weak self] value in
+                    guard let self else { return nil }
+                    if value == self.alternate.selector { return self.alternate }
+                    return self.current?.selector == value ? self.current : nil
+                }, workspace: drafts)
+            } == true ? "ok" : "no")
+        case "revoke": access.revokeSelection(); report("ok")
         case "change", "revert", "delete":
             let verb = pieces[0]
             access.invalidate(selector, deleted: verb == "delete")
@@ -40,7 +44,7 @@ enum CodeExplanation { static let noChange = "변경 없음" }
             report("ok")
         case "snapshot":
             let body: [String: Any] = [
-                "paired": access.pair != nil, "count": drafts.pending.count, "editor": drafts.display, "shared": access.shared != nil,
+                "previews": drafts.immediatePreviews.map(\.display), "paired": access.pair != nil, "count": drafts.pending.count, "editor": drafts.display, "shared": access.shared != nil,
                 "receiving": access.receiving, "old": drafts.pending.map { $0.provenance?.older ?? false },
                 "labels": drafts.pending.map { $0.provenance?.agentLabel ?? "" },
                 "pairs": drafts.pending.map { ($0.provenance?.principal.uuidString ?? "") },

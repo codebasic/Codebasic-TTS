@@ -168,7 +168,7 @@ extension NSAlert {
         }
         assertDraftOff()
         receiptClick([{ alert in
-            precondition(alert.informativeText.contains("서명된 도우미를 먼저 연결"))
+            precondition(alert.informativeText.contains("에이전트 탭에서 연결할 지시를 선택"))
             return .alertFirstButtonReturn
         }])
         assertDraftOff(); assertOff()
