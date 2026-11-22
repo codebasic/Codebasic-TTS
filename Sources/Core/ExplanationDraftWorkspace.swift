@@ -77,6 +77,7 @@ final class ExplanationDraftWorkspace: ObservableObject {
     private var untitledDocumentID = UUID().uuidString
 
     var editorDocumentID: String { activeDocumentID ?? untitledDocumentID }
+    var hasInactiveDocuments: Bool { !parked.isEmpty }
     var canRevertReceived: Bool { activeOriginal != nil && capturedDocument.dirty }
     var documentTabs: [DocumentTab] {
         tabOrder.compactMap { id in
@@ -115,6 +116,7 @@ final class ExplanationDraftWorkspace: ObservableObject {
     var immediatePreviews: [ExplanationDraft] { Array(pending.reversed()) }
 
     var hasEditorContent: Bool { !display.isEmpty || !speech.isEmpty }
+    private var shouldParkActiveDocument: Bool { activeDocumentID != nil || hasEditorContent }
 
     func setReceiver(_ pid: Int32?) { receiverPID = pid }
 
@@ -128,39 +130,31 @@ final class ExplanationDraftWorkspace: ObservableObject {
     }
 
     func canReceiveDocument() -> Bool {
-        let active = capturedDocument
-        let preserve = active.dirty
-        guard parked.count + (preserve ? 2 : 1) <= Self.maxDocuments else { return false }
+        guard parked.count + (shouldParkActiveDocument ? 2 : 1) <= Self.maxDocuments else { return false }
+        guard shouldParkActiveDocument else { return true }
         let bytes = parked.values.reduce(0) { $0 + $1.display.utf8.count + $1.speech.utf8.count }
-        return !preserve || bytes + active.display.utf8.count + active.speech.utf8.count <= Self.maxParkedBytes
+        return bytes + display.utf8.count + speech.utf8.count <= Self.maxParkedBytes
     }
 
     /// Live agent receipt updates the visible editor and never starts playback.
-    /// Only a clean active document may be replaced. Dirty documents turn into tabs.
+    /// Keep every open document, including an unedited receipt, until explicitly closed.
     func receiveDocument(_ draft: ExplanationDraft) -> Receipt {
         guard canReceiveDocument() else { return .busy }
-        let active = capturedDocument
-        let preserve = active.dirty
-        if preserve {
-            let id = editorDocumentID
-            if !tabOrder.contains(id) { tabOrder.append(id) }
-            parked[id] = active
-        } else if let id = activeDocumentID {
-            tabOrder.removeAll { $0 == id }
-        }
+        parkActiveDocument()
         installReceived(draft)
         return .accepted
     }
 
+    private func parkActiveDocument() {
+        guard shouldParkActiveDocument else { return }
+        let id = editorDocumentID
+        if !tabOrder.contains(id) { tabOrder.append(id) }
+        parked[id] = capturedDocument
+    }
+
     func selectDocument(_ id: String) {
-        guard id != activeDocumentID, let next = parked[id] else { return }
-        let active = capturedDocument
-        let currentID = editorDocumentID
-        parked.removeValue(forKey: id)
-        if activeDocumentID != nil || active.dirty {
-            parked[currentID] = active
-            if !tabOrder.contains(currentID) { tabOrder.append(currentID) }
-        }
+        guard id != activeDocumentID, let next = parked.removeValue(forKey: id) else { return }
+        parkActiveDocument()
         activeDocumentID = id
         activeOriginal = next.original
         display = next.display

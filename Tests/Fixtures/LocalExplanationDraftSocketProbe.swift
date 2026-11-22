@@ -7,6 +7,7 @@ enum CodeExplanation { static let noChange = "변경 없음" }
 @MainActor final class AgentFixture {
     let access: AgentSessionController
     let drafts = ExplanationDraftWorkspace()
+    let catalog = AgentCatalog(url: URL(fileURLWithPath: "catalog-\(UUID()).json"))
     let selector = "66666666-6666-4666-8666-666666666666"
     let original = "합성 지시 e\u{301}\n"
     var current: AgentInstructionSnapshot?
@@ -19,11 +20,14 @@ enum CodeExplanation { static let noChange = "변경 없음" }
             AgentPeerSigning.signedHash(at: URL(fileURLWithPath: expectedHelper))
         }, selectionWaiting: wait)
         current = AgentInstructionSnapshot(selector: selector, generation: UUID(), text: original)
+        catalog.didChange = { [weak self] selector, deleted in self?.access.invalidate(selector, deleted: deleted) }
     }
 
     func resolve(_ value: String) -> AgentInstructionSnapshot? {
         if value == alternate.selector { return alternate }
-        return current?.selector == value ? current : nil
+        if current?.selector == value { return current }
+        guard let record = catalog.record(value) else { return nil }
+        return AgentInstructionSnapshot(selector: value, generation: record.generation, text: record.body)
     }
 
     func command(_ line: String) {
@@ -48,12 +52,18 @@ enum CodeExplanation { static let noChange = "변경 없음" }
             clearDocumentID = nil
             drafts.clearEditor(expectedDocumentID: id)
             report("ok")
-        case "switch-tab":
+        case "switch-tab", "close-tab":
             guard pieces.count == 2, let index = Int(pieces[1]), drafts.documentTabs.indices.contains(index) else {
                 report("no"); return
             }
-            drafts.selectDocument(drafts.documentTabs[index].id); report("ok")
+            let id = drafts.documentTabs[index].id
+            if pieces.first == "close-tab" { drafts.closeInactiveDocument(id) }
+            else { drafts.selectDocument(id) }
+            report("ok")
         case "revert-document": drafts.revertReceivedDocument(); report("ok")
+        case "save-new-instruction":
+            let saved = try? catalog.save(label: "합성 새 지시 " + UUID().uuidString, body: "공유하지 않은 저장본")
+            report(saved?.selector ?? "no")
         case "edit-buffer":
             guard let current else { report("no"); return }
             var entry = edits.entry(for: selector, expected: current.generation, label: "합성", text: current.text)

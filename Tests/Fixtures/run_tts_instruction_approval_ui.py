@@ -33,6 +33,15 @@ with tempfile.TemporaryDirectory(prefix="u", dir=REPO / "build") as temp:
         f.write('''\nextension AppDelegate {
     func syntheticInstructionFixtureSetUp() { setUpMainMenu(); observeState() }
 }\n''')
+    workspace = sources / "UI" / "ExplainWorkspace.swift"
+    with workspace.open("a") as f:
+        f.write('''\nextension ExplainWorkspace {
+    static func syntheticInstructionSelectors(_ app: AppState, editing selector: String?) -> (editor: String?, sharing: String) {
+        var view = ExplainWorkspace(drafts: app.explanationDrafts, catalog: app.agentCatalog, access: app.agentAccess)
+        view._editingProfile = State(initialValue: selector)
+        return (view.editorSelection, view.sharingSelection)
+    }
+}\n''')
     socket = sources / "App" / "LocalInstructionSocket.swift"
     source = socket.read_text()
     gate = r'"/private/tmp/codebasic-tts-mcp-\(getuid())"'

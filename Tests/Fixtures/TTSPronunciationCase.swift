@@ -206,11 +206,16 @@ enum PronunciationCase {
         precondition(app.phase == .idle && Case.log.snapshot().1.count == 6)
         print("draft workspace: queued/retried/no overwrite; stale voice blocked; explicit literal playback separates subtitle and speech, no normalizer")
 
+        let previousReceipt = ExplanationDraft(id: "previous-live", display: "합성 이전 원문", speech: "합성 이전 음성")!
         let incoming = ExplanationDraft(id: "live", display: Case.visual, speech: Case.spoken)!
         let manualID = inbox.editorDocumentID
+        precondition(inbox.receiveDocument(previousReceipt) == .accepted)
         precondition(inbox.receiveDocument(incoming) == .accepted)
         inbox.clearEditor(expectedDocumentID: manualID)
         precondition(inbox.display == Case.visual && inbox.speech == Case.spoken)
+        inbox.selectDocument(previousReceipt.id)
+        precondition(inbox.display == previousReceipt.display && inbox.speech == previousReceipt.speech)
+        inbox.selectDocument(incoming.id)
         precondition(app.phase == .idle && Case.log.snapshot().1.count == 6)
         inbox.editDisplay(edited)
         app.agentAccess.disableReceive()
@@ -225,6 +230,6 @@ enum PronunciationCase {
         try await awaitPayload(app, count: 8)
         precondition(app.subtitleText == edited && Case.log.snapshot().1.last == corrected)
         precondition(Case.log.snapshot().0.count == 1)
-        print("live document: receipt and stale clear caused no synthesis; explicit actions after screen edit and receipt disable captured the expected subtitle and speech")
+        print("live documents: consecutive receipts, stale clear, and switching tabs caused no synthesis; manual playback used the edited text")
     }
 }

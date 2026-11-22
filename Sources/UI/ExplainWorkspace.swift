@@ -8,7 +8,7 @@ struct ExplainWorkspace: View {
     @ObservedObject var drafts: ExplanationDraftWorkspace
     @ObservedObject var catalog: AgentCatalog
     @ObservedObject var access: AgentSessionController
-    @State private var profile = ""
+    @State private var editingProfile: String?
     @State private var showInstructions = false
     @State private var profileSearch = ""
     @State private var showProfileChooser = false
@@ -24,9 +24,12 @@ struct ExplainWorkspace: View {
     @State private var instructionEdits = AgentInstructionEditBuffer()
     @State private var copiedMCPClient: String?
 
-    private var selectedSnapshot: AgentInstructionSnapshot? { app.agentSnapshot(profile) }
+    private var sharingSelection: String { access.instructionScope ?? "" }
+    private var editorSelection: String? {
+        if let editingProfile, catalog.record(editingProfile) != nil { return editingProfile }
+        return access.instructionScope
+    }
     private var canUsePlayer: Bool { !app.isBusy && !app.explaining && !app.normalizing }
-    private var selectedRecord: AgentCatalogRecord? { catalog.record(profile) }
 
     private enum EditorChange {
         case clear(String)
@@ -40,9 +43,6 @@ struct ExplainWorkspace: View {
 
     var body: some View {
         workspace
-            .onChange(of: access.instructionScope) { old, new in
-                if new == nil, old == profile { profile = "" }
-            }
             .onChange(of: drafts.activeDocumentID) { _, _ in
                 showSpeech = !drafts.speech.isEmpty
             }
@@ -90,7 +90,7 @@ struct ExplainWorkspace: View {
                 AgentCatalogEditor(target: item) { label, body in
                     let saved = try catalog.save(id: item.record?.id, expected: item.record?.editVersion,
                                                  label: label, body: body)
-                    profile = saved.selector
+                    editingProfile = saved.selector
                     catalogError = ""
                 }
             }
@@ -100,7 +100,7 @@ struct ExplainWorkspace: View {
                     do {
                         try catalog.delete(old.id, expected: old.editVersion)
                         instructionEdits.revert(old.selector)
-                        if profile == old.selector { profile = "" }
+                        if editingProfile == old.selector { editingProfile = nil }
                         catalogError = ""
                     } catch { catalogError = error.localizedDescription }
                     removeProfile = nil
@@ -153,7 +153,8 @@ struct ExplainWorkspace: View {
     }
 
     private var instruction: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let editorSelection = self.editorSelection
+        return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Text("지시문").font(.headline).accessibilityAddTraits(.isHeader)
                 Spacer()
@@ -161,7 +162,7 @@ struct ExplainWorkspace: View {
                 Button("새 지시…") { catalogEdit = .init(record: nil) }
                     .disabled(catalog.readError || catalog.records.count >= AgentLimits.profiles)
             }
-            Text("선택하지 않아도 대본을 받을 수 있습니다. 고르면 저장된 지시가 에이전트에 공유됩니다.")
+            Text("공유 지시를 선택하지 않아도 대본을 받을 수 있습니다.")
                 .font(.caption).foregroundStyle(.secondary)
             Text(access.shared.map { "공유 중: " + title($0.selector) } ?? access.selectionStatus.message)
                 .font(.caption).foregroundStyle(access.selectionStatus.isProblem ? Color.orange : Color.secondary)
@@ -172,13 +173,17 @@ struct ExplainWorkspace: View {
                 Text(catalog.readError ? AgentCatalog.Failure.unreadable.localizedDescription : catalogError)
                     .font(.caption).foregroundStyle(.orange)
             }
-            if let snapshot = selectedSnapshot {
+            if let editorSelection, let snapshot = app.agentSnapshot(editorSelection) {
+                if editorSelection != sharingSelection {
+                    Text("편집 중: \(title(editorSelection)) · 공유 선택 안 됨")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 instructionEditor(snapshot)
             } else {
                 Text("선택된 지시문이 없습니다.")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            if let entry = selectedRecord {
+            if let editorSelection, let entry = catalog.record(editorSelection) {
                 Button("지시 삭제…", role: .destructive) { removeProfile = entry; showRemove = true }
             }
         }
@@ -187,22 +192,22 @@ struct ExplainWorkspace: View {
     }
 
     private var profileChooser: some View {
-        let currentTitle = selectedSnapshot == nil ? "사용 안 함" : title(profile)
+        let currentTitle = sharingSelection.isEmpty ? "사용 안 함" : title(sharingSelection)
         return Button {
             profileSearch = ""
             showProfileChooser.toggle()
         } label: {
             HStack(spacing: 6) {
-                Text("지시문 선택: \(currentTitle)").lineLimit(1)
+                Text("공유 지시: \(currentTitle)").lineLimit(1)
                 Image(systemName: "chevron.down").accessibilityHidden(true)
             }
         }
-        .accessibilityLabel("지시문 선택")
+        .accessibilityLabel("공유 지시 선택")
         .accessibilityValue(currentTitle)
         .accessibilityHint("열면 이름을 검색할 수 있습니다. 항목을 직접 선택해야 바뀝니다.")
         .popover(isPresented: $showProfileChooser, arrowEdge: .bottom) {
             VStack(alignment: .leading, spacing: 8) {
-                Text("지시문 선택").font(.headline)
+                Text("공유 지시 선택").font(.headline)
                 TextField("지시 이름 검색", text: $profileSearch)
                     .textFieldStyle(.roundedBorder)
                     .focused($profileSearchFocused)
@@ -225,13 +230,13 @@ struct ExplainWorkspace: View {
                                     HStack {
                                         Text(option.label)
                                         Spacer()
-                                        if option.id == profile { Image(systemName: "checkmark").accessibilityHidden(true) }
+                                        if option.id == sharingSelection { Image(systemName: "checkmark").accessibilityHidden(true) }
                                     }
                                     .padding(.vertical, 4)
                                     .contentShape(Rectangle())
                                 }
                                 .buttonStyle(.plain)
-                                .accessibilityAddTraits(option.id == profile ? .isSelected : [])
+                                .accessibilityAddTraits(option.id == sharingSelection ? .isSelected : [])
                             }
                         }
                     }
@@ -366,7 +371,7 @@ struct ExplainWorkspace: View {
 
     private func chooseProfile(_ selector: String) {
         showProfileChooser = false
-        profile = selector
+        editingProfile = nil
         if selector.isEmpty { access.revokeSelection() }
         else { AppDelegate.shared?.selectAgentInstruction(selector) }
     }
@@ -374,7 +379,7 @@ struct ExplainWorkspace: View {
     private var editor: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("대본").font(.headline).accessibilityAddTraits(.isHeader)
-            if drafts.documentTabs.count > 1 { documentTabs }
+            if drafts.hasInactiveDocuments { documentTabs }
             HStack {
                 Text("화면 글 · 자막").font(.subheadline.weight(.semibold))
                 if let origin = drafts.origin {

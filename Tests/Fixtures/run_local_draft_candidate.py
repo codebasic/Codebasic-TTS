@@ -187,6 +187,9 @@ def main():
             assert json.loads(command(server, "snapshot"))["waiting"]
             assert status(a) == "receiving_only" # no profile or instruction read
             assert status(b) == "other_agent"
+            unselected = command(server, "save-new-instruction")
+            assert unselected != "no" and status(a) == "receiving_only"
+            assert call(a,"get_tts_instructions",profile=unselected)["isError"]
             assert call(a,"get_tts_instructions")["isError"]
             draft = dict(idempotency_key="doc-1", display_text="첫 번째 대본")
             assert call(b,"submit_tts_draft",**draft)["isError"]
@@ -237,6 +240,11 @@ def main():
             assert call(a,"get_tts_instructions",profile="explain")["isError"]
             prior = call(a,"get_tts_instructions")["structuredContent"]
             assert prior["instructions"].encode() == "합성 지시 e\u0301\n".encode() and "proof" not in prior
+            separately_saved = command(server, "save-new-instruction")
+            assert separately_saved not in ("no", unselected) and status(a) == "ready"
+            assert call(a,"get_tts_instructions",profile=separately_saved)["isError"]
+            assert call(a,"get_tts_instructions")["structuredContent"] == prior
+            print("saving a new instruction leaves receiving-only or the previously shared instruction active")
             fields = dict(profile=FIXTURE_SELECTOR, revision=prior["revision"], idempotency_key="linked", display_text="연결된 대본")
             assert call(a,"submit_explanation_draft",**fields)["structuredContent"]["status"] == "accepted"
             assert json.loads(command(server, "snapshot"))["associated"] == FIXTURE_SELECTOR
@@ -272,6 +280,7 @@ def main():
             assert status(a) == "approval_required" and call(a,"submit_tts_draft",**plain)["isError"]
             assert command(server, "enable") == "ok"
             assert call(a,"submit_tts_draft",**plain)["structuredContent"]["status"] == "duplicate"
+            assert command(server, "close-tab 0") == "ok"
             alias = {**plain, "idempotency_key":"intentional-repeat"}
             assert call(a,"submit_tts_draft",**alias)["structuredContent"]["status"] == "accepted"
             assert call(a,"submit_tts_draft",**alias)["structuredContent"]["status"] == "duplicate"
@@ -347,8 +356,24 @@ def main():
             for index in range(128):
                 if index and index % 6 == 0:
                     assert command(server, "disable") == "ok" and command(server, "enable") == "ok"
+                if index == 6:
+                    before = json.loads(command(server, "snapshot"))
+                    assert before["tabs"] == [f"document {number}" for number in range(6)]
+                    assert before["editor"] == "document 5" and not any(before["dirty"])
+                    full = call(a,"submit_tts_draft",idempotency_key="key-6",display_text="document 6")
+                    assert full["isError"] and full["structuredContent"]["status"] == "busy"
+                    assert json.loads(command(server, "snapshot")) == before
+                    assert command(server, "switch-tab 0") == "ok"
+                    assert json.loads(command(server, "snapshot"))["editor"] == "document 0"
+                    assert command(server, "switch-tab 5") == "ok"
+                    print("unedited burst: six receipts remain open; seventh is busy and the first can still be opened")
+                if index >= 6:
+                    assert command(server, "close-tab 0") == "ok"
                 assert call(a,"submit_tts_draft",idempotency_key=f"key-{index}",
                             display_text=f"document {index}")["structuredContent"]["status"] == "accepted"
+                if index == 6:
+                    assert json.loads(command(server, "snapshot"))["editor"] == "document 6"
+                    print("unedited burst: closing one tab permits the same-key retry and opens the latest draft")
             assert call(a,"submit_tts_draft",idempotency_key="overflow",
                         display_text="overflow")["structuredContent"]["status"] == "session_limit"
             assert call(a,"submit_tts_draft",idempotency_key="key-0",
