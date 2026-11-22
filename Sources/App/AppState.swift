@@ -92,12 +92,26 @@ final class AppState: ObservableObject {
     let agentCatalog = AgentCatalog(url: URL(fileURLWithPath: Secrets.appSupportDir)
         .appendingPathComponent("agent-instructions-v1.json"))
     let agentAccess = AgentSessionController()
+    private static let agentPresetURL = URL(fileURLWithPath: Secrets.appSupportDir)
+        .appendingPathComponent("agent-preset-instructions-v1.json")
+    @Published private(set) var agentPresetInstructions = (try? AgentPresetInstructions.read(at: AppState.agentPresetURL)) ?? [:]
+
+    func saveAgentPresetInstruction(_ selector: String, expected: UUID, text: String) throws {
+        guard LocalInstructionProfile.Name(rawValue: selector) != nil,
+              agentSnapshot(selector)?.generation == expected else { throw AgentCatalog.Failure.conflict }
+        let saved = try AgentPresetInstructions.write(text, for: selector,
+                                                       expectedOverride: agentPresetInstructions[selector],
+                                                       at: Self.agentPresetURL)
+        agentPresetInstructions = saved
+        invalidatePreset(selector)
+    }
+
     private var presetSnapshots: [String: AgentInstructionSnapshot] = [:]
     @Published var sharedInstructionProfile: LocalInstructionProfile.Name?
 
     func agentSnapshot(_ selector: String) -> AgentInstructionSnapshot? {
         if let builtin = LocalInstructionProfile.Name(rawValue: selector) {
-            let text = instructionText(builtin)
+            let text = agentPresetInstructions[selector] ?? instructionText(builtin)
             if let old = presetSnapshots[selector], AgentBytes.same(old.text, text) { return old }
             let snapshot = AgentInstructionSnapshot(selector: selector, generation: UUID(), text: text)
             presetSnapshots[selector] = snapshot

@@ -87,6 +87,7 @@ def main():
         common = [SOURCES/"App/AgentPeerSigning.swift", SOURCES/"Core/AgentCatalog.swift"]
         server_src = [SOURCES/"App/LocalInstructionSocket.swift", SOURCES/"App/AgentSessionController.swift",
                       SOURCES/"Core/AgentDeliveryProofs.swift", SOURCES/"Core/ExplanationDraftWorkspace.swift",
+                      SOURCES/"Core/AgentInstructionEditing.swift",
                       HERE / "LocalExplanationDraftSocketProbe.swift"]
         other_src = root / "Other.swift"
         other_src.write_text(new_helper.read_text().replace('version":"2.0"', 'version":"2.0-other"'))
@@ -229,6 +230,18 @@ def main():
             assert status(a) == "ready"
             assert call(a,"submit_explanation_draft",**fields)["isError"] # old proof cannot authorize a new app instance
             assert json.loads(command(server,"snapshot"))["count"] == 0
+            prior = call(a, "get_tts_instructions")["structuredContent"]
+            assert command(server, "edit-buffer") == "ok"
+            assert call(a, "get_tts_instructions")["structuredContent"] == prior # unsaved text stays private
+            assert command(server, "revert-buffer") == "ok"
+            assert call(a, "get_tts_instructions")["structuredContent"] == prior
+            assert command(server, "edit-buffer") == "ok" and command(server, "save-buffer") == "ok"
+            assert status(a) == "approval_required"
+            assert call(a, "get_tts_instructions")["isError"]
+            assert command(server, "select") == "ok"
+            new_saved = call(a, "get_tts_instructions")["structuredContent"]
+            assert new_saved["instructions"] == "저장하지 않은 합성 지시"
+            assert new_saved["revision"] != prior["revision"]
             stop(a)
             assert status(b) == "approval_required"
             assert not json.loads(command(server,"snapshot"))["receiving"]

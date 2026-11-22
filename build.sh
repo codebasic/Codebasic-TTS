@@ -147,6 +147,10 @@ case "${1:-install}" in
     swiftc -O "$HERE/Sources/Core/AgentMCPConfiguration.swift" "$HERE/Tests/AgentMCPConfigurationTests.swift" \
       -o "$BUILD_DIR/agent-mcp-configuration-tests"
     "$BUILD_DIR/agent-mcp-configuration-tests" > "$BUILD_DIR/agent-mcp-configuration-sample.json"
+    editing_fixture="$(mktemp -d "$BUILD_DIR/instruction-editing-test.XXXXXX")"
+    swiftc -O "$HERE/Sources/Core/AgentCatalog.swift" "$HERE/Sources/Core/AgentInstructionEditing.swift" \
+      "$HERE/Tests/AgentInstructionEditingTests.swift" -o "$BUILD_DIR/agent-instruction-editing-tests"
+    "$BUILD_DIR/agent-instruction-editing-tests" "$editing_fixture"
     socket_fixture="$(mktemp -d "$BUILD_DIR/socket-test.XXXXXX")"
     swiftc -O "$HERE/Sources/App/LocalInstructionSocket.swift" \
       "$HERE/Tests/LocalApprovedSocketLifecycleTests.swift" -o "$BUILD_DIR/local-approved-socket-tests"

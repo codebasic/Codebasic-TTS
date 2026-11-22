@@ -10,6 +10,7 @@ enum CodeExplanation { static let noChange = "변경 없음" }
     let selector = "66666666-6666-4666-8666-666666666666"
     let original = "합성 지시 e\u{301}\n"
     var current: AgentInstructionSnapshot?
+    var edits = AgentInstructionEditBuffer()
     let alternate = AgentInstructionSnapshot(selector: "continue", generation: UUID(), text: "두 번째 합성 지시")
 
     init(directory: String, expectedHelper: String) {
@@ -35,6 +36,24 @@ enum CodeExplanation { static let noChange = "변경 없음" }
                     return self.current?.selector == value ? self.current : nil
                 }, workspace: drafts)
             } == true ? "ok" : "no")
+        case "edit-buffer":
+            guard let current else { report("no"); return }
+            var entry = edits.entry(for: selector, expected: current.generation, label: "합성", text: current.text)
+            entry.text = "저장하지 않은 합성 지시"
+            edits.update(entry, for: selector)
+            report("ok")
+        case "save-buffer":
+            guard let old = current, let entry = edits.drafts[selector], entry.expected == old.generation else {
+                report("no"); return
+            }
+            let file = URL(fileURLWithPath: "inline-preset.json")
+            guard let saved = try? AgentPresetInstructions.write(entry.text, for: "explain", expectedOverride: nil, at: file),
+                  let text = saved["explain"] else { report("no"); return }
+            current = AgentInstructionSnapshot(selector: selector, generation: UUID(), text: text)
+            access.invalidate(selector, deleted: false)
+            edits.revert(selector)
+            report("ok")
+        case "revert-buffer": edits.revert(selector); report("ok")
         case "revoke": access.revokeSelection(); report("ok")
         case "change", "revert", "delete":
             let verb = pieces[0]

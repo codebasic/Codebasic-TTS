@@ -10,17 +10,17 @@ struct ExplainWorkspace: View {
     @ObservedObject var access: AgentSessionController
     @State private var profile = "explain"
     @State private var profileSearch = ""
+    @State private var showProfileChooser = false
+    @FocusState private var profileSearchFocused: Bool
     @State private var catalogEdit: AgentCatalogEditor.Target?
     @State private var removeProfile: AgentCatalogRecord?
     @State private var showRemove = false
     @State private var catalogError = ""
-    @State private var showInstructionEditor = false
-    @State private var showExactPreview = false
     @State private var showSpeech = false
     @State private var showAdvanced = false
     @State private var pendingReplacement: String?
     @State private var confirmEditorChange = false
-    @State private var copiedRevision: String?
+    @State private var instructionEdits = AgentInstructionEditBuffer()
     @State private var copiedMCPClient: String?
 
     private var selectedSnapshot: AgentInstructionSnapshot? { app.agentSnapshot(profile) }
@@ -64,19 +64,11 @@ struct ExplainWorkspace: View {
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
                 _ = catalog.refresh()
             }
-            .sheet(isPresented: $showInstructionEditor) {
-                ExplainInstructionEditor(initialValue: app.explainPrompt) { text in
-                    guard !app.explainPrompt.utf8.elementsEqual(text.utf8) else { return }
-                    app.explainPrompt = text
-                    app.saveSettings()
-                }
-            }
             .sheet(item: $catalogEdit) { item in
                 AgentCatalogEditor(target: item) { label, body in
                     let saved = try catalog.save(id: item.record?.id, expected: item.record?.editVersion,
                                                  label: label, body: body)
                     profile = saved.selector
-                    copiedRevision = nil
                     catalogError = ""
                 }
             }
@@ -85,6 +77,7 @@ struct ExplainWorkspace: View {
                     guard let old = removeProfile else { return }
                     do {
                         try catalog.delete(old.id, expected: old.editVersion)
+                        instructionEdits.revert(old.selector)
                         profile = "explain"
                         catalogError = ""
                     } catch { catalogError = error.localizedDescription }
@@ -92,7 +85,9 @@ struct ExplainWorkspace: View {
                 }
                 Button("취소", role: .cancel) { removeProfile = nil }
             } message: {
-                Text("이미 받은 대본은 보관함에 남지만, 이 지시 버전의 새 대본은 받을 수 없습니다.")
+                Text(removeProfile.flatMap { instructionEdits.drafts[$0.selector] } == nil
+                     ? "이미 받은 대본은 보관함에 남지만, 이 지시 버전의 새 대본은 받을 수 없습니다."
+                     : "이 지시의 저장하지 않은 변경도 함께 사라집니다. 이미 받은 대본은 그대로 남습니다.")
             }
             .confirmationDialog(pendingReplacement == nil ? "편집기의 글을 비울까요?" : "편집기의 글을 받은 대본으로 바꿀까요?",
                                 isPresented: $confirmEditorChange, titleVisibility: .visible) {
@@ -115,65 +110,28 @@ struct ExplainWorkspace: View {
             HStack(spacing: 8) {
                 Text("에이전트 지시문").font(.headline)
                 Spacer()
-                Menu(access.pair == nil ? "지시 둘러보기" : "에이전트에 연결할 지시 선택") {
-                    ForEach(LocalInstructionProfile.Name.allCases, id: \.rawValue) { preset in
-                        Button(name(preset)) { chooseProfile(preset.rawValue) }
-                    }
-                    ForEach(catalog.records) { record in
-                        Button(record.label) { chooseProfile(record.selector) }
-                    }
-                }
+                profileChooser
                 Button("새 지시…") { catalogEdit = .init(record: nil) }
                     .disabled(catalog.readError || catalog.records.count >= AgentLimits.profiles)
             }
-            if !catalog.records.isEmpty && !catalog.readError {
-                HStack {
-                    TextField("이름으로 저장된 지시 찾기", text: $profileSearch)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(maxWidth: 270)
-                    if !profileSearch.isEmpty {
-                        Button("검색 지우기") { profileSearch = "" }
-                    }
-                    Spacer(minLength: 0)
-                }
-                if !profileSearch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    let matches = catalog.filteredRecords(label: profileSearch)
-                    if matches.isEmpty {
-                        Text("일치하는 이름이 없습니다.").font(.caption).foregroundStyle(.secondary)
-                    } else {
-                        Menu("\(matches.count)개 검색 결과") {
-                            ForEach(matches) { match in
-                                Button(match.label) { chooseProfile(match.selector); profileSearch = "" }
-                            }
-                        }
-                        .fixedSize()
-                    }
-                }
+            if access.pair != nil {
+                Text("고른 지시는 연결된 에이전트에 공유됩니다. 원격 모델을 쓰는 에이전트는 받은 지시를 모델 서비스에 보낼 수 있습니다.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
-            Text(access.pair == nil
-                 ? "둘러보거나 편집해도 외부로 공유되지 않습니다. 연결 후 사용할 지시를 직접 선택하세요."
-                 : "선택한 지시의 이 버전만 연결된 MCP에 공유하고, 그 버전의 대본만 최대 10분간 받습니다. 원격 모델을 쓰는 에이전트는 받은 지시를 해당 서비스에 보낼 수 있습니다.")
-                .font(.caption).foregroundStyle(.secondary)
             if catalog.readError || !catalogError.isEmpty {
                 Text(catalog.readError ? AgentCatalog.Failure.unreadable.localizedDescription : catalogError)
                     .font(.caption).foregroundStyle(.orange)
             }
+            if let snapshot = selectedSnapshot {
+                instructionEditor(snapshot)
+            } else {
+                Text("이 지시를 열 수 없습니다. 다른 지시를 선택하세요.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             HStack {
                 if let entry = selectedRecord {
-                    Button("편집…") { catalogEdit = .init(record: entry) }
-                    Button("삭제…") { removeProfile = entry; showRemove = true }
-                } else if profile == "explain" || profile == "continue" {
-                    Button("기본 해설 지시 편집…") { showInstructionEditor = true }
+                    Button("지시 삭제…", role: .destructive) { removeProfile = entry; showRemove = true }
                 }
-                Button(showExactPreview ? "미리 보기 닫기" : "정확한 지시 미리 보기") { showExactPreview.toggle() }
-                    .disabled(selectedSnapshot == nil)
-                Button(copiedRevision == selectedSnapshot?.generation.uuidString && selectedSnapshot != nil ? "복사됨" : "지시 복사") {
-                    guard let snapshot = selectedSnapshot else { return }
-                    let clipboard = NSPasteboard.general
-                    clipboard.clearContents()
-                    if clipboard.setString(snapshot.text, forType: .string) { copiedRevision = snapshot.generation.uuidString }
-                }
-                .disabled(selectedSnapshot == nil)
                 Spacer()
                 if access.shared != nil {
                     Button("공유 및 수신 중지") { access.revokeSelection() }
@@ -190,7 +148,7 @@ struct ExplainWorkspace: View {
                 }
             }
             if let active = access.shared {
-                Text("공유 중: \(title(active.selector)) · 이 버전만 · 최대 10분")
+                Text("공유 중: \(title(active.selector))")
                     .font(.caption).foregroundStyle(.secondary)
             } else if let legacy = app.sharedInstructionProfile {
                 Text("호환용 기본 조회 허용: \(name(legacy)) · 앱 메뉴에서 해제할 수 있습니다.")
@@ -200,26 +158,141 @@ struct ExplainWorkspace: View {
             }
             if !access.status.isEmpty { Text(access.status).font(.caption).foregroundStyle(.secondary) }
             mcpSetup
-            if let snapshot = selectedSnapshot {
-                if !snapshot.shareable {
-                    Text("이 지시는 공유 한도(UTF-8 8KB)를 초과했거나 유효하지 않습니다. 원문은 그대로 보존됩니다.")
-                        .font(.caption).foregroundStyle(.orange)
-                }
-                if showExactPreview {
-                    Text("ID: " + snapshot.selector + " · SHA-256: " + snapshot.digest)
-                        .font(.caption2.monospaced()).textSelection(.enabled)
-                    ScrollView {
-                        Text(verbatim: snapshot.text)
-                            .font(.callout.monospaced())
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(8)
+        }
+    }
+
+    private var profileChooser: some View {
+        let currentTitle = selectedSnapshot == nil ? "선택 없음" : title(profile)
+        return Button {
+            profileSearch = ""
+            showProfileChooser.toggle()
+        } label: {
+            HStack(spacing: 6) {
+                Text("지시문 선택: \(currentTitle)").lineLimit(1)
+                Image(systemName: "chevron.down").accessibilityHidden(true)
+            }
+        }
+        .accessibilityLabel("지시문 선택")
+        .accessibilityValue(currentTitle)
+        .accessibilityHint("열면 이름을 검색할 수 있습니다. 항목을 직접 선택해야 바뀝니다.")
+        .popover(isPresented: $showProfileChooser, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("지시문 선택").font(.headline)
+                TextField("지시 이름 검색", text: $profileSearch)
+                    .textFieldStyle(.roundedBorder)
+                    .focused($profileSearchFocused)
+                    .accessibilityLabel("지시 이름 검색")
+                    .accessibilityHint("검색 결과가 한 개일 때 Return 키로 선택합니다.")
+                    .onSubmit {
+                        if let id = AgentInstructionChoice.keyboardChoice(profileOptions, query: profileSearch) {
+                            chooseProfile(id)
+                        }
                     }
-                    .frame(maxHeight: 170)
-                    .overlay(editorBorder)
-                    .accessibilityLabel("복사 및 MCP 조회에 사용되는 정확한 지시문")
+                let matches = AgentInstructionChoice.matching(profileOptions, query: profileSearch)
+                if matches.isEmpty {
+                    Text("일치하는 지시문이 없습니다. 다른 이름으로 검색해 보세요.")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 4) {
+                            ForEach(matches) { option in
+                                Button { chooseProfile(option.id) } label: {
+                                    HStack {
+                                        Text(option.label)
+                                        Spacer()
+                                        if option.id == profile { Image(systemName: "checkmark").accessibilityHidden(true) }
+                                    }
+                                    .padding(.vertical, 4)
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityAddTraits(option.id == profile ? .isSelected : [])
+                            }
+                        }
+                    }
+                    .frame(maxHeight: 215)
                 }
             }
+            .padding(12)
+            .frame(width: 325)
+            .onAppear { profileSearchFocused = true }
+            .onExitCommand { showProfileChooser = false }
+        }
+    }
+
+    private var profileOptions: [AgentInstructionChoice] {
+        LocalInstructionProfile.Name.allCases.map { AgentInstructionChoice(id: $0.rawValue, label: name($0)) }
+            + (catalog.readError ? [] : catalog.records.map { AgentInstructionChoice(id: $0.selector, label: $0.label) })
+    }
+
+    private func instructionEditor(_ snapshot: AgentInstructionSnapshot) -> some View {
+        let selector = snapshot.selector
+        let record = catalog.record(selector)
+        let entry = instructionEdits.entry(for: selector,
+                                          expected: record?.editVersion ?? snapshot.generation,
+                                          label: record?.label ?? title(selector),
+                                          text: snapshot.text)
+        let isValid = AgentBytes.textValid(entry.text)
+        let wasDirty = entry.isDirty
+        return VStack(alignment: .leading, spacing: 6) {
+            if record == nil {
+                Text(entry.label).font(.subheadline.weight(.semibold))
+            } else {
+                TextField("지시 이름", text: Binding(get: {
+                    instructionEdits.drafts[selector]?.label ?? entry.label
+                }, set: { label in
+                    var edited = instructionEdits.drafts[selector] ?? entry
+                    edited.label = label
+                    instructionEdits.update(edited, for: selector)
+                }))
+                .accessibilityLabel("지시 이름")
+            }
+            TextEditor(text: Binding(get: {
+                instructionEdits.drafts[selector]?.text ?? entry.text
+            }, set: { text in
+                var edited = instructionEdits.drafts[selector] ?? entry
+                edited.text = text
+                instructionEdits.update(edited, for: selector)
+            }))
+            .font(.callout.monospaced())
+            .frame(height: 175)
+            .overlay(editorBorder)
+            .accessibilityLabel("선택한 에이전트 지시 편집기")
+            .id(selector)
+            HStack {
+                Text(wasDirty ? "저장하지 않은 변경 · 에이전트에는 저장본만 공유됩니다." : "저장된 지시 · 여기에서 바로 편집할 수 있습니다.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Spacer(minLength: 6)
+                Button("되돌리기") {
+                    _ = catalog.refresh()
+                    instructionEdits.revert(selector)
+                    catalogError = ""
+                }
+                .disabled(!wasDirty)
+                Button("저장") {
+                    saveInstruction(selector, pending: entry, record: record)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!wasDirty || !isValid || (record != nil && AgentBytes.label(entry.label) == nil))
+            }
+            if !isValid {
+                Text("빈 지시나 UTF-8 8KB를 넘는 지시는 저장할 수 없습니다. 저장본은 그대로입니다.")
+                    .font(.caption).foregroundStyle(.orange)
+            }
+        }
+    }
+
+    private func saveInstruction(_ selector: String, pending: AgentInstructionEditBuffer.Entry, record: AgentCatalogRecord?) {
+        do {
+            if let record {
+                _ = try catalog.save(id: record.id, expected: pending.expected, label: pending.label, body: pending.text)
+            } else {
+                try app.saveAgentPresetInstruction(selector, expected: pending.expected, text: pending.text)
+            }
+            instructionEdits.revert(selector)
+            catalogError = ""
+        } catch {
+            catalogError = error.localizedDescription
         }
     }
 
@@ -238,13 +311,15 @@ struct ExplainWorkspace: View {
                         }
                     }
                     .accessibilityLabel("MCP 설정 복사")
-                    .accessibilityHint("같은 Mac에 있는 Codex 또는 Claude Code용 설정을 클립보드에 복사합니다.")
+                    .accessibilityHint("Codex 또는 Claude Code 설정을 클립보드에 복사합니다.")
                     if let copiedMCPClient {
                         Text("\(copiedMCPClient) 설정 복사됨").font(.caption).foregroundStyle(.secondary)
                     }
                 }
-                Text("같은 Mac에서만 사용합니다. Codex는 config.toml에 붙여넣고, Claude Code는 터미널에서 직접 실행하세요. 앱이 다른 위치로 이동하면 설정을 다시 복사하세요.")
-                    .font(.caption).foregroundStyle(.secondary)
+                if let copiedMCPClient {
+                    Text(copiedMCPClient == "Codex" ? "config.toml에 붙여넣으세요." : "터미널에 붙여넣고 실행하세요.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             } else {
                 Text("앱에 실행 가능한 MCP 도우미가 없어 설정을 복사할 수 없습니다.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -264,8 +339,8 @@ struct ExplainWorkspace: View {
     }
 
     private func chooseProfile(_ selector: String) {
+        showProfileChooser = false
         profile = selector
-        copiedRevision = nil
         guard access.pair != nil else { return } // browsing without a connected helper never creates a grant
         AppDelegate.shared?.selectAgentInstruction(selector)
     }
@@ -413,38 +488,6 @@ struct ExplainWorkspace: View {
         if drafts.open(id, replace: replace) { showSpeech = !drafts.speech.isEmpty }
     }
 }
-
-private struct ExplainInstructionEditor: View {
-    @Environment(\.dismiss) private var dismiss
-    @State private var text: String
-    let save: (String) -> Void
-
-    init(initialValue: String, save: @escaping (String) -> Void) {
-        _text = State(initialValue: initialValue)
-        self.save = save
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("기본 해설 지시 편집").font(.headline)
-            Text("전체 해설과 변경분만 프로필에 함께 적용됩니다. 저장 후 공통 규칙을 포함한 실제 지시를 미리 볼 수 있습니다.")
-                .font(.caption).foregroundStyle(.secondary)
-            TextEditor(text: $text)
-                .font(.callout.monospaced())
-                .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
-                .accessibilityLabel("저장할 기본 해설 지시")
-            HStack {
-                Button("기본값 복원") { text = CodeExplanation.defaultInstruction }
-                Spacer()
-                Button("취소", role: .cancel) { dismiss() }
-                Button("저장") { save(text); dismiss() }.keyboardShortcut(.defaultAction)
-            }
-        }
-        .padding()
-        .frame(minWidth: 540, minHeight: 355)
-    }
-}
-
 
 private struct AgentCatalogEditor: View {
     struct Target: Identifiable { let id = UUID(); let record: AgentCatalogRecord? }
