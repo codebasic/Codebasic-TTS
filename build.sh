@@ -20,21 +20,32 @@ BUILD_DIR="${TTS_BUILD_DIR:-$HERE/build}"
 APP_DIR="$BUILD_DIR/$APP_NAME.app"
 MACOS_DIR="$APP_DIR/Contents/MacOS"
 RES_DIR="$APP_DIR/Contents/Resources"
+HELPERS_DIR="$APP_DIR/Contents/Helpers"
 INSTALL_DIR="$HOME/Applications"
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 
 build() {
   echo "==> Compiling Swift sources"
   rm -rf "$APP_DIR"
-  mkdir -p "$MACOS_DIR" "$RES_DIR"
+  mkdir -p "$MACOS_DIR" "$RES_DIR" "$HELPERS_DIR"
 
   # shellcheck disable=SC2046
   swiftc -O \
     -o "$MACOS_DIR/$APP_NAME" \
     $(find "$HERE/Sources" -name '*.swift') \
     -framework AppKit -framework SwiftUI -framework AVFoundation \
-    -framework Carbon -framework ApplicationServices \
+    -framework Carbon -framework ApplicationServices -framework Security \
     -lsqlite3
+
+  echo "==> Compiling native MCP helper"
+  swiftc -O \
+    -o "$HELPERS_DIR/codebasic-tts-agent-mcp" \
+    "$HERE/Helpers/CodebasicTTSAgentMCP.swift" \
+    "$HERE/Sources/App/AgentPeerVerifier.swift" \
+    "$HERE/Sources/App/LocalInstructionSocket.swift" \
+    "$HERE/Sources/Core/AgentSessionPolicy.swift" \
+    "$HERE/Sources/Core/AgentInstructionCatalog.swift" \
+    -framework Security -framework Foundation
 
   cp "$HERE/Resources/Info.plist" "$APP_DIR/Contents/Info.plist"
   [ -f "$HERE/Resources/AppIcon.icns" ] && cp "$HERE/Resources/AppIcon.icns" "$RES_DIR/AppIcon.icns"
@@ -51,10 +62,14 @@ build() {
   SIGN_ID="${CODESIGN_IDENTITY:-Codebasic TTS Local}"
   if security find-identity -p codesigning 2>/dev/null | grep -qF "$SIGN_ID"; then
     echo "==> Code signing with stable identity: $SIGN_ID"
-    codesign --force --deep --sign "$SIGN_ID" "$APP_DIR" >/dev/null 2>&1 || \
+    codesign --force --sign "$SIGN_ID" --identifier "${BUNDLE_ID}.agent-mcp" "$HELPERS_DIR/codebasic-tts-agent-mcp" >/dev/null 2>&1 || \
+      echo "    (helper codesign with '$SIGN_ID' failed)"
+    codesign --force --sign "$SIGN_ID" "$APP_DIR" >/dev/null 2>&1 || \
       echo "    (codesign with '$SIGN_ID' failed)"
   else
     echo "==> Ad-hoc code signing  (no '$SIGN_ID' identity → Accessibility grant resets each rebuild)"
+    codesign --force --sign - --identifier "${BUNDLE_ID}.agent-mcp" "$HELPERS_DIR/codebasic-tts-agent-mcp" >/dev/null 2>&1 || \
+      echo "    (helper ad-hoc codesign skipped/failed)"
     codesign --force --sign - "$APP_DIR" >/dev/null 2>&1 || \
       echo "    (codesign skipped/failed — fine for local runs)"
   fi
@@ -118,9 +133,15 @@ case "${1:-install}" in
     echo "==> Compiling + running unit tests"
     mkdir -p "$BUILD_DIR"
     /usr/bin/python3 -B -m unittest discover -s "$HERE/Tests" -p 'test_mcp*.py' -v
-    swiftc -O "$HERE/Sources/Core/TextSplitter.swift" "$HERE/Sources/App/LocalSpeechSocket.swift" \
+    swiftc -O "$HERE/Sources/Core/TextSplitter.swift" "$HERE/Sources/Core/SSMLGuard.swift" "$HERE/Sources/App/LocalSpeechSocket.swift" \
       "$HERE/Tests/LocalSpeechGateTests.swift" -o "$BUILD_DIR/local-speech-gate-tests"
     "$BUILD_DIR/local-speech-gate-tests"
+    swiftc -O "$HERE/Sources/Core/SSMLGuard.swift" "$HERE/Sources/Core/AgentInstructionCatalog.swift" \
+      "$HERE/Sources/Core/AgentSessionPolicy.swift" "$HERE/Sources/Core/ExplanationDraftWorkspace.swift" \
+      "$HERE/Sources/Core/Logging.swift" "$HERE/Sources/Core/MemoryDiagnostics.swift" \
+      "$HERE/Sources/Core/ExplanationConversation.swift" "$HERE/Sources/TTS/TextNormalizer.swift" \
+      "$HERE/Tests/AgentCatalogPolicyTests.swift" -framework Security -o "$BUILD_DIR/agent-catalog-policy-tests"
+    "$BUILD_DIR/agent-catalog-policy-tests"
     mkdir -p "$BUILD_DIR"
     swiftc -O "$HERE/Sources/Core/TextSplitter.swift" "$HERE/Sources/Core/CrawlLayout.swift" \
       "$HERE/Sources/App/Endpoints.swift" "$HERE/Tests/main.swift" -o "$BUILD_DIR/tests"

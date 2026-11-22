@@ -106,6 +106,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             showInstructionShareError("미리 보는 동안 지시가 바뀌었습니다. 새 내용을 확인한 뒤 다시 공유하세요.")
             return
         }
+        appState.agentSession.revokeRead(reason: .manual)
         let socket = LocalInstructionSocket(peer: peer, profile: profile)
         guard socket.start() else {
             showInstructionShareError("도우미가 종료됐거나 이전 소켓 경로가 남아 있습니다. 새 도우미와 소켓 상태를 확인하세요.")
@@ -154,6 +155,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let workspace = appState.explanationDrafts
+        appState.agentSession.revokeReceipt()
         let socket = LocalExplanationDraftSocket(peer: peer) { draft in workspace.receive(draft) }
         guard socket.start() else {
             showDraftReceiptError("도우미가 종료됐거나 대본 소켓 경로가 이미 사용 중입니다.")
@@ -188,6 +190,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         localSpeechSocket?.stop()
         revokeLocalInstructions()
         revokeDraftReceipt()
+        appState.agentSession.endSession()
     }
 
     @objc private func openWindow() { mainWindow.show() }
@@ -207,12 +210,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Playback overlay
 
     private func observeState() {
+        let session = appState.agentSession
+        session.onBeforeOpenReadSocket = { [weak self] in self?.revokeLocalInstructions() }
+        session.onBeforeOpenReceiptSocket = { [weak self] in self?.revokeDraftReceipt() }
+        session.onReadGrantStateChanged = { [weak self] profile in
+            guard let self else { return }
+            self.appState.sharedInstructionProfile = profile
+            self.localInstructionMenu?.state = (profile != nil || self.localInstructionSocket != nil) ? .on : .off
+        }
+        session.onReceiptGrantStateChanged = { [weak self] pid in
+            guard let self else { return }
+            self.appState.explanationDrafts.setReceiver(pid)
+            self.draftReceiptMenu?.state = (pid != nil || self.draftReceiptSocket != nil) ? .on : .off
+        }
+
         appState.$explainPrompt.dropFirst()
             .removeDuplicates(by: { $0.utf8.elementsEqual($1.utf8) })
-            .sink { [weak self] _ in self?.revokeLocalInstructions() }.store(in: &cancellables)
+            .sink { [weak self] _ in
+                self?.revokeLocalInstructions()
+                self?.appState.agentSession.revokeReadIfMutated(targetWireName: "explain")
+                self?.appState.agentSession.revokeReadIfMutated(targetWireName: "continue")
+            }.store(in: &cancellables)
         appState.$normalizePrompt.dropFirst()
             .removeDuplicates(by: { $0.utf8.elementsEqual($1.utf8) })
-            .sink { [weak self] _ in self?.revokeLocalInstructions() }.store(in: &cancellables)
+            .sink { [weak self] _ in
+                self?.revokeLocalInstructions()
+                self?.appState.agentSession.revokeReadIfMutated(targetWireName: "normalize")
+            }.store(in: &cancellables)
         appState.$phase
             .receive(on: RunLoop.main)
             .sink { [weak self] phase in

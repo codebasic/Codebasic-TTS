@@ -84,6 +84,7 @@ with tempfile.TemporaryDirectory(prefix="cbtts-draft-", dir="/private/tmp") as d
     subprocess.run(["/usr/bin/swiftc", "-o", str(probe),
                     str(SOURCES / "App/LocalInstructionSocket.swift"),
                     str(SOURCES / "App/LocalExplanationDraftSocket.swift"),
+                    str(SOURCES / "Core/SSMLGuard.swift"),
                     str(SOURCES / "Core/ExplanationDraftWorkspace.swift"),
                     str(HERE / "LocalExplanationDraftSocketProbe.swift")],
                    env={**env, "SDKROOT": sdk, "CLANG_MODULE_CACHE_PATH": str(cache)}, check=True, timeout=100)

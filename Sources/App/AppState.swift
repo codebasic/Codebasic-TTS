@@ -89,6 +89,29 @@ final class AppState: ObservableObject {
 
     // External workspace is never connected to the legacy generator buffers.
     let explanationDrafts = ExplanationDraftWorkspace()
+    let agentCatalog = AgentInstructionCatalogStore(directory: Secrets.appSupportDir)
+    lazy var agentSession: AgentSessionController = {
+        let session = AgentSessionController(
+            catalog: agentCatalog,
+            drafts: explanationDrafts,
+            builtinTextProvider: { [weak self] name in
+                guard let self else { return "" }
+                switch name {
+                case "explain": return CodeExplanation.effectiveInstruction(self.explainPrompt)
+                case "continue": return CodeExplanation.effectiveInstruction(self.explainPrompt) + "\n\n" + CodeExplanation.continueInstruction
+                case "normalize": return self.normalizePrompt.isEmpty ? TextNormalizer.defaultInstruction : self.normalizePrompt
+                default: return ""
+                }
+            }
+        )
+        session.onReadGrantStateChanged = { [weak self] profile in
+            self?.sharedInstructionProfile = profile
+        }
+        session.onReceiptGrantStateChanged = { [weak self] pid in
+            self?.explanationDrafts.setReceiver(pid)
+        }
+        return session
+    }()
     @Published var sharedInstructionProfile: LocalInstructionProfile.Name?
 
     func instructionSnapshot(_ name: LocalInstructionProfile.Name) -> LocalInstructionProfile? {
@@ -104,14 +127,55 @@ final class AppState: ObservableObject {
         return LocalInstructionProfile(name: name, text: text)
     }
 
+    @discardableResult
+    func createLocalInstruction(label: String, body: String) -> Result<AgentInstructionEntry, AgentCatalogError> {
+        agentCatalog.create(label: label, body: body)
+    }
+
+    @discardableResult
+    func updateLocalInstruction(id: String, label: String, body: String) -> Result<AgentInstructionEntry, AgentCatalogError> {
+        switch agentCatalog.update(id: id, label: label, body: body) {
+        case .success(let outcome):
+            if outcome.changed {
+                agentSession.revokeReadIfMutated(targetWireName: id)
+            }
+            return .success(outcome.entry)
+        case .failure(let error):
+            return .failure(error)
+        }
+    }
+
+    @discardableResult
+    func deleteLocalInstruction(id: String) -> Result<AgentInstructionTombstone, AgentCatalogError> {
+        switch agentCatalog.delete(id: id) {
+        case .success(let tombstone):
+            agentSession.revokeReadIfDeleted(entryID: id)
+            return .success(tombstone)
+        case .failure(let error):
+            return .failure(error)
+        }
+    }
+
     /// The external agent has already done the text work. Only the current
     /// voice engine may be used, and only on this explicit editor action.
     func playExplanationDraft(displayOnly: Bool = false) {
-        guard !isBusy, !explaining, !normalizing,
-              let input = explanationDrafts.playback(displayOnly: displayOnly) else { return }
+        guard !isBusy, !explaining, !normalizing else { return }
+        guard let input = explanationDrafts.playback(displayOnly: displayOnly) else {
+            if let error = explanationDrafts.lastPlaybackError {
+                statusText = error
+            }
+            return
+        }
+        guard !SSMLGuard.containsSSML(input.speech), !SSMLGuard.containsSSML(input.display) else {
+            statusText = "오류: SSML 태그는 합성할 수 없습니다."
+            return
+        }
         playbackMode = .explain
         synthesize(input.speech, displayText: input.display, preserveLiteral: true)
-        phase = .synthesizing
+        if phase == .idle,
+           TextSplitter.synthesisInput(input.speech, displayText: input.display, preserveLiteral: true, maxChars: maxChunkChars) != nil {
+            phase = .synthesizing
+        }
     }
 
     // Commentary (코드 → 해설). Shares the endpoint pool above, but the explain
@@ -510,6 +574,11 @@ final class AppState: ObservableObject {
     /// TTS, 해설 prose for commentary) while `text` is what's actually synthesized
     /// (the 대본). When omitted, the subtitle is the spoken text.
     func synthesize(_ text: String, displayText: String? = nil, preserveLiteral: Bool = false) {
+        if SSMLGuard.containsSSML(text) || displayText.map(SSMLGuard.containsSSML) == true {
+            statusText = "오류: SSML 태그는 합성할 수 없습니다."
+            phase = .idle
+            return
+        }
         guard let input = TextSplitter.synthesisInput(text, displayText: displayText, preserveLiteral: preserveLiteral,
                                                      maxChars: maxChunkChars) else { return }
         let chunks = input.chunks

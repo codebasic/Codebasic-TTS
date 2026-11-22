@@ -102,6 +102,7 @@ final class LocalSpeechGate {
     private var keys: [String: Data] = [:]
     private var order: [String] = []
     func accept(text: String, key: String, app: AppState) -> String {
+        guard !SSMLGuard.containsSSML(text) else { return "invalid" }
         let digest = Data(SHA256.hash(data: Data(text.utf8)))
         if let existing = keys[key] { return existing == digest ? "duplicate" : "conflict" }
         guard !app.isBusy, !app.explaining, !app.normalizing else { return "busy" }
