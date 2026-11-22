@@ -164,20 +164,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             access.rejectSelection(.invalidInstruction)
             return
         }
-        _ = access.select(snapshot, current: { [weak self] selector in
-            guard let self, LocalInstructionProfile.Name(rawValue: selector) != nil
-                    || self.appState.agentCatalog.refresh() else { return nil }
-            return self.appState.agentSnapshot(selector)
-        }, workspace: appState.explanationDrafts,
-        deliveryGate: custom ? appState.agentCatalog.deliveryGate(for: snapshot) : { $0() })
+        _ = access.select(snapshot, current: { [weak self] in self?.currentAgentSnapshot($0) },
+                          deliveryGate: custom ? appState.agentCatalog.deliveryGate(for: snapshot) : { $0() })
+    }
+
+    private func currentAgentSnapshot(_ selector: String) -> AgentInstructionSnapshot? {
+        guard LocalInstructionProfile.Name(rawValue: selector) != nil
+                || appState.agentCatalog.refresh() else { return nil }
+        return appState.agentSnapshot(selector)
     }
 
     @objc func toggleDraftReceipt() {
         let access = appState.agentAccess
-        if access.receiving {
-            access.revokeSelection()
+        if access.receiving || access.waitingForReceiveHelper {
+            access.disableReceive()
         } else {
-            showInstructionShareError("에이전트 탭에서 연결할 지시를 선택하세요. 붙여넣기는 계속 사용할 수 있습니다.")
+            _ = access.enableReceive(current: { [weak self] in self?.currentAgentSnapshot($0) },
+                                     workspace: appState.explanationDrafts)
         }
     }
 
@@ -289,7 +292,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                            action: #selector(toggleLocalInstructions), keyEquivalent: "")
         instructions.target = self
         localInstructionMenu = instructions
-        let draftReceipt = appMenu.addItem(withTitle: "외부 대본 받기 허용 (이번 실행)…",
+        let draftReceipt = appMenu.addItem(withTitle: "외부 대본 받기 허용 (이번 실행)",
                                            action: #selector(toggleDraftReceipt), keyEquivalent: "")
         draftReceipt.target = self
         draftReceiptMenu = draftReceipt

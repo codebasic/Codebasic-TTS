@@ -61,7 +61,7 @@ def initialize(proc):
     res = rpc(proc, "initialize", {"protocolVersion":"2025-11-25", "capabilities":{}})
     assert res["serverInfo"]["name"] == "codebasic-tts-agent"
     write(proc, '{"jsonrpc":"2.0","method":"notifications/initialized"}')
-    assert {t["name"] for t in rpc(proc, "tools/list")["tools"]} == {"tts_agent_status","get_tts_instructions","submit_explanation_draft"}
+    assert {t["name"] for t in rpc(proc, "tools/list")["tools"]} == {"tts_agent_status","get_tts_instructions","submit_explanation_draft","submit_tts_draft"}
 
 
 def command(proc, instruction):
@@ -171,127 +171,97 @@ def main():
                     os.chdir(previous)
             assert not json.loads(command(server,"snapshot"))["paired"]
             assert command(server, "end") == "ok"
-            # Waiting activation is a deliberate, one-shot choice scoped to this app.
+            # An explicit enable can wait, but expires and never transfers automatically.
             server = start_server(waiting=180)
-            assert command(server, "pair") == "ok"
-            assert command(server, "select") == "ok"
-            assert json.loads(command(server, "snapshot"))["selection"] == "waitingForHelper"
+            assert command(server, "pair") == "ok" and command(server, "enable") == "ok"
+            assert json.loads(command(server, "snapshot"))["waiting"]
             time.sleep(0.3)
-            assert json.loads(command(server, "snapshot"))["selection"] == "expired"
-            assert status(a) == "approval_required" # elapsed selection cannot be shared
-            assert command(server, "end") == "ok"
-            server = start_server()
-            assert command(server, "pair") == "ok"
-            assert command(server, "select") == "ok"
-            assert command(server, "invalidate-pending") == "ok"
-            assert json.loads(command(server, "snapshot"))["selection"] == "changed"
-            assert command(server, "select") == "ok"
-            assert command(server, "revoke") == "ok"
-            assert json.loads(command(server, "snapshot"))["selection"] == "canceled"
-            for _ in range(15): assert command(server, "reject") == "ok"
-            info = json.loads(command(server, "snapshot"))
-            assert info["selection"] == "catalogUnavailable"
-            assert info["diagnostics"] == ["catalogUnavailable"] * 12
+            assert not json.loads(command(server, "snapshot"))["waiting"]
             assert status(a) == "approval_required"
-            assert command(server, "end") == "ok"
-            server = start_server()
-            assert command(server, "pair") == "ok"
-            assert command(server, "select") == "ok"
-            assert status(other) == "app_unavailable"
-            assert json.loads(command(server, "snapshot"))["selection"] == "waitingForHelper"
-            assert status(a) == "ready" # first verified bundled helper consumes the deliberate selection
-            assert json.loads(command(server, "snapshot"))["diagnostics"] == ["waitingForHelper", "active"]
-            assert status(b) == "other_agent" # intent never transfers to another session
             assert command(server, "end") == "ok"
 
-            # Force an unavailable local grant without changing any real socket.
-            obstruction = root / "ipc/i.sock"
-            obstruction.write_text("synthetic obstruction")
             server = start_server()
             assert command(server, "pair") == "ok"
-            assert status(a) == "approval_required"
-            assert command(server, "select") == "no"
-            assert json.loads(command(server, "snapshot"))["selection"] == "instructionGrantFailed"
-            assert obstruction.read_text() == "synthetic obstruction"
-            assert command(server, "end") == "ok"
-            obstruction.unlink()
-            server = start_server()
-            assert command(server, "pair") == "ok"
-            assert status(other) == "app_unavailable"  # same identifier/signer, wrong helper code hash
-            assert not json.loads(command(server,"snapshot"))["paired"]
-            assert status(a) == "approval_required"
+            assert command(server, "enable") == "ok"
+            assert status(other) == "app_unavailable" # same leaf/ID, wrong helper hash
+            assert json.loads(command(server, "snapshot"))["waiting"]
+            assert status(a) == "receiving_only" # no profile or instruction read
             assert status(b) == "other_agent"
-            assert call(a,"get_tts_instructions",profile=FIXTURE_SELECTOR)["isError"]
-            assert command(server, "select") == "ok"
-            assert status(a) == "ready" # one selection enabled both grants
-            assert call(b,"get_tts_instructions",profile=FIXTURE_SELECTOR)["isError"]
+            assert call(a,"get_tts_instructions")["isError"]
+            draft = dict(idempotency_key="doc-1", display_text="첫 번째 대본")
+            assert call(b,"submit_tts_draft",**draft)["isError"]
+            assert call(a,"submit_tts_draft",**{**draft,"profile":FIXTURE_SELECTOR})["isError"]
+            assert call(a,"submit_tts_draft",**{**draft,"display_text":"x"*8193})["isError"]
+            assert call(a,"submit_tts_draft",**draft)["structuredContent"]["status"] == "accepted"
+            assert call(a,"submit_tts_draft",**draft)["structuredContent"]["status"] == "duplicate"
+            assert call(a,"submit_tts_draft",**{**draft,"display_text":"바뀐 대본"})["isError"]
+            info = json.loads(command(server, "snapshot"))
+            assert info["editor"] == info["original"] == "첫 번째 대본"
+            assert not info["canRevert"] and info["associated"] == ""
+            assert command(server, "edit-document") == "ok"
+            second = dict(idempotency_key="doc-2", display_text="두 번째 대본")
+            assert call(a,"submit_tts_draft",**second)["structuredContent"]["status"] == "accepted"
+            assert command(server, "edit-document") == "ok"
+            third = dict(idempotency_key="doc-3", display_text="세 번째 대본")
+            assert call(a,"submit_tts_draft",**third)["structuredContent"]["status"] == "accepted"
+            info = json.loads(command(server, "snapshot"))
+            assert info["editor"] == "세 번째 대본"
+            assert info["tabs"] == ["첫 번째 대본", "두 번째 대본", "세 번째 대본"] and info["dirty"] == [True, True, False]
+            assert command(server, "switch-tab 1") == "ok"
+            info = json.loads(command(server, "snapshot"))
+            assert info["editor"] == "직접 수정: 두 번째 대본" and info["canRevert"]
+            assert command(server, "revert-document") == "ok"
+            assert json.loads(command(server, "snapshot"))["editor"] == "두 번째 대본"
+            assert command(server, "switch-tab 0") == "ok"
+            assert json.loads(command(server, "snapshot"))["editor"] == "직접 수정: 첫 번째 대본"
+
+            # Optional instruction is separate, pins only the selected saved revision, and cannot be bypassed.
+            assert command(server, "select") == "ok" and status(a) == "ready"
+            plain = dict(idempotency_key="will-not-bypass", display_text="범위 확인")
+            assert call(a,"submit_tts_draft",**plain)["structuredContent"]["status"] == "instruction_required"
             assert call(a,"get_tts_instructions",profile="explain")["isError"]
-            reply = call(a,"get_tts_instructions")
-            assert reply["structuredContent"]["profile"] == FIXTURE_SELECTOR
-            assert not reply["isError"] and reply["structuredContent"]["instructions"].encode() == "합성 지시 e\u0301\n".encode()
-            assert "proof" not in json.dumps(reply)
-            old = reply["structuredContent"]["revision"]
-            fields = dict(profile=FIXTURE_SELECTOR, revision=old, idempotency_key="one", display_text="as_frame", speech_text="애즈 프레임")
-            assert call(a,"submit_explanation_draft",display_text="text-only",idempotency_key="unproven")["isError"]
-            assert call(b,"submit_explanation_draft",**fields)["isError"]
-            assert not call(a,"submit_explanation_draft",**fields)["isError"]
-            assert "Already received" in message(call(a,"submit_explanation_draft",**fields))
-            assert "Already received" in message(call(a,"submit_explanation_draft",**{**fields,"idempotency_key":"different-key"}))
-            assert call(a,"submit_explanation_draft",**{**fields,"speech_text":"other"})["isError"]
-            another = {**fields, "idempotency_key":"two", "display_text":"두 번째 대본"}
-            assert not call(a,"submit_explanation_draft",**another)["isError"]
-            snap = json.loads(command(server,"snapshot"))
-            assert snap["count"] == 2 and snap["editor"] == "manual untouched"
-            assert snap["previews"] == ["두 번째 대본", "as_frame"] # immediate, both retained, newest first
-            assert snap["old"] == [False, False] and snap["labels"] == ["로컬 MCP", "로컬 MCP"]
-            assert command(server,"select-alternate") == "ok"
-            assert call(a,"get_tts_instructions",profile=FIXTURE_SELECTOR)["isError"]
-            assert call(a,"submit_explanation_draft",**{**fields,"idempotency_key":"one-old"})["isError"]
-            alt = call(a,"get_tts_instructions")["structuredContent"]
-            assert alt["profile"] == "continue"
-            assert not call(a,"submit_explanation_draft",profile="continue",revision=alt["revision"],
-                            display_text="다른 지시의 대본",idempotency_key="alt")["isError"]
-            assert command(server,"select") == "ok"
-            assert call(a,"submit_explanation_draft",**{**fields,"idempotency_key":"one-old"})["isError"] # even re-selecting same revision
-            assert call(a,"get_tts_instructions")["structuredContent"]["revision"] == old
-            assert command(server, "change") == "ok" and command(server, "revert") == "ok"
-            assert status(a) == "approval_required"
-            assert call(a,"get_tts_instructions")["isError"] # edit/revert never restores either grant
+            prior = call(a,"get_tts_instructions")["structuredContent"]
+            assert prior["instructions"].encode() == "합성 지시 e\u0301\n".encode() and "proof" not in prior
+            fields = dict(profile=FIXTURE_SELECTOR, revision=prior["revision"], idempotency_key="linked", display_text="연결된 대본")
+            assert call(a,"submit_explanation_draft",**fields)["structuredContent"]["status"] == "accepted"
+            assert json.loads(command(server, "snapshot"))["associated"] == FIXTURE_SELECTOR
+            assert command(server,"edit-buffer") == "ok"
+            assert call(a,"get_tts_instructions")["structuredContent"] == prior
+            assert command(server,"save-buffer") == "ok"
+            assert status(a) == "instruction_required"
+            assert call(a,"submit_tts_draft",**plain)["structuredContent"]["status"] == "instruction_required"
             assert call(a,"submit_explanation_draft",**fields)["isError"]
             assert command(server,"select") == "ok"
-            new = call(a,"get_tts_instructions")["structuredContent"]["revision"]
-            assert new != old
+            revised = call(a,"get_tts_instructions")["structuredContent"]
+            assert revised["revision"] != prior["revision"] and revised["instructions"] == "저장하지 않은 합성 지시"
             assert command(server,"delete") == "ok"
-            assert call(a,"submit_explanation_draft",**{**fields,"revision":new,"idempotency_key":"final"})["isError"]
-            assert json.loads(command(server,"snapshot"))["count"] == 3
-            # Recover after an ungraceful app restart while the same helper remains alive.
+            assert call(a,"submit_tts_draft",**plain)["structuredContent"]["status"] == "instruction_required"
+            assert command(server,"revoke") == "ok" and status(a) == "receiving_only"
+            assert call(a,"submit_tts_draft",**plain)["structuredContent"]["status"] == "accepted"
+
             server.kill()
             server.wait(timeout=3)
             assert status(a) == "app_unavailable"
             server = start_server()
             assert command(server, "pair") == "ok"
             assert status(a) == "approval_required"
-            assert command(server, "select") == "ok"
-            assert status(a) == "ready"
-            assert call(a,"submit_explanation_draft",**fields)["isError"] # old proof cannot authorize a new app instance
-            assert json.loads(command(server,"snapshot"))["count"] == 0
-            prior = call(a, "get_tts_instructions")["structuredContent"]
-            assert command(server, "edit-buffer") == "ok"
-            assert call(a, "get_tts_instructions")["structuredContent"] == prior # unsaved text stays private
-            assert command(server, "revert-buffer") == "ok"
-            assert call(a, "get_tts_instructions")["structuredContent"] == prior
-            assert command(server, "edit-buffer") == "ok" and command(server, "save-buffer") == "ok"
-            assert status(a) == "approval_required"
-            assert call(a, "get_tts_instructions")["isError"]
-            assert command(server, "select") == "ok"
-            new_saved = call(a, "get_tts_instructions")["structuredContent"]
-            assert new_saved["instructions"] == "저장하지 않은 합성 지시"
-            assert new_saved["revision"] != prior["revision"]
+            assert call(a,"submit_tts_draft",**draft)["isError"]
+            assert command(server,"enable") == "ok" and status(a) == "receiving_only"
+            assert call(a,"submit_explanation_draft",**fields)["isError"] # old proof cannot authorize a new instance
+            for index in range(6):
+                args = {"idempotency_key":f"cap-{index}","display_text":f"합성 문서 {index}"}
+                assert call(a,"submit_tts_draft",**args)["structuredContent"]["status"] == "accepted"
+                assert command(server,"edit-document") == "ok"
+            full = call(a,"submit_tts_draft",idempotency_key="cap-overflow",display_text="넘치는 문서")
+            assert full["isError"] and full["structuredContent"]["status"] == "busy"
+            snapshot = json.loads(command(server,"snapshot"))
+            assert len(snapshot["tabs"]) == 6 and all(snapshot["dirty"])
+            assert snapshot["editor"] == "직접 수정: 합성 문서 5"
             stop(a)
-            assert status(b) == "approval_required"
+            assert status(b) == "approval_required" # permission does not move to another verified helper
             assert not json.loads(command(server,"snapshot"))["receiving"]
             assert command(server, "end") == "ok"
-            print("signed stdio MCP: automatic discovery, closed app/restart recovery, default off, single selection, untrusted peers rejected, immediate previews, old proof and revised/deleted selection revoked, dedup, and unchanged editor")
+            print("signed stdio MCP: no-profile first receipt, wrong helper and restart disabled, bounded inputs, idempotency, linked/stale scope, dirty tabs, exact revert and no playback")
         finally:
             for proc in process: stop(proc)
 

@@ -164,7 +164,7 @@ extension NSAlert {
         assertOff()
         print("stale preview denied; exact customized explain/continue/normalize presets and edit/revert revocation passed; menu revoke and termination removed socket")
 
-        guard let receipt = application.mainMenu?.items.first?.submenu?.item(withTitle: "외부 대본 받기 허용 (이번 실행)…"),
+        guard let receipt = application.mainMenu?.items.first?.submenu?.item(withTitle: "외부 대본 받기 허용 (이번 실행)"),
               let receiptAction = receipt.action else { preconditionFailure("Missing separate receipt consent") }
         let dSocket = directory + "/d.sock"
         func receiptClick(_ responses: [(NSAlert) -> NSApplication.ModalResponse]) {
@@ -178,10 +178,7 @@ extension NSAlert {
             precondition(!FileManager.default.fileExists(atPath: dSocket))
         }
         assertDraftOff()
-        receiptClick([{ alert in
-            precondition(alert.informativeText.contains("에이전트 탭에서 연결할 지시를 선택"))
-            return .alertFirstButtonReturn
-        }])
+        receiptClick([]) // a missing bundled pairing listener fails closed without a modal
         assertDraftOff(); assertOff()
         print("unpaired receipt explicitly rejected; signed grant behavior is covered by the round-trip fixture")
     }

@@ -18,7 +18,11 @@ enum CodeExplanation { static let noChange = "변경 없음" }
             AgentPeerSigning.signedHash(at: URL(fileURLWithPath: expectedHelper))
         }, selectionWaiting: wait)
         current = AgentInstructionSnapshot(selector: selector, generation: UUID(), text: original)
-        drafts.editDisplay("manual untouched")
+    }
+
+    func resolve(_ value: String) -> AgentInstructionSnapshot? {
+        if value == alternate.selector { return alternate }
+        return current?.selector == value ? current : nil
     }
 
     func command(_ line: String) {
@@ -27,15 +31,21 @@ enum CodeExplanation { static let noChange = "변경 없음" }
         switch pieces.first {
         case "pair": report(access.startPairing() ? "ok" : "no")
         case "disconnect": access.disconnect(); report("ok")
+        case "enable":
+            report(access.enableReceive(current: { [weak self] in self?.resolve($0) }, workspace: drafts) ? "ok" : "no")
+        case "disable": access.disableReceive(); report("ok")
         case "select", "select-alternate":
             let selection = pieces.first == "select-alternate" ? alternate : current
             report(selection.map { chosen in
-                access.select(chosen, current: { [weak self] value in
-                    guard let self else { return nil }
-                    if value == self.alternate.selector { return self.alternate }
-                    return self.current?.selector == value ? self.current : nil
-                }, workspace: drafts)
+                access.select(chosen, current: { [weak self] in self?.resolve($0) })
             } == true ? "ok" : "no")
+        case "edit-document": drafts.editDisplay("직접 수정: " + drafts.display); report("ok")
+        case "switch-tab":
+            guard pieces.count == 2, let index = Int(pieces[1]), drafts.documentTabs.indices.contains(index) else {
+                report("no"); return
+            }
+            drafts.selectDocument(drafts.documentTabs[index].id); report("ok")
+        case "revert-document": drafts.revertReceivedDocument(); report("ok")
         case "edit-buffer":
             guard let current else { report("no"); return }
             var entry = edits.entry(for: selector, expected: current.generation, label: "합성", text: current.text)
@@ -69,12 +79,12 @@ enum CodeExplanation { static let noChange = "변경 없음" }
             report("ok")
         case "snapshot":
             let body: [String: Any] = [
-                "selection": access.selectionStatus.rawValue,
-                "diagnostics": access.selectionDiagnostics.map(\.rawValue),
-                "previews": drafts.immediatePreviews.map(\.display), "paired": access.pair != nil, "count": drafts.pending.count, "editor": drafts.display, "shared": access.shared != nil,
-                "receiving": access.receiving, "old": drafts.pending.map { $0.provenance?.older ?? false },
-                "labels": drafts.pending.map { $0.provenance?.agentLabel ?? "" },
-                "pairs": drafts.pending.map { ($0.provenance?.principal.uuidString ?? "") },
+                "selection": access.selectionStatus.rawValue, "diagnostics": access.selectionDiagnostics.map(\.rawValue),
+                "paired": access.pair != nil, "editor": drafts.display, "shared": access.shared != nil,
+                "receiving": access.receiving, "waiting": access.waitingForReceiveHelper,
+                "tabs": drafts.documentTabs.map(\.title), "dirty": drafts.documentTabs.map(\.dirty),
+                "canRevert": drafts.canRevertReceived, "original": drafts.activeOriginal?.display ?? "",
+                "associated": drafts.provenance?.selector ?? "",
             ]
             report(String(decoding: try! JSONSerialization.data(withJSONObject: body), as: UTF8.self))
         case "end": access.stopPairing(); report("ok"); exit(0)

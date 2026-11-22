@@ -8,7 +8,8 @@ struct ExplainWorkspace: View {
     @ObservedObject var drafts: ExplanationDraftWorkspace
     @ObservedObject var catalog: AgentCatalog
     @ObservedObject var access: AgentSessionController
-    @State private var profile = "explain"
+    @State private var profile = ""
+    @State private var showInstructions = false
     @State private var profileSearch = ""
     @State private var showProfileChooser = false
     @FocusState private var profileSearchFocused: Bool
@@ -18,7 +19,7 @@ struct ExplainWorkspace: View {
     @State private var catalogError = ""
     @State private var showSpeech = false
     @State private var showAdvanced = false
-    @State private var pendingReplacement: String?
+    @State private var closeDocumentID: String?
     @State private var confirmEditorChange = false
     @State private var instructionEdits = AgentInstructionEditBuffer()
     @State private var copiedMCPClient: String?
@@ -39,30 +40,35 @@ struct ExplainWorkspace: View {
                 CommentaryView()
             }
         } else {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 15) {
-                    connection
-                    Divider()
-                    instruction
-                    Divider()
-                    inbox
-                    Divider()
-                    editor
-                    Divider()
-                    HStack {
-                        Text("외부 에이전트가 대본을 만들고, 여기서는 편집하고 읽습니다.")
-                            .font(.caption).foregroundStyle(.secondary)
-                        Spacer(minLength: 8)
-                        Button("고급: 앱에서 직접 해설 생성…") { showAdvanced = true }
-                            .controlSize(.small)
-                            .help("이 기능은 외부 대본 작업 공간과 분리됩니다. 생성 버튼을 누르면 선택한 AI 서비스가 사용됩니다.")
+            VStack(alignment: .leading, spacing: 0) {
+                connection.padding()
+                Divider()
+                HStack(alignment: .top, spacing: 0) {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 12) {
+                            editor
+                            Button("고급: 앱에서 직접 해설 생성…") { showAdvanced = true }
+                                .controlSize(.small)
+                        }
+                        .padding()
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    if showInstructions {
+                        Divider()
+                        ScrollView {
+                            instruction.padding()
+                        }
+                        .frame(width: 337)
                     }
                 }
-                .padding()
-                .frame(maxWidth: 1050)
-                .frame(maxWidth: .infinity)
             }
             .onAppear { _ = catalog.refresh() }
+            .onChange(of: access.hasInstructionScope) { old, new in
+                if old && !new { profile = "" }
+            }
+            .onChange(of: drafts.activeDocumentID) { _, _ in
+                showSpeech = !drafts.speech.isEmpty
+            }
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
                 _ = catalog.refresh()
             }
@@ -80,7 +86,7 @@ struct ExplainWorkspace: View {
                     do {
                         try catalog.delete(old.id, expected: old.editVersion)
                         instructionEdits.revert(old.selector)
-                        profile = "explain"
+                        profile = ""
                         catalogError = ""
                     } catch { catalogError = error.localizedDescription }
                     removeProfile = nil
@@ -91,18 +97,15 @@ struct ExplainWorkspace: View {
                      ? "이미 받은 대본은 보관함에 남지만, 이 지시 버전의 새 대본은 받을 수 없습니다."
                      : "이 지시의 저장하지 않은 변경도 함께 사라집니다. 이미 받은 대본은 그대로 남습니다.")
             }
-            .confirmationDialog(pendingReplacement == nil ? "편집기의 글을 비울까요?" : "편집기의 글을 받은 대본으로 바꿀까요?",
+            .confirmationDialog(closeDocumentID == nil ? "편집기의 글을 비울까요?" : "저장하지 않은 대본을 닫을까요?",
                                 isPresented: $confirmEditorChange, titleVisibility: .visible) {
-                Button(pendingReplacement == nil ? "비우기" : "바꾸기", role: .destructive) {
-                    if let id = pendingReplacement { openDraft(id, replace: true) }
+                Button(closeDocumentID == nil ? "비우기" : "닫기", role: .destructive) {
+                    if let id = closeDocumentID { drafts.closeInactiveDocument(id) }
+                    else if drafts.activeOriginal != nil { drafts.editDisplay(""); drafts.editSpeech("") }
                     else { drafts.clearEditor() }
-                    pendingReplacement = nil
+                    closeDocumentID = nil
                 }
-                Button("취소", role: .cancel) { pendingReplacement = nil }
-            } message: {
-                if pendingReplacement != nil {
-                    Text("지금 편집 중인 화면 글과 음성 대본이 바뀝니다. 취소하면 받은 대본은 보관함에 남습니다.")
-                }
+                Button("취소", role: .cancel) { closeDocumentID = nil }
             }
         }
     }
@@ -110,39 +113,22 @@ struct ExplainWorkspace: View {
     private var connection: some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack {
-                Text("1. 에이전트 연결").font(.headline).accessibilityAddTraits(.isHeader)
+                Text("에이전트 연결").font(.headline).accessibilityAddTraits(.isHeader)
+                Text(access.receiving ? "대본 받는 중" : access.waitingForReceiveHelper
+                     ? "MCP 시작 대기 중" : access.pair != nil ? "사용 가능" : "연결 안 됨")
+                    .font(.caption).foregroundStyle(.secondary)
                 Spacer(minLength: 8)
-                if let pair = access.pair {
-                    Label("연결됨", systemImage: "checkmark.circle")
-                        .font(.caption).foregroundStyle(.secondary)
-                        .help(pair.hostPath ?? "MCP를 실행한 프로세스 경로를 확인할 수 없습니다.")
-                } else {
-                    Text("연결 대기 중").font(.caption).foregroundStyle(.secondary)
-                }
+                Button("지시문") { showInstructions.toggle() }
+                    .accessibilityValue(showInstructions ? "열림" : "닫힘")
             }
             HStack(alignment: .top) {
                 mcpSetup
                 Spacer(minLength: 8)
-                if access.selectionStatus == .waitingForHelper {
-                    Button("선택 취소") { access.revokeSelection() }
-                } else if access.shared != nil {
-                    Button("공유 및 수신 중지") { access.revokeSelection() }
-                }
-                if access.pair != nil {
-                    Button("연결 해제") { access.disconnect() }
+                Button(access.receiving ? "연결 끄기" : access.waitingForReceiveHelper ? "연결 취소" : "연결 켜기") {
+                    AppDelegate.shared?.toggleDraftReceipt()
                 }
             }
-            Text(access.selectionStatus.message)
-                .font(.caption)
-                .foregroundStyle(access.selectionStatus.isProblem ? Color.orange : Color.secondary)
-                .accessibilityLabel("지시 연결 상태: \(access.selectionStatus.message)")
-            if let legacy = app.sharedInstructionProfile {
-                Text("기존 지시 공유 중: \(name(legacy))")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            if access.selectionStatus == .notSelected, !access.status.isEmpty {
-                Text(access.status).font(.caption).foregroundStyle(.orange)
-            }
+            if !access.status.isEmpty { Text(access.status).font(.caption).foregroundStyle(.orange) }
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("agent-connection-section")
@@ -151,14 +137,19 @@ struct ExplainWorkspace: View {
     private var instruction: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                Text("2. 지시문 작성 또는 선택").font(.headline).accessibilityAddTraits(.isHeader)
+                Text("지시문").font(.headline).accessibilityAddTraits(.isHeader)
                 Spacer()
                 profileChooser
                 Button("새 지시…") { catalogEdit = .init(record: nil) }
                     .disabled(catalog.readError || catalog.records.count >= AgentLimits.profiles)
             }
-            Text("고른 지시는 연결되는 에이전트에 공유됩니다. 원격 모델을 쓰는 에이전트는 받은 지시를 모델 서비스에 보낼 수 있습니다.")
+            Text("선택하지 않아도 대본을 받을 수 있습니다. 고르면 저장된 지시가 에이전트에 공유됩니다.")
                 .font(.caption).foregroundStyle(.secondary)
+            Text(access.shared.map { "공유 중: " + title($0.selector) } ?? access.selectionStatus.message)
+                .font(.caption).foregroundStyle(access.selectionStatus.isProblem ? Color.orange : Color.secondary)
+            if let legacy = app.sharedInstructionProfile {
+                Text("기존 지시 공유 중: \(name(legacy))").font(.caption).foregroundStyle(.secondary)
+            }
             if catalog.readError || !catalogError.isEmpty {
                 Text(catalog.readError ? AgentCatalog.Failure.unreadable.localizedDescription : catalogError)
                     .font(.caption).foregroundStyle(.orange)
@@ -166,7 +157,7 @@ struct ExplainWorkspace: View {
             if let snapshot = selectedSnapshot {
                 instructionEditor(snapshot)
             } else {
-                Text("이 지시를 열 수 없습니다. 다른 지시를 선택하세요.")
+                Text("선택된 지시문이 없습니다.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             if let entry = selectedRecord {
@@ -178,7 +169,7 @@ struct ExplainWorkspace: View {
     }
 
     private var profileChooser: some View {
-        let currentTitle = selectedSnapshot == nil ? "선택 없음" : title(profile)
+        let currentTitle = selectedSnapshot == nil ? "사용 안 함" : title(profile)
         return Button {
             profileSearch = ""
             showProfileChooser.toggle()
@@ -237,7 +228,8 @@ struct ExplainWorkspace: View {
     }
 
     private var profileOptions: [AgentInstructionChoice] {
-        LocalInstructionProfile.Name.allCases.map { AgentInstructionChoice(id: $0.rawValue, label: name($0)) }
+        [AgentInstructionChoice(id: "", label: "사용 안 함")]
+            + LocalInstructionProfile.Name.allCases.map { AgentInstructionChoice(id: $0.rawValue, label: name($0)) }
             + (catalog.readError ? [] : catalog.records.map { AgentInstructionChoice(id: $0.selector, label: $0.label) })
     }
 
@@ -357,71 +349,18 @@ struct ExplainWorkspace: View {
     private func chooseProfile(_ selector: String) {
         showProfileChooser = false
         profile = selector
-        AppDelegate.shared?.selectAgentInstruction(selector)
-    }
-
-    private var inbox: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("3. 에이전트에서 텍스트 수신").font(.headline).accessibilityAddTraits(.isHeader)
-                if !drafts.pending.isEmpty {
-                    Text("\(drafts.pending.count)개").font(.caption).foregroundStyle(.secondary)
-                }
-            }
-            if drafts.pending.isEmpty {
-                Text(access.receiving
-                     ? "대본을 받으면 여기에 바로 표시됩니다. 자동으로 편집기에 적용하거나 재생하지 않습니다."
-                     : "연결할 지시를 선택하면 대본을 받을 수 있습니다. 직접 붙여넣기도 가능합니다.")
-                    .font(.caption).foregroundStyle(.secondary)
-            } else {
-                ScrollViewReader { scroller in
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 10) {
-                            ForEach(drafts.immediatePreviews) { item in
-                                VStack(alignment: .leading, spacing: 6) {
-                                    if let from = item.provenance {
-                                        Text("\(from.agentLabel) · \(title(from.selector)) · 버전 \(from.revision.uuidString.prefix(8))")
-                                            .font(.caption).foregroundStyle(.secondary)
-                                    }
-                                    Text(verbatim: item.display)
-                                        .textSelection(.enabled)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                    HStack {
-                                        Button("편집기에 열기…") {
-                                            if drafts.hasEditorContent {
-                                                pendingReplacement = item.id
-                                                confirmEditorChange = true
-                                            } else { openDraft(item.id) }
-                                        }
-                                        Button("제거") { drafts.discard(item.id) }
-                                    }
-                                }
-                                .id(item.id)
-                                .padding(8)
-                                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
-                            }
-                        }
-                        .padding(.trailing, 6)
-                    }
-                    .frame(maxHeight: 220)
-                    .onChange(of: drafts.immediatePreviews.first?.id) { _, id in
-                        if let id { scroller.scrollTo(id, anchor: .top) }
-                    }
-                    .accessibilityLabel("받은 대본 미리 보기")
-                }
-            }
-        }
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("agent-received-draft-section")
+        if selector.isEmpty { access.revokeSelection() }
+        else { AppDelegate.shared?.selectAgentInstruction(selector) }
     }
 
     private var editor: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("4. TTS 생성").font(.headline).accessibilityAddTraits(.isHeader)
+            Text("대본").font(.headline).accessibilityAddTraits(.isHeader)
+            if drafts.documentTabs.count > 1 { documentTabs }
             HStack {
                 Text("화면 글 · 자막").font(.subheadline.weight(.semibold))
                 if let origin = drafts.origin {
-                    Text(drafts.hasManualEdits && origin != .manual ? origin.rawValue + " · 직접 수정함" : origin.rawValue)
+                    Text(drafts.canRevertReceived ? origin.rawValue + " · 직접 수정함" : origin.rawValue)
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -434,13 +373,16 @@ struct ExplainWorkspace: View {
                     }
                 }
                 .help("텍스트가 이미 있으면 끝에 추가합니다.")
-                Button("비우기…") { pendingReplacement = nil; confirmEditorChange = true }
+                Button("비우기…") { closeDocumentID = nil; confirmEditorChange = true }
                     .disabled(!drafts.hasEditorContent)
             }
             TextEditor(text: Binding(get: { drafts.display }, set: { drafts.editDisplay($0) }))
-                .font(.body).frame(minHeight: 175)
+                .font(.body).frame(minHeight: 240)
                 .overlay(editorBorder)
-                .accessibilityLabel("화면 글과 자막")
+                .accessibilityLabel("받은 대본 및 화면 글")
+            if drafts.canRevertReceived {
+                Button("받은 원문으로 되돌리기") { drafts.revertReceivedDocument() }
+            }
 
             DisclosureGroup("별도 음성 대본 (선택)", isExpanded: $showSpeech) {
                 VStack(alignment: .leading, spacing: 5) {
@@ -492,6 +434,33 @@ struct ExplainWorkspace: View {
         }
     }
 
+    private var documentTabs: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 6) {
+                ForEach(drafts.documentTabs) { tab in
+                    HStack(spacing: 2) {
+                        Button {
+                            drafts.selectDocument(tab.id)
+                        } label: {
+                            Text(verbatim: tab.title + (tab.dirty ? " •" : "")).lineLimit(1)
+                        }
+                        .accessibilityAddTraits(tab.id == drafts.activeDocumentID ? .isSelected : [])
+                        if tab.id != drafts.activeDocumentID {
+                            Button {
+                                if tab.dirty { closeDocumentID = tab.id; confirmEditorChange = true }
+                                else { drafts.closeInactiveDocument(tab.id) }
+                            } label: {
+                                Image(systemName: "xmark").accessibilityLabel("대본 탭 닫기")
+                            }
+                            .buttonStyle(.borderless)
+                        }
+                    }
+                }
+            }
+        }
+        .accessibilityLabel("열린 대본")
+    }
+
     private var editorBorder: some View { RoundedRectangle(cornerRadius: 6).stroke(.quaternary) }
 
     private func name(_ profile: LocalInstructionProfile.Name) -> String {
@@ -502,9 +471,7 @@ struct ExplainWorkspace: View {
         }
     }
 
-    private func openDraft(_ id: String, replace: Bool = false) {
-        if drafts.open(id, replace: replace) { showSpeech = !drafts.speech.isEmpty }
-    }
+
 }
 
 private struct AgentCatalogEditor: View {

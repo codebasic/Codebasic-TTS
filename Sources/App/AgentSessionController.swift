@@ -13,8 +13,8 @@ import Foundation
         var message: String {
             switch self {
             case .notSelected: return "아직 공유하지 않음 · 지시문을 선택하세요."
-            case .waitingForHelper: return "선택 완료 · 에이전트에서 MCP를 시작하면 연결됩니다."
-            case .active: return "지시 공유 및 대본 수신 중"
+            case .waitingForHelper: return "선택됨 · 에이전트 연결을 켜면 공유됩니다."
+            case .active: return "선택한 지시 공유 중"
             case .canceled: return "지시 공유를 취소했습니다."
             case .expired: return "선택 대기 시간이 지났습니다. 지시를 다시 선택하세요."
             case .changed: return "저장된 지시가 바뀌었습니다. 공유할 지시를 다시 선택하세요."
@@ -39,8 +39,14 @@ import Foundation
         let id = UUID()
         let snapshot: AgentInstructionSnapshot
         let current: @MainActor (String) -> AgentInstructionSnapshot?
-        let workspace: ExplanationDraftWorkspace
         let deliveryGate: (@escaping () -> Void) -> Void
+        let deadline: ContinuousClock.Instant
+    }
+
+    private struct ReceiveRequest {
+        let id = UUID()
+        let current: @MainActor (String) -> AgentInstructionSnapshot?
+        let workspace: ExplanationDraftWorkspace
         let deadline: ContinuousClock.Instant
     }
 
@@ -61,6 +67,10 @@ import Foundation
     @Published private(set) var selectionStatus: SelectionStatus = .notSelected
     // Bounded in-memory event codes only, with no user strings or identifiers.
     private(set) var selectionDiagnostics: [SelectionStatus] = []
+    @Published private(set) var waitingForReceiveHelper = false
+    @Published private(set) var hasInstructionScope = false
+    private var pendingReceive: ReceiveRequest?
+    private var pendingReceiveTask: Task<Void, Never>?
     private var pendingSelection: PendingSelection?
     private var pendingTask: Task<Void, Never>?
     private let selectionWaiting: Duration
@@ -108,7 +118,7 @@ import Foundation
                     response.set("unavailable"); return
                 }
                 response.set(self.receiving
-                             ? (self.shared == nil ? "receiving_only" : "ready")
+                             ? (self.shared != nil ? "ready" : (self.hasInstructionScope ? "instruction_required" : "receiving_only"))
                              : (self.shared == nil ? "approval_required" : "reading_only"))
             }
             guard signal.wait(timeout: deadline) == .success else { return Self.reply("unavailable") }
@@ -142,7 +152,7 @@ import Foundation
         watcher.resume()
         if LocalInstructionPeer.current(pid: pid) != peer { disconnect(); return false }
         status = ""
-        activatePending()
+        activateReceive()
         return true
     }
 
@@ -151,16 +161,16 @@ import Foundation
     @discardableResult
     func select(_ snapshot: AgentInstructionSnapshot,
                 current: @escaping @MainActor (String) -> AgentInstructionSnapshot?,
-                workspace: ExplanationDraftWorkspace,
                 deliveryGate: @escaping (@escaping () -> Void) -> Void = { $0() }) -> Bool {
         clearSelection()
+        hasInstructionScope = true
         guard snapshot.shareable else { note(.invalidInstruction); return false }
         guard pairingSocket != nil else { note(.pairingUnavailable); return false }
         let deadline = ContinuousClock.now.advanced(by: selectionWaiting)
-        let pending = PendingSelection(snapshot: snapshot, current: current, workspace: workspace,
+        let pending = PendingSelection(snapshot: snapshot, current: current,
                                        deliveryGate: deliveryGate, deadline: deadline)
         pendingSelection = pending
-        if pair != nil {
+        if receiving {
             activatePending()
             return selectionStatus == .active
         }
@@ -175,7 +185,7 @@ import Foundation
     }
 
     private func activatePending() {
-        guard let pending = pendingSelection, pair != nil else { return }
+        guard let pending = pendingSelection, receiving, pair != nil else { return }
         cancelPending()
         guard ContinuousClock.now < pending.deadline else { note(.expired); return }
         guard pending.current(pending.snapshot.selector) == pending.snapshot else { note(.changed); return }
@@ -183,28 +193,24 @@ import Foundation
             note(.instructionGrantFailed)
             return
         }
-        guard receive(current: pending.current, workspace: pending.workspace) else {
-            stopShare()
-            note(.draftGrantFailed)
-            return
-        }
         note(.active)
     }
 
     func rejectSelection(_ reason: SelectionStatus) {
         clearSelection()
+        hasInstructionScope = true
         note(reason)
     }
 
     func revokeSelection() {
         clearSelection()
+        hasInstructionScope = false
         note(.canceled)
     }
 
     private func clearSelection() {
         cancelPending()
         stopShare()
-        stopReceipt()
     }
 
     private func cancelPending() {
@@ -266,7 +272,64 @@ import Foundation
         return true
     }
 
-    func receive(current: @escaping @MainActor (String) -> AgentInstructionSnapshot?,
+    /// App-local, explicit session enable. Consumed once by a verified helper.
+    @discardableResult
+    func enableReceive(current: @escaping @MainActor (String) -> AgentInstructionSnapshot?,
+                       workspace: ExplanationDraftWorkspace) -> Bool {
+        guard !receiving, pendingReceive == nil, pairingSocket != nil else {
+            if pairingSocket == nil { status = "MCP 연결을 시작할 수 없습니다." }
+            return false
+        }
+        let deadline = ContinuousClock.now.advanced(by: selectionWaiting)
+        let request = ReceiveRequest(current: current, workspace: workspace, deadline: deadline)
+        pendingReceive = request
+        if pair != nil {
+            activateReceive()
+            return receiving
+        }
+        waitingForReceiveHelper = true
+        pendingReceiveTask = Task { [weak self] in
+            do { try await ContinuousClock().sleep(until: deadline) } catch { return }
+            guard let self, self.pendingReceive?.id == request.id else { return }
+            self.cancelPendingReceive()
+            self.clearSelection()
+            self.hasInstructionScope = false
+            self.note(.notSelected)
+            self.status = "연결 대기 시간이 지났습니다."
+        }
+        return true
+    }
+
+    private func activateReceive() {
+        guard let request = pendingReceive, pair != nil else { return }
+        cancelPendingReceive()
+        guard ContinuousClock.now < request.deadline else {
+            clearSelection()
+            hasInstructionScope = false
+            note(.notSelected)
+            status = "연결 대기 시간이 지났습니다."
+            return
+        }
+        guard receive(current: request.current, workspace: request.workspace) else { return }
+        activatePending()
+    }
+
+    func disableReceive() {
+        cancelPendingReceive()
+        stopReceipt()
+        clearSelection()
+        hasInstructionScope = false
+        note(.notSelected)
+        status = ""
+    }
+
+    private func cancelPendingReceive() {
+        pendingReceiveTask?.cancel(); pendingReceiveTask = nil
+        pendingReceive = nil
+        waitingForReceiveHelper = false
+    }
+
+    private func receive(current: @escaping @MainActor (String) -> AgentInstructionSnapshot?,
                  workspace: ExplanationDraftWorkspace) -> Bool {
         guard !receiving, let pair else { return false }
         let deadline = ContinuousClock.now.advanced(by: .seconds(AgentLimits.grantSeconds))
@@ -275,13 +338,12 @@ import Foundation
                                          verified: Self.verifier(leaf: pair.leaf, hash: pair.helperHash)) { [weak self] bytes, active in
             guard let request = Self.decode(bytes) else { return Self.reply("invalid") }
             guard Self.isV2(request["schema_version"]) else { return Self.reply("upgrade_required") }
-            let required: Set<String> = ["schema_version", "profile", "revision", "body_sha256", "proof",
-                                         "idempotency_key", "display_text"]
-            let keys = Set(request.keys)
-            guard keys == required || keys == required.union(["speech_text"]),
-                  let selector = request["profile"] as? String, let revision = Self.uuid(request["revision"]),
-                  let bodyHash = request["body_sha256"] as? String,
-                  let token = Self.uuid(request["proof"]),
+            let base: Set<String> = ["schema_version", "idempotency_key", "display_text"]
+            let linkedKeys: Set<String> = ["profile", "revision", "body_sha256", "proof"]
+            var keys = Set(request.keys)
+            keys.remove("speech_text")
+            let linked = keys == base.union(linkedKeys)
+            guard (linked || keys == base),
                   let clientKey = request["idempotency_key"] as? String,
                   let display = request["display_text"] as? String,
                   (request["speech_text"] == nil || request["speech_text"] is String),
@@ -297,22 +359,36 @@ import Foundation
                 guard DispatchTime.now() < responseDeadline, active(), let self,
                       self.pair?.id == pair.id, self.receiving,
                       self.receiveDeadline == deadline, ContinuousClock.now < deadline else { return }
-                guard let proof = pair.proofs.resolve(token, selector: selector, revision: revision, digest: bodyHash),
-                      let shared = self.shared, shared.selector == selector,
-                      let current = current(selector), current == shared,
-                      current.generation == proof.revision, current.digest == proof.digest,
-                      self.receiving, self.receiveDeadline == deadline, active() else {
-                    response.set("unproven"); return
-                }
-                let origin = AgentDraftOrigin(principal: pair.id, agentLabel: pair.label, selector: selector,
+                let origin: AgentDraftOrigin?
+                if linked {
+                    guard let selector = request["profile"] as? String, let revision = Self.uuid(request["revision"]),
+                          let bodyHash = request["body_sha256"] as? String, let token = Self.uuid(request["proof"]),
+                          let proof = pair.proofs.resolve(token, selector: selector, revision: revision, digest: bodyHash),
+                          let shared = self.shared, shared.selector == selector,
+                          let current = current(selector), current == shared,
+                          current.generation == proof.revision, current.digest == proof.digest,
+                          self.receiving, self.receiveDeadline == deadline, active() else {
+                        response.set("unproven"); return
+                    }
+                    origin = AgentDraftOrigin(principal: pair.id, agentLabel: pair.label, selector: selector,
                                               revision: revision, bodyHash: bodyHash, older: false)
+                } else {
+                    // This is enforced here, not just by a potentially stale MCP tool status.
+                    // A selected-but-not-yet-shareable request also cannot fall back generically.
+                    guard !self.hasInstructionScope, self.shared == nil, self.pendingSelection == nil else {
+                        response.set("instruction_required"); return
+                    }
+                    origin = nil
+                }
                 let scopedKey = AgentBytes.hash(Data((pair.id.uuidString + "\0" + clientKey).utf8))
                 guard let draft = ExplanationDraft(id: scopedKey, display: display, speech: speech,
-                                                   provenance: origin) else { response.set("invalid"); return }
-                let previous = workspace.preflight(draft)
+                                                   provenance: origin, sourceSession: pair.id) else {
+                    response.set("invalid"); return
+                }
+                let previous = workspace.preflightDocument(draft)
                 guard previous == .accepted else { response.set(previous.rawValue); return }
                 guard self.rate.canAccept() else { response.set("rate_limited"); return }
-                let result = workspace.receive(draft)
+                let result = workspace.receiveDocument(draft)
                 if result == .accepted { self.rate.mark() }
                 response.set(result.rawValue)
             }
@@ -332,6 +408,10 @@ import Foundation
         receiptTask = Task { [weak self, weak workspace] in
             do { try await ContinuousClock().sleep(until: deadline) } catch { return }
             self?.stopReceipt(workspace: workspace)
+            self?.clearSelection()
+            self?.hasInstructionScope = false
+            self?.note(.notSelected)
+            self?.status = "대본 수신 연결이 만료되었습니다."
         }
         receiptWorkspace = workspace
         return true
@@ -366,7 +446,10 @@ import Foundation
 
     func disconnect() {
         watch?.cancel(); watch = nil
+        cancelPendingReceive()
+        stopReceipt()
         clearSelection()
+        hasInstructionScope = false
         pair = nil
         status = ""
         note(.notSelected)

@@ -7,6 +7,7 @@ import Foundation
     static let maxFrame = 100 * 1024
     static let statusTool = "tts_agent_status"
     static let reader = "get_tts_instructions"
+    static let plainReceiver = "submit_tts_draft"
     static let receiver = "submit_explanation_draft"
     static let maxProofs = AgentLimits.proofCount
     // Derive the peer pin from this trusted bundled executable, never the socket.
@@ -48,7 +49,7 @@ import Foundation
                 let version = ["2025-11-25", "2025-06-18", "2025-03-26"].contains(requested) ? requested : "2025-11-25"
                 result(id, ["protocolVersion":version, "serverInfo":["name":"codebasic-tts-agent", "version":"2.0"],
                             "capabilities":["tools":["listChanged":false]],
-                            "instructions":"Open Codebasic TTS → Agent (에이전트), explicitly choose an instruction to share and receive drafts. Drafts are queued for review and never played automatically. Use tts_agent_status if needed."])
+                            "instructions":"Open Codebasic TTS → Agent (에이전트), then enable the session. With no instruction selected, use submit_tts_draft without reading anything. If an instruction is selected, read it and use submit_explanation_draft. Incoming drafts open for editing without playback."])
             case "ping":
                 result(id, [:])
             case "tools/list" where ready:
@@ -91,19 +92,29 @@ import Foundation
                     if proofs.count > maxProofs { proofs.removeFirst(proofs.count - maxProofs) }
                     tool(id, text, extra: ["schema_version":2, "profile":selector, "revision":rev,
                                           "body_sha256":hash, "instructions":text])
-                case receiver:
-                    let required: Set<String> = ["profile", "revision", "idempotency_key", "display_text"]
-                    let keys = Set(args.keys)
-                    guard keys == required || keys == required.union(["speech_text"]),
-                          let profile = args["profile"] as? String, let revision = args["revision"] as? String,
-                          let retry = args["idempotency_key"] as? String,
-                          (1...128).contains(retry.utf8.count), retry.range(of: "^[A-Za-z0-9._-]+$", options: .regularExpression) != nil,
-                          let display = args["display_text"] as? String, AgentBytes.textValid(display),
-                          args["speech_text"].map({ ($0 as? String).map(AgentBytes.textValid) == true }) ?? true else {
+                case plainReceiver:
+                    let required: Set<String> = ["idempotency_key", "display_text"]
+                    guard validDraft(args, required: required) else {
                         tool(id, "Invalid plain-text draft arguments.", failed: true); continue
                     }
+                    let status = pairingStatus()
+                    if status == "ready" || status == "instruction_required" {
+                        reportReceipt(id, "instruction_required"); continue
+                    }
+                    guard status == "receiving_only" else {
+                        tool(id, describe(status), failed: true); continue
+                    }
+                    var request = args
+                    request["schema_version"] = 2
+                    reportReceipt(id, exchange(socket: "d.sock", request)?["status"] as? String)
+                case receiver:
+                    let required: Set<String> = ["profile", "revision", "idempotency_key", "display_text"]
+                    guard validDraft(args, required: required),
+                          let profile = args["profile"] as? String, let revision = args["revision"] as? String else {
+                        tool(id, "Invalid instruction-linked draft arguments.", failed: true); continue
+                    }
                     let connection = pairingStatus()
-                    guard connection == "ready" || connection == "receiving_only" else {
+                    guard connection == "ready" || connection == "receiving_only" || connection == "instruction_required" else {
                         let message = connection == "reading_only"
                             ? "Draft receipt is not approved. Select an instruction in Codebasic TTS → Agent (에이전트)."
                             : describe(connection)
@@ -117,22 +128,36 @@ import Foundation
                     request["schema_version"] = 2
                     request["body_sha256"] = proof.bodyHash
                     request["proof"] = proof.token
-                    let status = exchange(socket: "d.sock", request)?["status"] as? String
-                    switch status {
-                    case "accepted": tool(id, "Queued in the app. Not applied or played.")
-                    case "duplicate": tool(id, "Already received. Nothing new was queued or played.")
-                    case "conflict": tool(id, "Retry key already used for different content.", failed: true)
-                    case "busy": tool(id, "Inbox is full. Nothing was queued.", failed: true)
-                    case "rate_limited": tool(id, "This grant’s receipt rate limit was reached.", failed: true)
-                    case "unproven": tool(id, "The instruction selection or version changed, or its proof expired. Read the selected instruction again or paste manually.", failed: true)
-                    default: tool(id, "Receipt not confirmed. Check TTS agent status, then retry with the same key or paste manually.", failed: true)
-                    }
+                    reportReceipt(id, exchange(socket: "d.sock", request)?["status"] as? String)
                 default:
                     emit(error(id, -32602, "Unknown tool"))
                 }
             default:
                 emit(error(id, -32601, "Method unavailable"))
             }
+        }
+    }
+
+    static func validDraft(_ args: [String: Any], required: Set<String>) -> Bool {
+        let keys = Set(args.keys)
+        guard keys == required || keys == required.union(["speech_text"]),
+              let retry = args["idempotency_key"] as? String,
+              (1...128).contains(retry.utf8.count), retry.range(of: "^[A-Za-z0-9._-]+$", options: .regularExpression) != nil,
+              let display = args["display_text"] as? String, AgentBytes.textValid(display) else { return false }
+        return args["speech_text"].map { ($0 as? String).map(AgentBytes.textValid) == true } ?? true
+    }
+
+    static func reportReceipt(_ id: Any, _ status: String?) {
+        switch status {
+        case "accepted": tool(id, "Received in the app’s editor. Not played.", extra: ["status": "accepted"])
+        case "duplicate": tool(id, "Already received. Nothing new was opened or played.", extra: ["status": "duplicate"])
+        case "conflict": tool(id, "Retry key already used for different content.", failed: true)
+        case "busy": tool(id, "Open documents have reached their limit. Close a tab and retry with the same key.", failed: true, extra: ["status": "busy"])
+        case "rate_limited": tool(id, "This session’s receipt rate limit was reached.", failed: true)
+        case "instruction_required":
+            tool(id, "A saved instruction is selected. Read the current selection and send with submit_explanation_draft, or ask the user to clear the selection.", failed: true, extra: ["status": "instruction_required"])
+        case "unproven": tool(id, "Instruction selection, revision, or proof is no longer valid. Read the selected saved instruction again and retry.", failed: true, extra: ["status": "unproven"])
+        default: tool(id, "Receipt not confirmed. Check TTS agent status and retry with the same key.", failed: true)
         }
     }
 
@@ -144,7 +169,11 @@ import Foundation
                 ["name":reader, "description":"Read the exact instruction revision approved in the app. Omit profile to use the approved selection.",
                  "inputSchema":["type":"object","properties":["profile":string],"additionalProperties":false],
                  "annotations":["readOnlyHint":true,"openWorldHint":false]],
-                ["name":receiver, "description":"Queue an editable plain-text draft for a revision received by this helper. Never plays.",
+                ["name":plainReceiver, "description":"Open an editable plain-text draft without reading any instruction. Available only when no saved instruction is selected. Never plays.",
+                 "inputSchema":["type":"object", "properties":["idempotency_key":string,"display_text":string,"speech_text":string],
+                                "required":["idempotency_key","display_text"], "additionalProperties":false],
+                 "annotations":["readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false]],
+                ["name":receiver, "description":"Open an editable draft linked to the selected saved revision received by this helper. Receipt proof does not verify content compliance. Never plays.",
                  "inputSchema":["type":"object", "properties":["profile":string,"revision":string,"idempotency_key":string,
                      "display_text":string,"speech_text":string],"required":["profile","revision","idempotency_key","display_text"],
                      "additionalProperties":false],
@@ -161,10 +190,11 @@ import Foundation
         case "signing_required": return "Use the certificate-signed helper bundled with Codebasic TTS."
         case "app_unavailable": return "Open Codebasic TTS and try again. The running app must match this signed helper."
         case "other_agent": return "Another MCP session is connected. Close it or disconnect it in Codebasic TTS → Agent (에이전트), then retry."
-        case "approval_required": return "Connected. In Codebasic TTS → Agent (에이전트), choose an instruction to share and receive drafts."
+        case "approval_required": return "Connected. In Codebasic TTS → Agent (에이전트), enable draft receipt."
         case "reading_only": return "Connected. One instruction revision is approved. Draft receipt is off."
-        case "receiving_only": return "Connected. Draft receipt is on; no instruction revision is currently shared."
-        case "ready": return "Connected. One instruction revision and draft receipt are approved. Nothing plays automatically."
+        case "receiving_only": return "Connected. Send with submit_tts_draft; there is no selected instruction."
+        case "instruction_required": return "A saved instruction was selected but is no longer shareable. Ask the user to update or clear the selection."
+        case "ready": return "Connected. Read the selected saved instruction and submit with submit_explanation_draft. Nothing plays automatically."
         default: return "Connection not confirmed. Check Codebasic TTS → Agent (에이전트) and try again."
         }
     }
