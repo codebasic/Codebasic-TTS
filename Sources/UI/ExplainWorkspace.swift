@@ -41,9 +41,11 @@ struct ExplainWorkspace: View {
         } else {
             ScrollView {
                 VStack(alignment: .leading, spacing: 15) {
-                    inbox
+                    connection
                     Divider()
                     instruction
+                    Divider()
+                    inbox
                     Divider()
                     editor
                     Divider()
@@ -105,10 +107,51 @@ struct ExplainWorkspace: View {
         }
     }
 
+    private var connection: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack {
+                Text("1. 에이전트 연결").font(.headline).accessibilityAddTraits(.isHeader)
+                Spacer(minLength: 8)
+                if let pair = access.pair {
+                    Label("연결됨", systemImage: "checkmark.circle")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .help(pair.hostPath ?? "MCP를 실행한 프로세스 경로를 확인할 수 없습니다.")
+                } else {
+                    Text("연결 대기 중").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            HStack(alignment: .top) {
+                mcpSetup
+                Spacer(minLength: 8)
+                if access.selectionStatus == .waitingForHelper {
+                    Button("선택 취소") { access.revokeSelection() }
+                } else if access.shared != nil {
+                    Button("공유 및 수신 중지") { access.revokeSelection() }
+                }
+                if access.pair != nil {
+                    Button("연결 해제") { access.disconnect() }
+                }
+            }
+            Text(access.selectionStatus.message)
+                .font(.caption)
+                .foregroundStyle(access.selectionStatus.isProblem ? Color.orange : Color.secondary)
+                .accessibilityLabel("지시 연결 상태: \(access.selectionStatus.message)")
+            if let legacy = app.sharedInstructionProfile {
+                Text("기존 지시 공유 중: \(name(legacy))")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if access.selectionStatus == .notSelected, !access.status.isEmpty {
+                Text(access.status).font(.caption).foregroundStyle(.orange)
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("agent-connection-section")
+    }
+
     private var instruction: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                Text("에이전트 지시문").font(.headline)
+                Text("2. 지시문 작성 또는 선택").font(.headline).accessibilityAddTraits(.isHeader)
                 Spacer()
                 profileChooser
                 Button("새 지시…") { catalogEdit = .init(record: nil) }
@@ -126,40 +169,12 @@ struct ExplainWorkspace: View {
                 Text("이 지시를 열 수 없습니다. 다른 지시를 선택하세요.")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            HStack {
-                if let entry = selectedRecord {
-                    Button("지시 삭제…", role: .destructive) { removeProfile = entry; showRemove = true }
-                }
-                Spacer()
-                if access.selectionStatus == .waitingForHelper {
-                    Button("선택 취소") { access.revokeSelection() }
-                } else if access.shared != nil {
-                    Button("공유 및 수신 중지") { access.revokeSelection() }
-                }
+            if let entry = selectedRecord {
+                Button("지시 삭제…", role: .destructive) { removeProfile = entry; showRemove = true }
             }
-            HStack {
-                if let pair = access.pair {
-                    Text("MCP 자동 연결됨").font(.caption)
-                        .help(pair.hostPath ?? "MCP를 실행한 프로세스 경로를 확인할 수 없습니다.")
-                    Button("권한 해제") { access.disconnect() }
-                } else {
-                    Text("연결 대기 중 · MCP 클라이언트에서 Codebasic TTS 도우미를 시작하세요.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-            }
-            Text(access.selectionStatus.message)
-                .font(.caption)
-                .foregroundStyle(access.selectionStatus.isProblem ? Color.orange : Color.secondary)
-                .accessibilityLabel("지시 연결 상태: \(access.selectionStatus.message)")
-            if let legacy = app.sharedInstructionProfile {
-                Text("기존 지시 공유 중: \(name(legacy))")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            if access.selectionStatus == .notSelected, !access.status.isEmpty {
-                Text(access.status).font(.caption).foregroundStyle(.orange)
-            }
-            mcpSetup
         }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("agent-instruction-section")
     }
 
     private var profileChooser: some View {
@@ -348,7 +363,7 @@ struct ExplainWorkspace: View {
     private var inbox: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("받은 대본 미리 보기").font(.headline)
+                Text("3. 에이전트에서 텍스트 수신").font(.headline).accessibilityAddTraits(.isHeader)
                 if !drafts.pending.isEmpty {
                     Text("\(drafts.pending.count)개").font(.caption).foregroundStyle(.secondary)
                 }
@@ -396,10 +411,13 @@ struct ExplainWorkspace: View {
                 }
             }
         }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("agent-received-draft-section")
     }
 
     private var editor: some View {
         VStack(alignment: .leading, spacing: 8) {
+            Text("4. TTS 생성").font(.headline).accessibilityAddTraits(.isHeader)
             HStack {
                 Text("화면 글 · 자막").font(.subheadline.weight(.semibold))
                 if let origin = drafts.origin {

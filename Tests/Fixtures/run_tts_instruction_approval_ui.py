@@ -41,11 +41,13 @@ with tempfile.TemporaryDirectory(prefix="u", dir=REPO / "build") as temp:
     paths = [str(x) for x in sorted(sources.rglob("*.swift")) if x.name != "main.swift"]
     executable = root / "approval-test"
     sdk = subprocess.check_output(["/usr/bin/xcrun", "--sdk", "macosx26.5", "--show-sdk-path"], text=True).strip()
-    env = {"PATH":"/usr/bin:/bin", "HOME":str(root), "TTS_APPROVAL_FIXTURE_ROOT":str(root),
+    # Relative socket names keep the fixture under the worktree without tying
+    # macOS AF_UNIX length to a caller's checkout path.
+    env = {"PATH":"/usr/bin:/bin", "HOME":str(root), "TTS_APPROVAL_FIXTURE_ROOT":"ipc",
            "TTS_APPROVAL_FIXTURE_PROFILE":str(profile)}
     subprocess.run(["/usr/bin/swiftc", "-Onone", "-o", str(executable), *paths,
                     str(HERE / "TTSInstructionApprovalUI.swift"), "-framework", "AppKit", "-framework", "SwiftUI",
                     "-framework", "AVFoundation", "-framework", "Carbon", "-framework", "ApplicationServices",
                     "-lsqlite3"], check=True, timeout=130,
                    env={**env, "SDKROOT":sdk, "CLANG_MODULE_CACHE_PATH":str(CACHE)})
-    subprocess.run([str(executable)], check=True, timeout=12, env=env)
+    subprocess.run([str(executable)], check=True, timeout=12, env=env, cwd=root)
