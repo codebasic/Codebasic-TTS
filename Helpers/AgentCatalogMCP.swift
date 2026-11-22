@@ -5,10 +5,12 @@ import Foundation
 /// connections; the model never sees a receipt capability or pairing identity.
 @main struct AgentCatalogMCP {
     static let maxFrame = 100 * 1024
+    static let statusTool = "tts_agent_status"
     static let reader = "get_tts_instructions"
     static let receiver = "submit_explanation_draft"
     static let maxProofs = AgentLimits.proofCount
-    static let pin = ProcessInfo.processInfo.environment[AgentPeerSigning.pinEnvironment]?.lowercased()
+    // Derive the peer pin from this trusted bundled executable, never the socket.
+    static let pin = AgentPeerSigning.ownLeaf()
     static let directory = "/private/tmp/codebasic-tts-mcp-\(getuid())"
 
     struct Proof {
@@ -30,7 +32,10 @@ import Foundation
                 emit(error(nil, -32600, "Invalid request")); continue
             }
             guard let id = frame["id"] else {
-                if method == "notifications/initialized", initialized { ready = true }
+                if method == "notifications/initialized", initialized, !ready {
+                    ready = true
+                    _ = pairingStatus()
+                }
                 continue
             }
             guard id is String || id is NSNumber else { emit(error(nil, -32600, "Invalid request id")); continue }
@@ -42,28 +47,42 @@ import Foundation
                 let requested = params["protocolVersion"] as? String ?? ""
                 let version = ["2025-11-25", "2025-06-18", "2025-03-26"].contains(requested) ? requested : "2025-11-25"
                 result(id, ["protocolVersion":version, "serverInfo":["name":"codebasic-tts-agent", "version":"2.0"],
-                            "capabilities":["tools":["listChanged":false]]])
+                            "capabilities":["tools":["listChanged":false]],
+                            "instructions":"Open Codebasic TTS → Agent (에이전트), choose an instruction profile, then approve access. Drafts are queued for review and never played automatically. Use tts_agent_status if needed."])
             case "ping":
                 result(id, [:])
             case "tools/list" where ready:
                 result(id, ["tools": tools])
             case "tools/call" where ready:
-                guard let name = params["name"] as? String, let args = params["arguments"] as? [String: Any] else {
+                guard let name = params["name"] as? String, (params["arguments"] == nil || params["arguments"] is [String: Any]) else {
                     emit(error(id, -32602, "Tool name and arguments required")); continue
                 }
+                let args = params["arguments"] as? [String: Any] ?? [:]
                 switch name {
+                case statusTool where args.isEmpty:
+                    let status = pairingStatus()
+                    tool(id, describe(status), extra: ["status": status])
+
                 case reader:
-                    guard Set(args.keys) == ["profile"], let selector = args["profile"] as? String,
-                          validSelector(selector) else {
-                        tool(id, "Use an exact built-in profile ID or the ID shown by the app.", failed: true); continue
+                    let requested = args["profile"] as? String
+                    guard args.isEmpty || (Set(args.keys) == ["profile"] && requested.map(validSelector) == true) else {
+                        tool(id, "Omit profile to read the approved selection, or specify its exact ID.", failed: true); continue
                     }
-                    guard let reply = exchange(socket: "i.sock", ["schema_version": 2, "profile": selector]),
-                          reply["schema_version"] as? Int == 2, reply["profile"] as? String == selector,
+                    let status = pairingStatus()
+                    guard status == "ready" || status == "reading_only" else {
+                        tool(id, describe(status), failed: true); continue
+                    }
+                    var request: [String: Any] = ["schema_version": 2]
+                    if let requested { request["profile"] = requested }
+                    guard let reply = exchange(socket: "i.sock", request),
+                          reply["schema_version"] as? Int == 2,
+                          let selector = reply["profile"] as? String, validSelector(selector),
+                          requested == nil || requested == selector,
                           let text = reply["instructions"] as? String, AgentBytes.textValid(text),
                           let rev = reply["revision"] as? String, UUID(uuidString: rev) != nil,
                           let hash = reply["body_sha256"] as? String, hash == AgentBytes.hash(Data(text.utf8)),
                           let opaque = reply["proof"] as? String, UUID(uuidString: opaque) != nil else {
-                        tool(id, "No pinned, approved instruction revision available. Local helper PID: \(getpid()).", failed: true); continue
+                        tool(id, "That profile is not approved or its revision changed. Select it and approve it in Codebasic TTS → Agent (에이전트).", failed: true); continue
                     }
                     let proof = Proof(profile: selector, revision: rev, bodyHash: hash, token: opaque,
                                       expiry: .now.advanced(by: .seconds(AgentLimits.grantSeconds)))
@@ -83,6 +102,13 @@ import Foundation
                           args["speech_text"].map({ ($0 as? String).map(AgentBytes.textValid) == true }) ?? true else {
                         tool(id, "Invalid plain-text draft arguments.", failed: true); continue
                     }
+                    let connection = pairingStatus()
+                    guard connection == "ready" || connection == "receiving_only" else {
+                        let message = connection == "reading_only"
+                            ? "Draft receipt is not approved. Allow it in Codebasic TTS → Agent (에이전트)."
+                            : describe(connection)
+                        tool(id, message, failed: true); continue
+                    }
                     proofs.removeAll { $0.expiry <= .now }
                     guard let proof = proofs.last(where: { $0.profile == profile && $0.revision == revision }) else {
                         tool(id, "This helper did not receive that exact revision. Read it first or paste manually.", failed: true); continue
@@ -99,7 +125,7 @@ import Foundation
                     case "busy": tool(id, "Inbox is full. Nothing was queued.", failed: true)
                     case "rate_limited": tool(id, "This grant’s receipt rate limit was reached.", failed: true)
                     case "unproven": tool(id, "Revision proof expired, was revoked, or the profile was deleted. Read again or paste manually.", failed: true)
-                    default: tool(id, "Receipt not confirmed. Retry unchanged or paste manually. Local helper PID: \(getpid()).", failed: true)
+                    default: tool(id, "Receipt not confirmed. Check TTS agent status, then retry with the same key or paste manually.", failed: true)
                     }
                 default:
                     emit(error(id, -32602, "Unknown tool"))
@@ -112,14 +138,35 @@ import Foundation
 
     static var tools: [[String: Any]] {
         let string = ["type":"string"]
-        return [["name":reader, "description":"Read one exact locally approved instruction revision.",
-                 "inputSchema":["type":"object","properties":["profile":string],"required":["profile"],"additionalProperties":false],
+        return [["name": statusTool, "description": "Check the local app connection and whether the user has approved access.",
+                 "inputSchema": ["type":"object", "properties": [String: Any](), "additionalProperties":false],
+                 "annotations": ["readOnlyHint":true, "openWorldHint":false]],
+                ["name":reader, "description":"Read the exact instruction revision approved in the app. Omit profile to use the approved selection.",
+                 "inputSchema":["type":"object","properties":["profile":string],"additionalProperties":false],
                  "annotations":["readOnlyHint":true,"openWorldHint":false]],
                 ["name":receiver, "description":"Queue an editable plain-text draft for a revision received by this helper. Never plays.",
                  "inputSchema":["type":"object", "properties":["profile":string,"revision":string,"idempotency_key":string,
                      "display_text":string,"speech_text":string],"required":["profile","revision","idempotency_key","display_text"],
                      "additionalProperties":false],
                  "annotations":["readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false]]]
+    }
+
+    static func pairingStatus() -> String {
+        guard pin != nil else { return "signing_required" }
+        return exchange(socket: "p.sock", ["schema_version": 2])?["status"] as? String ?? "app_unavailable"
+    }
+
+    static func describe(_ status: String) -> String {
+        switch status {
+        case "signing_required": return "Use the certificate-signed helper bundled with Codebasic TTS."
+        case "app_unavailable": return "Open Codebasic TTS and try again. The running app must match this signed helper."
+        case "other_agent": return "Another MCP session is connected. Close it or disconnect it in Codebasic TTS → Agent (에이전트), then retry."
+        case "approval_required": return "Connected. In Codebasic TTS → Agent (에이전트), pick a profile and approve access."
+        case "reading_only": return "Connected. One instruction revision is approved. Draft receipt is off."
+        case "receiving_only": return "Connected. Draft receipt is on; no instruction revision is currently shared."
+        case "ready": return "Connected. One instruction revision and draft receipt are approved. Nothing plays automatically."
+        default: return "Connection not confirmed. Check Codebasic TTS → Agent (에이전트) and try again."
+        }
     }
 
     static func validSelector(_ selector: String) -> Bool {
@@ -144,7 +191,7 @@ import Foundation
     }
 
     static func exchange(socket endpoint: String, _ request: [String: Any]) -> [String: Any]? {
-        guard let pin, endpoint == "i.sock" || endpoint == "d.sock" else { return nil }
+        guard let pin, ["p.sock", "i.sock", "d.sock"].contains(endpoint) else { return nil }
         var st = stat()
         let path = directory + "/" + endpoint
         guard lstat(directory, &st) == 0, st.st_uid == getuid(), st.st_mode & S_IFMT == S_IFDIR, st.st_mode & 0o777 == 0o700,
@@ -165,10 +212,14 @@ import Foundation
         guard setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &yes, socklen_t(MemoryLayout<Int32>.size)) == 0,
               setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size)) == 0,
               setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size)) == 0 else { return nil }
+        // Never wait indefinitely for a saturated or nonresponsive local listener.
+        let flags = fcntl(fd, F_GETFL)
+        guard flags >= 0, fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0 else { return nil }
         let connection = withUnsafePointer(to: &addr) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
         }
-        guard connection == 0, AgentPeerSigning.matches(socket: fd, identifier: AgentPeerSigning.appID, leaf: pin) else { return nil }
+        guard connection == 0, fcntl(fd, F_SETFL, flags) == 0,
+              AgentPeerSigning.matches(socket: fd, identifier: AgentPeerSigning.appID, leaf: pin) else { return nil }
         let sent = data.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) -> Bool in
             guard let base = bytes.baseAddress else { return false }
             var done = 0

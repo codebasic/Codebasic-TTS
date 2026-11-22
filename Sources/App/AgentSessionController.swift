@@ -10,6 +10,7 @@ import Foundation
         let id = UUID()
         let label: String
         let peer: LocalInstructionPeer
+        let hostPath: String?
         let leaf: String
         let helperHash: Data
         let proofs = AgentDeliveryProofs()
@@ -19,6 +20,7 @@ import Foundation
     @Published private(set) var shared: AgentInstructionSnapshot?
     @Published private(set) var receiving = false
     @Published private(set) var status = ""
+    private var pairingSocket: LocalApprovedSocket?
     private var shareSocket: LocalApprovedSocket?
     private var receiptSocket: LocalApprovedSocket?
     private var shareTask: Task<Void, Never>?
@@ -35,16 +37,55 @@ import Foundation
         self.bundledHelper = bundledHelper
     }
 
-    func bind(pid: pid_t, name: String) -> Bool {
-        guard let label = AgentBytes.label(name), let peer = LocalInstructionPeer.current(pid: pid),
-              let leaf = AgentPeerSigning.ownLeaf(), let helperHash = bundledHelper(),
-              AgentPeerSigning.matches(pid: pid, identifier: AgentPeerSigning.helperID, leaf: leaf, expectedHash: helperHash),
-              LocalInstructionPeer.current(pid: pid) == peer else {
-            status = "이 앱과 같은 인증서로 서명한 실행 중인 도우미가 필요합니다."
+    @discardableResult
+    func startPairing() -> Bool {
+        guard pairingSocket == nil else { return true }
+        guard let leaf = AgentPeerSigning.ownLeaf(), let hash = bundledHelper() else {
+            status = "자동 연결에는 이 앱과 함께 서명된 MCP 도우미가 필요합니다."
             return false
         }
+        let socket = LocalApprovedSocket(pairingDirectory: directory,
+                                        verified: Self.verifier(leaf: leaf, hash: hash)) { [weak self] bytes, peer, active in
+            guard let request = Self.decode(bytes), Set(request.keys) == ["schema_version"],
+                  Self.isV2(request["schema_version"]) else { return Self.reply("invalid") }
+            let response = Reply()
+            let signal = DispatchSemaphore(value: 0)
+            let deadline = DispatchTime.now() + .milliseconds(750)
+            DispatchQueue.main.async {
+                defer { signal.signal() }
+                guard DispatchTime.now() < deadline, active(), let self else { return }
+                if let previous = self.pair, LocalInstructionPeer.current(pid: previous.peer.pid) != previous.peer {
+                    self.disconnect()
+                }
+                if let pair = self.pair, pair.peer != peer { response.set("other_agent"); return }
+                if self.pair == nil && !self.bind(peer: peer, leaf: leaf, helperHash: hash) {
+                    response.set("unavailable"); return
+                }
+                response.set(self.receiving
+                             ? (self.shared == nil ? "receiving_only" : "ready")
+                             : (self.shared == nil ? "approval_required" : "reading_only"))
+            }
+            guard signal.wait(timeout: deadline) == .success else { return Self.reply("unavailable") }
+            return Self.reply(response.get())
+        }
+        guard socket.start() else {
+            status = socket.requiresPathInspection ? LocalApprovedSocket.unknownPathMessage : "다른 앱 인스턴스가 자동 연결을 사용 중일 수 있습니다."
+            return false
+        }
+        pairingSocket = socket
+        return true
+    }
+
+    func stopPairing() {
+        pairingSocket?.stop(); pairingSocket = nil
         disconnect()
-        let next = Pair(label: label, peer: peer, leaf: leaf, helperHash: helperHash)
+    }
+
+    private func bind(peer: LocalInstructionPeer, leaf: String, helperHash: Data) -> Bool {
+        let pid = peer.pid
+        guard LocalInstructionPeer.current(pid: pid) == peer else { return false }
+        let label = "로컬 MCP"
+        let next = Pair(label: label, peer: peer, hostPath: peer.parentExecutable(), leaf: leaf, helperHash: helperHash)
         pair = next
         let watcher = DispatchSource.makeProcessSource(identifier: pid, eventMask: .exit, queue: .main)
         watcher.setEventHandler { [weak self] in
@@ -54,7 +95,7 @@ import Foundation
         watch = watcher
         watcher.resume()
         if LocalInstructionPeer.current(pid: pid) != peer { disconnect(); return false }
-        status = "연결됨. 조회와 수신은 아직 허용하지 않았습니다."
+        status = "자동 연결됨. 지시 조회와 대본 수신은 승인 전까지 꺼져 있습니다."
         return true
     }
 
@@ -76,8 +117,12 @@ import Foundation
             pair.proofs.delivered(token, snapshot: snapshot, epoch: epoch)
         }) { bytes, _ in
             guard ContinuousClock.now < deadline, let request = Self.decode(bytes),
-                  Set(request.keys) == ["profile", "schema_version"], Self.isV2(request["schema_version"]),
-                  request["profile"] as? String == snapshot.selector else { return nil }
+                  Self.isV2(request["schema_version"]) else { return nil }
+            let keys = Set(request.keys)
+            guard keys == ["schema_version"] ||
+                  (keys == ["profile", "schema_version"] && request["profile"] as? String == snapshot.selector) else {
+                return nil
+            }
             let reply: [String: Any] = [
                 "schema_version": 2, "profile": snapshot.selector, "revision": snapshot.generation.uuidString.lowercased(),
                 "body_sha256": snapshot.digest, "instructions": snapshot.text, "proof": UUID().uuidString,

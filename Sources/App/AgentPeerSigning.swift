@@ -6,7 +6,6 @@ import Security
 enum AgentPeerSigning {
     static let appID = "com.seongjoo.SelectedTextTTS"
     static let helperID = "com.seongjoo.SelectedTextTTS.agent-helper"
-    static let pinEnvironment = "CODEBASIC_TTS_SIGNER_SHA1"
 
     static func ownLeaf() -> String? {
         var code: SecCode?
@@ -30,11 +29,6 @@ enum AgentPeerSigning {
         var code: SecStaticCode?
         guard SecStaticCodeCreateWithPath(url as CFURL, [], &code) == errSecSuccess, let code else { return nil }
         return signedHash(code)
-    }
-
-    static func matches(pid: pid_t, identifier: String, leaf: String, expectedHash: Data) -> Bool {
-        check([kSecGuestAttributePid as String: NSNumber(value: pid)], identifier: identifier, leaf: leaf,
-              expectedHash: expectedHash)
     }
 
     static func matches(socket fd: Int32, identifier: String, leaf: String, expectedHash: Data? = nil) -> Bool {

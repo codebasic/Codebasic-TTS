@@ -28,6 +28,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         registerServices()
         registerHotKeys()
         observeState()
+        appState.agentAccess.startPairing()
 
         // Opening the app does not refresh cloud voices. Settings already
         // loads voice/model inventory when the user opens it.
@@ -141,23 +142,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         localInstructionMenu?.state = .off
     }
 
-    func pairAgent() {
-        let state = appState.agentAccess
-        let alert = NSAlert()
-        alert.messageText = state.pair == nil ? "서명된 에이전트 도우미 연결" : "에이전트 도우미 다시 연결"
-        alert.informativeText = "표시 이름은 나만 볼 수 있습니다. 서명과 실행 중인 프로세스를 확인하며, 다시 연결하면 이전 허용과 전달 증명이 모두 지워집니다."
-        let name = NSTextField(frame: NSRect(x: 0, y: 32, width: 360, height: 23))
-        name.placeholderString = "내가 지은 에이전트 이름"
-        let pid = NSTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 23))
-        pid.placeholderString = "서명된 도우미 PID"
-        let fields = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 57))
-        fields.addSubview(name); fields.addSubview(pid); alert.accessoryView = fields
-        alert.addButton(withTitle: "이 도우미만 연결"); alert.addButton(withTitle: "취소")
-        guard alert.runModal() == .alertFirstButtonReturn,
-              let value = Int32(pid.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)) else { return }
-        _ = state.bind(pid: value, name: name.stringValue)
-    }
-
     func toggleAgentSharing(_ selector: String) {
         let state = appState.agentAccess
         if state.shared != nil { state.stopShare(); return }
@@ -168,20 +152,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let custom = LocalInstructionProfile.Name(rawValue: selector) == nil
         guard !custom || appState.agentCatalog.refresh(),
               let pair = state.pair, let snapshot = appState.agentSnapshot(selector), snapshot.shareable else {
-            showInstructionShareError("서명된 도우미를 연결하고 공유할 지시문을 선택하세요.")
+            showInstructionShareError("MCP 클라이언트를 시작하고 공유할 지시문을 선택하세요.")
             return
         }
         let alert = NSAlert()
-        alert.messageText = "\(pair.label) 도우미(PID \(pair.peer.pid))에 아래 지시만 공개할까요?"
-        alert.informativeText = "이 지시의 이 버전만 최대 10분간 공유합니다. 원격 모델을 쓰는 에이전트는 받은 지시문을 해당 서비스로 보낼 수 있습니다. 선택을 바꿔도 다른 지시는 공유되지 않습니다."
+        alert.messageText = "연결된 MCP에 아래 지시를 공유할까요?"
+        let host = pair.hostPath ?? "실행 경로를 확인할 수 없음"
+        alert.informativeText = "도우미를 실행한 프로세스: \(host)\n\n의도한 클라이언트인지 확인하세요. 이 지시의 이 버전만 최대 10분간 공유합니다. 대본을 받도록 허용하면 앱의 받은 대본에만 추가되며, 자동으로 적용하거나 재생하지 않습니다. 원격 모델을 쓰는 에이전트는 받은 지시문을 해당 서비스에 보낼 수 있습니다."
         let scroll = NSTextView.scrollableTextView()
         scroll.frame = NSRect(x: 0, y: 0, width: 425, height: 225)
         guard let preview = scroll.documentView as? NSTextView else { return }
         preview.isRichText = false; preview.isEditable = false; preview.isSelectable = true
         preview.string = snapshot.text
         alert.accessoryView = scroll
-        alert.addButton(withTitle: "이 버전만 공개"); alert.addButton(withTitle: "취소")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let canEnableReceipt = !state.receiving
+        alert.addButton(withTitle: canEnableReceipt ? "지시 공유 및 대본 받기" : "이 지시만 공유")
+        alert.addButton(withTitle: "취소")
+        if canEnableReceipt { alert.addButton(withTitle: "지시만 공유") }
+        let choice = alert.runModal()
+        guard choice == .alertFirstButtonReturn || (canEnableReceipt && choice == .alertThirdButtonReturn) else { return }
         guard (!custom || appState.agentCatalog.refresh()), state.pair?.id == pair.id,
               appState.agentSnapshot(selector) == snapshot, localInstructionSocket == nil else {
             showInstructionShareError("선택한 도우미나 지시문이 바뀌었습니다. 다시 확인하세요.")
@@ -189,6 +178,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         if !state.share(snapshot, deliveryGate: custom ? appState.agentCatalog.deliveryGate(for: snapshot) : { $0() }) {
             showInstructionShareError(state.status.isEmpty ? "지시 조회를 허용할 수 없습니다." : state.status)
+        } else if canEnableReceipt && choice == .alertFirstButtonReturn && !enableAgentDraftReceipt() {
+            state.stopShare()
+            showInstructionShareError(state.status.isEmpty ? "대본 수신을 허용할 수 없습니다." : state.status)
         }
     }
 
@@ -196,7 +188,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let state = appState.agentAccess
         if state.receiving { state.stopReceipt(); draftReceiptMenu?.state = .off; return }
         guard let pair = state.pair else {
-            showInstructionShareError("에이전트 탭에서 서명된 도우미를 먼저 연결하세요. 붙여넣기는 계속 사용할 수 있습니다.")
+            showInstructionShareError("MCP 클라이언트를 먼저 시작하세요. 붙여넣기는 계속 사용할 수 있습니다.")
             return
         }
         let alert = NSAlert()
@@ -204,18 +196,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.informativeText = "이 도우미에 실제 전달한 지시 버전의 대본만 최대 10분간 받습니다. 편집기를 덮어쓰거나 재생하지 않으며 지시문 조회도 따로 허용해야 합니다."
         alert.addButton(withTitle: "이 도우미 대본만 받기"); alert.addButton(withTitle: "취소")
         guard alert.runModal() == .alertFirstButtonReturn, state.pair?.id == pair.id else { return }
-        if state.receive(current: { [weak self] selector in
+        _ = enableAgentDraftReceipt()
+    }
+
+    private func enableAgentDraftReceipt() -> Bool {
+        appState.agentAccess.receive(current: { [weak self] selector in
             guard let self, LocalInstructionProfile.Name(rawValue: selector) != nil
                     || self.appState.agentCatalog.refresh() else { return nil }
             return self.appState.agentSnapshot(selector)
         },
-                         workspace: appState.explanationDrafts) { draftReceiptMenu?.state = .on }
+                         workspace: appState.explanationDrafts)
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         localSpeechSocket?.stop()
         revokeLocalInstructions()
-        appState.agentAccess.disconnect()
+        appState.agentAccess.stopPairing()
     }
 
     @objc private func openWindow() { mainWindow.show() }

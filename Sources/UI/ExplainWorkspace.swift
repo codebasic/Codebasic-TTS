@@ -171,16 +171,18 @@ struct ExplainWorkspace: View {
                 }
                 .disabled(selectedSnapshot == nil)
                 Spacer()
-                Button(access.shared == nil ? "이 버전만 조회 허용…" : "조회 허용 해제") {
+                Button(access.shared == nil ? "이 지시 공유…" : "조회 허용 해제") {
                     AppDelegate.shared?.toggleAgentSharing(profile)
                 }
                 .disabled(access.shared == nil && (selectedSnapshot?.shareable != true || access.pair == nil))
             }
             HStack {
-                Button(access.pair == nil ? "서명된 도우미 연결…" : "도우미 다시 연결…") { AppDelegate.shared?.pairAgent() }
-                if let pair = access.pair {
-                    Text("\(pair.label) · PID \(pair.peer.pid)").font(.caption)
-                    Button("연결 끊기") { access.disconnect() }
+                if access.pair != nil {
+                    Text("MCP 자동 연결됨").font(.caption)
+                    Button("권한 해제") { access.disconnect() }
+                } else {
+                    Text("연결 대기 중 · MCP 클라이언트에서 Codebasic TTS 도우미를 시작하세요.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
             }
             if let active = access.shared {
@@ -234,8 +236,8 @@ struct ExplainWorkspace: View {
                 }
                 .disabled(access.pair == nil)
             }
-            if let pid = drafts.receiverPID {
-                Text("도우미 PID \(pid)에서 받기 허용됨 · 최대 10분")
+            if access.receiving {
+                Text("연결된 MCP의 대본 받기 허용됨 · 최대 10분")
                     .font(.caption).foregroundStyle(.secondary)
             } else {
                 Text("자동 수신 꺼짐 · 붙여넣기와 직접 편집은 언제든 가능합니다.")
