@@ -71,6 +71,8 @@ enum AgentPresetInstructions {
         let payload = try JSONEncoder().encode(current)
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try payload.write(to: url, options: .atomic)
+        // Instruction text is private to this account, like the catalog beside it.
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
         return current
     }
 }

@@ -13,7 +13,7 @@ import Foundation
 
         var message: String {
             switch self {
-            case .notSelected: return "아직 공유하지 않음 · 지시문을 선택하세요."
+            case .notSelected: return "공유하는 지시 없음 · 대본은 지시 없이 받습니다."
             case .waitingForHelper: return "선택됨 · 에이전트 연결을 켜면 공유됩니다."
             case .active: return "선택한 지시 공유 중"
             case .canceled: return "지시 공유를 취소했습니다."
@@ -30,7 +30,8 @@ import Foundation
 
         var isProblem: Bool {
             switch self {
-            case .legacySharing, .catalogUnavailable, .invalidInstruction, .pairingUnavailable, .instructionGrantFailed, .draftGrantFailed: return true
+            case .expired, .changed, .legacySharing, .catalogUnavailable, .invalidInstruction, .pairingUnavailable,
+                 .instructionGrantFailed, .draftGrantFailed: return true
             default: return false
             }
         }
@@ -70,6 +71,14 @@ import Foundation
     private(set) var selectionDiagnostics: [SelectionStatus] = []
     @Published private(set) var waitingForReceiveHelper = false
     @Published private(set) var instructionScope: String?
+    /// Why the last submission from the agent was not opened, in the user's terms.
+    @Published private(set) var receiptNotice: String?
+    /// False for an ad-hoc signed build, where a helper can never be verified.
+    private(set) lazy var pairingSupported = AgentPeerSigning.ownLeaf() != nil && bundledHelper() != nil
+
+    /// Receipt is on, but a chosen instruction is not being shared, so every
+    /// submission is refused until the user picks it again or clears it.
+    var receiptBlockedBySelection: Bool { receiving && instructionScope != nil && shared == nil }
     private var pendingReceive: ReceiveRequest?
     private var pendingReceiveTask: Task<Void, Never>?
     private var pendingSelection: PendingSelection?
@@ -219,6 +228,7 @@ import Foundation
     private func clearSelection() {
         cancelPending()
         stopShare()
+        receiptNotice = nil
     }
 
     private func cancelPending() {
@@ -272,10 +282,12 @@ import Foundation
         status = ""
         shareSocket = socket
         shared = snapshot
-        shareTask = Task { [weak self] in
+        shareTask = Task { [weak self, weak socket] in
             do { try await ContinuousClock().sleep(until: deadline) } catch { return }
-            self?.clearSelection()
-            self?.note(.expired)
+            // A later share owns the state by now if this one was already replaced.
+            guard let self, let socket, self.shareSocket === socket else { return }
+            self.clearSelection()
+            self.note(.expired)
         }
         return true
     }
@@ -284,10 +296,13 @@ import Foundation
     @discardableResult
     func enableReceive(current: @escaping @MainActor (String) -> AgentInstructionSnapshot?,
                        workspace: ExplanationDraftWorkspace) -> Bool {
-        guard !receiving, pendingReceive == nil, pairingSocket != nil else {
-            if pairingSocket == nil { status = "MCP 연결을 시작할 수 없습니다." }
+        // startPairing() leaves the specific reason in `status`; keep it visible.
+        if pairingSocket == nil, !startPairing() {
+            if status.isEmpty { status = "MCP 연결을 시작할 수 없습니다." }
             return false
         }
+        guard !receiving, pendingReceive == nil else { return false }
+        if let stale = pair, LocalInstructionPeer.current(pid: stale.peer.pid) != stale.peer { disconnect() }
         let deadline = ContinuousClock.now.advanced(by: selectionWaiting)
         let request = ReceiveRequest(current: current, workspace: workspace, deadline: deadline)
         pendingReceive = request
@@ -329,6 +344,7 @@ import Foundation
         instructionScope = nil
         note(.notSelected)
         status = ""
+        receiptNotice = nil
     }
 
     private func cancelPendingReceive() {
@@ -384,6 +400,9 @@ import Foundation
                     // This is enforced here, not just by a potentially stale MCP tool status.
                     // A selected-but-not-yet-shareable request also cannot fall back generically.
                     guard self.instructionScope == nil, self.shared == nil, self.pendingSelection == nil else {
+                        self.receiptNotice = self.shared != nil
+                            ? "에이전트가 지시를 읽지 않고 대본을 보내 받지 않았습니다."
+                            : "선택한 지시가 공유되고 있지 않아 대본을 받지 않았습니다. 지시를 다시 선택하거나 ‘사용 안 함’으로 바꾸세요."
                         response.set("instruction_required"); return
                     }
                     origin = nil
@@ -398,12 +417,24 @@ import Foundation
                     response.set(previous == fingerprint ? "duplicate" : "conflict"); return
                 }
                 guard self.receiptKeys.count < Self.maxReceiptKeys else { response.set("session_limit"); return }
-                guard workspace.canReceiveDocument() else { response.set("busy"); return }
-                guard self.rate.canAccept() else { response.set("rate_limited"); return }
+                switch workspace.receiveBlock() {
+                case .documents:
+                    self.receiptNotice = "열린 대본이 \(ExplanationDraftWorkspace.maxDocuments)개라 새 대본을 받지 않았습니다. 탭을 닫으면 에이전트가 다시 보낼 수 있습니다."
+                    response.set("busy"); return
+                case .bytes:
+                    self.receiptNotice = "열어 둔 글이 너무 커서 새 대본을 받지 않았습니다. 글을 줄이거나 다른 곳에 옮긴 뒤 다시 받으세요."
+                    response.set("editor_full"); return
+                case nil: break
+                }
+                guard self.rate.canAccept() else {
+                    self.receiptNotice = "대본이 너무 자주 와서 잠시 받지 않았습니다."
+                    response.set("rate_limited"); return
+                }
                 let result = workspace.receiveDocument(draft)
                 if result == .accepted {
                     self.receiptKeys[clientKey] = fingerprint
                     self.rate.mark()
+                    self.receiptNotice = nil
                 }
                 response.set(result.rawValue)
             }
@@ -422,11 +453,13 @@ import Foundation
         workspace.setReceiver(pair.peer.pid)
         receiptTask = Task { [weak self, weak workspace] in
             do { try await ContinuousClock().sleep(until: deadline) } catch { return }
-            self?.stopReceipt(workspace: workspace)
-            self?.clearSelection()
-            self?.instructionScope = nil
-            self?.note(.notSelected)
-            self?.status = "대본 수신 연결이 만료되었습니다."
+            // Turning receipt off and on again starts a new deadline this timer does not own.
+            guard let self, self.receiveDeadline == deadline else { return }
+            self.stopReceipt(workspace: workspace)
+            self.clearSelection()
+            self.instructionScope = nil
+            self.note(.notSelected)
+            self.status = "대본 수신 연결이 만료되었습니다."
         }
         receiptWorkspace = workspace
         return true
@@ -440,6 +473,8 @@ import Foundation
             clearSelection()
             instructionScope = nil
             note(.notSelected)
+            // Receipt widens to unlinked drafts here, so say so where the user is looking.
+            if receiving { status = "선택한 지시가 삭제되어 이제 지시 없이 대본을 받습니다." }
             return
         }
         if shared?.selector == selector || pendingSelection?.snapshot.selector == selector {
@@ -475,6 +510,7 @@ import Foundation
         receiptKeys.removeAll()
         pair = nil
         status = ""
+        receiptNotice = nil
         note(.notSelected)
     }
 

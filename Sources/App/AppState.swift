@@ -94,7 +94,14 @@ final class AppState: ObservableObject {
     let agentAccess = AgentSessionController()
     private static let agentPresetURL = URL(fileURLWithPath: Secrets.appSupportDir)
         .appendingPathComponent("agent-preset-instructions-v1.json")
-    @Published private(set) var agentPresetInstructions = (try? AgentPresetInstructions.read(at: AppState.agentPresetURL)) ?? [:]
+    private static let storedPresets = Result { try AgentPresetInstructions.read(at: agentPresetURL) }
+    @Published private(set) var agentPresetInstructions = (try? AppState.storedPresets.get()) ?? [:]
+    /// A damaged override file is not the same as "never customized": the saved text
+    /// is unknown, so built-in instructions are not shared until a save succeeds.
+    @Published private(set) var agentPresetUnreadable: Bool = {
+        if case .failure = AppState.storedPresets { return true }
+        return false
+    }()
 
     func saveAgentPresetInstruction(_ selector: String, expected: UUID, text: String) throws {
         guard LocalInstructionProfile.Name(rawValue: selector) != nil,
@@ -103,6 +110,7 @@ final class AppState: ObservableObject {
                                                        expectedOverride: agentPresetInstructions[selector],
                                                        at: Self.agentPresetURL)
         agentPresetInstructions = saved
+        agentPresetUnreadable = false
         invalidatePreset(selector)
     }
 
@@ -111,6 +119,7 @@ final class AppState: ObservableObject {
 
     func agentSnapshot(_ selector: String) -> AgentInstructionSnapshot? {
         if let builtin = LocalInstructionProfile.Name(rawValue: selector) {
+            guard !agentPresetUnreadable else { return nil }
             let text = agentPresetInstructions[selector] ?? instructionText(builtin)
             if let old = presetSnapshots[selector], AgentBytes.same(old.text, text) { return old }
             let snapshot = AgentInstructionSnapshot(selector: selector, generation: UUID(), text: text)
@@ -145,9 +154,9 @@ final class AppState: ObservableObject {
 
     /// The external agent has already done the text work. Only the current
     /// voice engine may be used, and only on this explicit editor action.
-    func playExplanationDraft(displayOnly: Bool = false) {
+    func playExplanationDraft(displayOnly: Bool = false, expectedDocumentID: String? = nil) {
         guard !TTSRuntime.isPreview, !isBusy, !explaining, !normalizing,
-              let input = explanationDrafts.playback(displayOnly: displayOnly),
+              let input = explanationDrafts.playback(displayOnly: displayOnly, expectedDocumentID: expectedDocumentID),
               AgentBytes.safeForSpeech(input.speech) else { return }
         playbackMode = .explain
         synthesize(input.speech, displayText: input.display, preserveLiteral: true)

@@ -25,7 +25,7 @@ macOS용 TTS 앱: **텍스트 읽기, 에이전트 지시 관리, 받은 대본 
 
 | | |
 |---|---|
-| 플랫폼 | macOS 13.0+ (Apple Silicon 최적화, Intel 미검증) |
+| 플랫폼 | macOS 14.0+ (Apple Silicon 최적화, Intel 미검증) |
 | 요구사항 | 릴리스 앱은 Xcode 불필요. 기존 플랜 연결은 Codex CLI 또는 Antigravity CLI, 로컬 음성은 Qwen3-TTS 서버 필요 |
 | 라이선스 | MIT |
 | 다운로드 | [Releases](../../releases/latest) 에서 `Codebasic-TTS.app.zip` |

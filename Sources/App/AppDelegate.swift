@@ -25,7 +25,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         AppDelegate.shared = self
 
         setUpMainMenu()
-        if !TTSRuntime.isPreview {
+        if TTSRuntime.registersSystemIntegration {
             registerServices()
             registerHotKeys()
         }

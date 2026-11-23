@@ -79,9 +79,13 @@ final class ExplanationDraftWorkspace: ObservableObject {
     var editorDocumentID: String { activeDocumentID ?? untitledDocumentID }
     var hasInactiveDocuments: Bool { !parked.isEmpty }
     var canRevertReceived: Bool { activeOriginal != nil && capturedDocument.dirty }
+    var activeDocumentIsDirty: Bool { capturedDocument.dirty }
+    /// Every open document, including a not-yet-parked manual one with content.
     var documentTabs: [DocumentTab] {
-        tabOrder.compactMap { id in
-            let document = id == activeDocumentID ? capturedDocument : parked[id]
+        let active = editorDocumentID
+        let ids = tabOrder.contains(active) || !hasEditorContent ? tabOrder : tabOrder + [active]
+        return ids.compactMap { id in
+            let document = id == active ? capturedDocument : parked[id]
             return document.map { value in
                 let heading = value.original?.display.split(whereSeparator: \.isNewline).first
                 let title = heading.map { String($0.prefix(32)) } ?? "직접 입력"
@@ -109,6 +113,11 @@ final class ExplanationDraftWorkspace: ObservableObject {
     @Published private(set) var origin: Origin?
     @Published private(set) var hasManualEdits = false
     @Published private(set) var receiverPID: Int32?
+    /// Receipts the user has not looked at yet. Cleared by the workspace view.
+    @Published private(set) var unseenArrivals = 0
+    /// Monotonic; lets the view announce each receipt exactly once.
+    @Published private(set) var arrivalCount = 0
+    @Published private(set) var arrivalNotice: String?
     private var recent: [String: SHA256.Digest] = [:]
     private var receiptOrder: [String] = []
 
@@ -129,19 +138,38 @@ final class ExplanationDraftWorkspace: ObservableObject {
         return pending.count < Self.maxPending ? .accepted : .busy
     }
 
-    func canReceiveDocument() -> Bool {
-        guard parked.count + (shouldParkActiveDocument ? 2 : 1) <= Self.maxDocuments else { return false }
-        guard shouldParkActiveDocument else { return true }
+    enum ReceiveBlock { case documents, bytes }
+
+    /// Why another document cannot be opened beside the current ones, if it cannot.
+    /// The two causes need different recovery: closing a tab does not help when the
+    /// open text itself is too large to keep.
+    func receiveBlock() -> ReceiveBlock? {
+        guard parked.count + (shouldParkActiveDocument ? 2 : 1) <= Self.maxDocuments else { return .documents }
+        guard shouldParkActiveDocument else { return nil }
         let bytes = parked.values.reduce(0) { $0 + $1.display.utf8.count + $1.speech.utf8.count }
-        return bytes + display.utf8.count + speech.utf8.count <= Self.maxParkedBytes
+        return bytes + display.utf8.count + speech.utf8.count <= Self.maxParkedBytes ? nil : .bytes
+    }
+
+    func canReceiveDocument() -> Bool { receiveBlock() == nil }
+
+    func markArrivalsSeen() {
+        if unseenArrivals != 0 { unseenArrivals = 0 }
+    }
+
+    func dismissArrivalNotice() {
+        if arrivalNotice != nil { arrivalNotice = nil }
     }
 
     /// Live agent receipt updates the visible editor and never starts playback.
     /// Keep every open document, including an unedited receipt, until explicitly closed.
     func receiveDocument(_ draft: ExplanationDraft) -> Receipt {
         guard canReceiveDocument() else { return .busy }
+        let kept = shouldParkActiveDocument
         parkActiveDocument()
         installReceived(draft)
+        unseenArrivals += 1
+        arrivalCount += 1
+        arrivalNotice = kept ? "새 대본을 받았습니다. 보던 글은 탭에 그대로 있습니다." : "새 대본을 받았습니다."
         return .accepted
     }
 
@@ -155,6 +183,11 @@ final class ExplanationDraftWorkspace: ObservableObject {
     func selectDocument(_ id: String) {
         guard id != activeDocumentID, let next = parked.removeValue(forKey: id) else { return }
         parkActiveDocument()
+        activate(id, next)
+    }
+
+    private func activate(_ id: String, _ next: ParkedDocument) {
+        arrivalNotice = nil
         activeDocumentID = id
         activeOriginal = next.original
         display = next.display
@@ -173,8 +206,29 @@ final class ExplanationDraftWorkspace: ObservableObject {
         tabOrder.removeAll { $0 == id }
     }
 
-    func revertReceivedDocument() {
-        guard let original = activeOriginal, canRevertReceived else { return }
+    /// Closes the document in the editor, discarding its edits. The most recently
+    /// opened remaining document comes forward, or a blank one when none is left.
+    func closeActiveDocument(expectedDocumentID: String) {
+        guard expectedDocumentID == editorDocumentID else { return }
+        tabOrder.removeAll { $0 == expectedDocumentID }
+        if let id = tabOrder.last, let next = parked.removeValue(forKey: id) { activate(id, next) }
+        else { resetToBlank() }
+    }
+
+    /// Keeps the current document in its tab and starts an empty manual one.
+    @discardableResult
+    func newDocument() -> Bool {
+        guard shouldParkActiveDocument else { return true }
+        guard canReceiveDocument() else { return false }
+        parkActiveDocument()
+        resetToBlank()
+        return true
+    }
+
+    /// `expectedDocumentID` pins a delayed confirmation to the document it was shown for.
+    func revertReceivedDocument(expectedDocumentID: String? = nil) {
+        guard expectedDocumentID.map({ $0 == editorDocumentID }) ?? true,
+              let original = activeOriginal, canRevertReceived else { return }
         installReceived(original)
     }
 
@@ -220,17 +274,19 @@ final class ExplanationDraftWorkspace: ObservableObject {
 
     func editDisplay(_ value: String, pasted: Bool = false) {
         guard !display.utf8.elementsEqual(value.utf8) else { return }
+        arrivalNotice = nil
         if !speech.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { speechNeedsReview = true }
         confirmedDisplayHash = nil
         confirmedSpeechHash = nil
         display = value
-        if pasted { origin = .pasted }
+        if pasted { if activeOriginal == nil { origin = .pasted } }
         else if origin == nil { origin = .manual }
         hasManualEdits = !pasted
     }
 
     func editSpeech(_ value: String) {
         guard !speech.utf8.elementsEqual(value.utf8) else { return }
+        arrivalNotice = nil
         speech = value
         confirmedDisplayHash = nil
         confirmedSpeechHash = nil
@@ -254,6 +310,11 @@ final class ExplanationDraftWorkspace: ObservableObject {
             return
         }
         if let id = activeDocumentID { tabOrder.removeAll { $0 == id } }
+        resetToBlank()
+    }
+
+    private func resetToBlank() {
+        arrivalNotice = nil
         untitledDocumentID = UUID().uuidString
         activeDocumentID = nil
         activeOriginal = nil
@@ -269,7 +330,9 @@ final class ExplanationDraftWorkspace: ObservableObject {
 
     /// When the screen text has changed, the old script cannot be read
     /// until reviewed. Reading the displayed text is a separate explicit choice.
-    func playback(displayOnly: Bool = false) -> (display: String, speech: String)? {
+    func playback(displayOnly: Bool = false, expectedDocumentID: String? = nil) -> (display: String, speech: String)? {
+        // A control drawn for one document must not read another that arrived since.
+        if let expectedDocumentID, expectedDocumentID != editorDocumentID { return nil }
         let screen = display.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !screen.isEmpty, !display.utf8.contains(0) else { return nil }
         if screen == CodeExplanation.noChange, provenance?.selector == "continue" { return nil }

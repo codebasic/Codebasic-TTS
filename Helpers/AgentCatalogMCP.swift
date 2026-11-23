@@ -99,7 +99,7 @@ import Foundation
                     }
                     let status = pairingStatus()
                     if status == "ready" || status == "instruction_required" {
-                        reportReceipt(id, "instruction_required"); continue
+                        reportReceipt(id, "instruction_required", shareable: status == "ready"); continue
                     }
                     guard status == "receiving_only" else {
                         tool(id, describe(status), failed: true); continue
@@ -142,24 +142,42 @@ import Foundation
         let keys = Set(args.keys)
         guard keys == required || keys == required.union(["speech_text"]),
               let retry = args["idempotency_key"] as? String,
-              (1...128).contains(retry.utf8.count), retry.range(of: "^[A-Za-z0-9._-]+$", options: .regularExpression) != nil,
+              // Byte check identical to the app's, so a key cannot pass here and fail there.
+              (1...128).contains(retry.utf8.count),
+              retry.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0)
+                  || (97...122).contains($0) || $0 == 45 || $0 == 46 || $0 == 95 }),
               let display = args["display_text"] as? String, AgentBytes.textValid(display) else { return false }
         return args["speech_text"].map { ($0 as? String).map(AgentBytes.textValid) == true } ?? true
     }
 
-    static func reportReceipt(_ id: Any, _ status: String?) {
+    /// Every outcome carries a machine-readable status, and each failure names a
+    /// recovery the agent or the user can actually perform in the reported state.
+    static func reportReceipt(_ id: Any, _ status: String?, shareable: Bool? = nil) {
+        let app = "\(TTSRuntime.displayName) → Agent (에이전트)"
+        func fail(_ code: String, _ message: String) { tool(id, message, failed: true, extra: ["status": code]) }
         switch status {
         case "accepted": tool(id, "Received in the app’s editor. Not played.", extra: ["status": "accepted"])
         case "duplicate": tool(id, "Already received. Nothing new was opened or played.", extra: ["status": "duplicate"])
-        case "conflict": tool(id, "Retry key already used for different content.", failed: true)
-        case "busy": tool(id, "Open documents have reached their limit. Close a tab and retry with the same key.", failed: true, extra: ["status": "busy"])
+        case "conflict": fail("conflict", "Retry key already used for different content. Use a new key for new content.")
+        case "busy": fail("busy", "Open documents have reached their limit. Ask the user to close a tab in \(app), then retry with the same key.")
+        case "editor_full":
+            fail("editor_full", "The text open in the app is too large to keep beside a new draft. Ask the user to shorten or move it in \(app), then retry with the same key.")
         case "session_limit":
-            tool(id, "This helper session has reached its draft-key limit. Ask the user to disconnect and enable a new session.", failed: true, extra: ["status": "session_limit"])
-        case "rate_limited": tool(id, "This session’s receipt rate limit was reached.", failed: true)
+            fail("session_limit", "This helper session has reached its draft-key limit. Ask the user to disconnect and enable a new session.")
+        case "rate_limited": fail("rate_limited", "This session’s receipt rate limit was reached. Wait a minute, then retry with the same key.")
         case "instruction_required":
-            tool(id, "A saved instruction is selected. Read the current selection and send with submit_explanation_draft, or ask the user to clear the selection.", failed: true, extra: ["status": "instruction_required"])
-        case "unproven": tool(id, "Instruction selection, revision, or proof is no longer valid. Read the selected saved instruction again and retry.", failed: true, extra: ["status": "unproven"])
-        default: tool(id, "Receipt not confirmed. Check TTS agent status and retry with the same key.", failed: true)
+            switch shareable {
+            case true?:
+                fail("instruction_required", "A saved instruction is selected. Read it with get_tts_instructions and send with submit_explanation_draft, or ask the user to clear the selection.")
+            case false?:
+                fail("instruction_required", "A saved instruction is selected but is not being shared, so it cannot be read. Ask the user to select it again or clear the selection in \(app).")
+            case nil:
+                fail("instruction_required", "A saved instruction is selected. Check tts_agent_status: when it is ready, read the instruction and use submit_explanation_draft; otherwise ask the user to select it again or clear the selection in \(app).")
+            }
+        case "unproven": fail("unproven", "Instruction selection, revision, or proof is no longer valid. Check tts_agent_status, read the selected saved instruction again, and retry.")
+        case "invalid": fail("invalid", "The app rejected the draft arguments. Check the key and text limits; retrying unchanged will not help.")
+        case "upgrade_required": fail("upgrade_required", "The running app and this helper are different versions. Use the helper bundled with the running app.")
+        default: fail("unconfirmed", "Receipt not confirmed. Check tts_agent_status and retry with the same key.")
         }
     }
 

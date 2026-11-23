@@ -6,6 +6,7 @@ import Combine
 struct RootView: View {
     let app: AppState
     @State private var selectedTab: Int
+    @State private var unseenDrafts = 0
 
     init(app: AppState) {
         self.app = app
@@ -36,7 +37,12 @@ struct RootView: View {
     private var productTabs: some View {
         TabView(selection: tabSelection) {
             GenerateView().tabItem { Label("TTS", systemImage: "waveform") }.tag(0)
-            agentWorkspace.tabItem { Label("에이전트", systemImage: "person.crop.circle") }.tag(1)
+            agentWorkspace
+                .tabItem {
+                    // Drafts open in this tab without stealing focus from the one in use.
+                    Label(unseenDrafts > 0 ? "에이전트 · 새 대본 \(unseenDrafts)" : "에이전트", systemImage: "person.crop.circle")
+                }
+                .tag(1)
             HistoryView().tabItem { Label("히스토리", systemImage: "clock.arrow.circlepath") }.tag(2)
             BacklogView().tabItem { Label("백로그", systemImage: "flag") }.tag(3)
             SettingsView().tabItem { Label("설정", systemImage: "slider.horizontal.3") }.tag(4)
@@ -44,6 +50,10 @@ struct RootView: View {
         .frame(minWidth: 560, minHeight: 520)
         .onReceive(app.$selectedTab.removeDuplicates()) { tab in
             if selectedTab != tab { selectedTab = tab }
+        }
+        .onReceive(app.explanationDrafts.$unseenArrivals.removeDuplicates()) { count in
+            if selectedTab == 1 && count > 0 { app.explanationDrafts.markArrivalsSeen() }
+            else { unseenDrafts = count }
         }
     }
 }
