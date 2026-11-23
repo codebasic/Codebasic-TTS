@@ -15,10 +15,10 @@ enum CodeExplanation { static let noChange = "변경 없음" }
     var clearDocumentID: String?
     let alternate = AgentInstructionSnapshot(selector: "continue", generation: UUID(), text: "두 번째 합성 지시")
 
-    init(directory: String, expectedHelper: String, wait: Duration) {
+    init(directory: String, expectedHelper: String, wait: Duration, trust: String) {
         access = AgentSessionController(directory: directory, bundledHelper: {
             AgentPeerSigning.signedHash(at: URL(fileURLWithPath: expectedHelper))
-        }, selectionWaiting: wait)
+        }, selectionWaiting: wait, trust: AgentTrustStore(url: URL(fileURLWithPath: trust)))
         current = AgentInstructionSnapshot(selector: selector, generation: UUID(), text: original)
         catalog.didChange = { [weak self] selector, deleted in self?.access.invalidate(selector, deleted: deleted) }
     }
@@ -39,6 +39,27 @@ enum CodeExplanation { static let noChange = "변경 없음" }
         case "enable":
             report(access.enableReceive(current: { [weak self] in self?.resolve($0) }, workspace: drafts) ? "ok" : "no")
         case "disable": access.disableReceive(); report("ok")
+        // What the app does at launch, with no click.
+        case "configure": access.configure(current: { [weak self] in self?.resolve($0) }, workspace: drafts); report("ok")
+        case "allow-new": access.allowNewAgent(); report("ok")
+        case "lock": access.setLocked(true); report("ok")
+        case "unlock": access.setLocked(false); report("ok")
+        case "forget":
+            guard let client = access.pair?.client ?? access.trusted.last?.id else { report("no"); return }
+            access.forget(client); report("ok")
+        case "reset-documents":
+            for _ in 0..<16 {
+                guard let tab = drafts.documentTabs.first else { break }
+                if tab.id == drafts.editorDocumentID { drafts.closeActiveDocument(expectedDocumentID: tab.id) }
+                else { drafts.closeInactiveDocument(tab.id) }
+            }
+            report("ok")
+        case "documents":
+            let all = drafts.documentTabs.map { tab -> String in
+                drafts.selectDocument(tab.id)
+                return AgentBytes.hash(Data(drafts.display.utf8)) + ":" + String(drafts.display.utf8.count)
+            }
+            report(all.joined(separator: " "))
         case "select", "select-alternate":
             let selection = pieces.first == "select-alternate" ? alternate : current
             report(selection.map { chosen in
@@ -101,6 +122,9 @@ enum CodeExplanation { static let noChange = "변경 없음" }
                 "paired": access.pair != nil, "editor": drafts.display, "speech": drafts.speech,
                 "editorID": drafts.editorDocumentID, "shared": access.shared != nil, "scope": access.instructionScope ?? "",
                 "receiving": access.receiving, "waiting": access.waitingForReceiveHelper,
+                "auto": access.autoReceive, "locked": access.locked, "trusted": access.trusted.map(\.label),
+                "hosts": access.trusted.map(\.host), "persistent": access.pair?.persistent ?? false,
+                "awaiting": access.awaitingApproval ?? "", "status": access.status,
                 "tabs": drafts.documentTabs.map(\.title), "dirty": drafts.documentTabs.map(\.dirty),
                 "canRevert": drafts.canRevertReceived, "original": drafts.activeOriginal?.display ?? "",
                 "associated": drafts.provenance?.selector ?? "",
@@ -116,7 +140,8 @@ enum CodeExplanation { static let noChange = "변경 없음" }
     @MainActor static func main() {
         let fixture = AgentFixture(directory: CommandLine.arguments[1],
                                    expectedHelper: CommandLine.arguments.dropFirst(2).first ?? "helper",
-                                   wait: .milliseconds(Int64(CommandLine.arguments.dropFirst(3).first ?? "90000") ?? 90000))
+                                   wait: .milliseconds(Int64(CommandLine.arguments.dropFirst(3).first ?? "90000") ?? 90000),
+                                   trust: CommandLine.arguments.dropFirst(4).first ?? "agent-clients-\(UUID()).json")
         print("ready"); fflush(stdout)
         DispatchQueue.global().async {
             while let cmd = readLine() { DispatchQueue.main.async { fixture.command(cmd) } }

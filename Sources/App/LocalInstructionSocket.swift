@@ -30,6 +30,15 @@ struct LocalInstructionPeer: Equatable {
         return String(validatingUTF8: path)
     }
 
+    func parentPID() -> pid_t? {
+        var child = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+        guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &child, size) == size,
+              child.pbi_start_tvsec == startSeconds, child.pbi_start_tvusec == startMicroseconds,
+              child.pbi_ppid > 1 else { return nil }
+        return pid_t(child.pbi_ppid)
+    }
+
     static func connected(_ fd: Int32) -> Self? {
         var uid: uid_t = 0, gid: gid_t = 0, pid: pid_t = 0
         var size = socklen_t(MemoryLayout<pid_t>.size)
@@ -103,8 +112,9 @@ final class LocalApprovedSocket {
     private var revoked = false
     private(set) var requiresPathInspection = false
 
+    /// `lifetime: nil` lasts until `stop()`; the caller owns revocation.
     convenience init(peer: LocalInstructionPeer, endpoint: String, directory: String,
-         lifetime: DispatchTimeInterval, maxFrame: Int,
+         lifetime: DispatchTimeInterval?, maxFrame: Int,
          verified: @escaping (Int32) -> Bool = { _ in true },
          deliveryGate: @escaping (@escaping () -> Void) -> Void = { $0() },
          didDeliver: @escaping (Data) -> Void = { _ in },
@@ -121,7 +131,7 @@ final class LocalApprovedSocket {
         approvedPeer = nil
         endpoint = "p.sock"
         self.directory = directory
-        maxFrame = 128
+        maxFrame = 1024
         self.verified = verified
         deliveryGate = { $0() }
         didDeliver = { _ in }
@@ -131,7 +141,7 @@ final class LocalApprovedSocket {
     }
 
     private init(peer: LocalInstructionPeer, endpoint: String, directory: String,
-                 lifetime: DispatchTimeInterval, maxFrame: Int, verified: @escaping (Int32) -> Bool,
+                 lifetime: DispatchTimeInterval?, maxFrame: Int, verified: @escaping (Int32) -> Bool,
                  deliveryGate: @escaping (@escaping () -> Void) -> Void, didDeliver: @escaping (Data) -> Void,
                  identifiedHandler: @escaping (Data, LocalInstructionPeer, @escaping () -> Bool) -> Data?) {
         approvedPeer = peer
@@ -143,7 +153,7 @@ final class LocalApprovedSocket {
         self.didDeliver = didDeliver
         self.handle = identifiedHandler
         queue = DispatchQueue(label: "com.codebasic.tts.approved-ipc." + endpoint)
-        expires = .now() + lifetime
+        expires = lifetime.map { .now() + $0 } ?? .distantFuture
     }
 
     /// Start/stop are owned by the AppDelegate's main actor. Requests are serialized separately.

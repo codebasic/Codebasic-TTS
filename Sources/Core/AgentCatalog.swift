@@ -9,9 +9,30 @@ enum AgentLimits {
     static let labelBytes = 96
     static let labelCharacters = 80
     static let proofCount = 32
-    static let grantSeconds = 600
+    /// How long one delivered instruction read stays provable. The share itself
+    /// lasts until the selection changes; an expired proof is renewed by reading again.
+    static let proofSeconds = 600
     static let acceptedPerMinute = 6
-    static let acceptedPerGrant = 20
+    static let acceptedPerHour = 60
+    /// Most recent delivery keys remembered per client for duplicate detection.
+    static let receiptKeys = 128
+    static let frameBytes = 100 * 1024
+}
+
+/// Compiled into both ends. The helper signs these bytes with its client key;
+/// the app verifies them against the key the user approved.
+enum AgentPairing {
+    static let schema = 3
+    static func message(appID: String, nonce: String, keyID: String) -> Data {
+        Data("codebasic-tts-pair-v1\n\(appID)\n\(nonce)\n\(keyID)".utf8)
+    }
+
+    /// A display and key-slot name, never an authentication input.
+    static func clientName(_ input: String?) -> String {
+        let allowed = Set("abcdefghijklmnopqrstuvwxyz0123456789._-".utf8)
+        let name = String(decoding: (input ?? "").lowercased().utf8.filter(allowed.contains).prefix(48), as: UTF8.self)
+        return name.isEmpty ? "default" : name
+    }
 }
 
 enum AgentBytes {

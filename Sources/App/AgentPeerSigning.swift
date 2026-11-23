@@ -42,6 +42,23 @@ enum AgentPeerSigning {
                      identifier: identifier, leaf: leaf, expectedHash: expectedHash)
     }
 
+    /// "identifier:team" of a validly signed, team-identified running program.
+    /// Looked up by PID, so it narrows who may reuse an approved key but is not
+    /// by itself proof of identity; the key signature is.
+    static func teamSignedIdentity(pid: pid_t) -> String? {
+        var guest: SecCode?
+        var code: SecStaticCode?
+        var info: CFDictionary?
+        guard SecCodeCopyGuestWithAttributes(nil, [kSecGuestAttributePid as String: pid] as CFDictionary, [], &guest) == errSecSuccess,
+              let guest, SecCodeCheckValidity(guest, [], nil) == errSecSuccess,
+              SecCodeCopyStaticCode(guest, [], &code) == errSecSuccess, let code,
+              SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
+              let details = info as? [String: Any],
+              let identifier = details[kSecCodeInfoIdentifier as String] as? String,
+              let team = details[kSecCodeInfoTeamIdentifier as String] as? String, !team.isEmpty else { return nil }
+        return identifier + ":" + team
+    }
+
     private static func signedHash(_ code: SecStaticCode) -> Data? {
         var info: CFDictionary?
         guard SecCodeCopySigningInformation(code, [], &info) == errSecSuccess else { return nil }

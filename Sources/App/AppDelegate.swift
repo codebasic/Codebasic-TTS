@@ -30,6 +30,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             registerHotKeys()
         }
         observeState()
+        appState.agentAccess.configure(current: { [weak self] in self?.currentAgentSnapshot($0) },
+                                       workspace: appState.explanationDrafts)
+        observeSessionLock()
         appState.agentAccess.startPairing()
 
         // Opening the app does not refresh cloud voices. Settings already
@@ -179,9 +182,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return appState.agentSnapshot(selector)
     }
 
+    /// Nothing is received while the screen is locked or another user has the
+    /// console. On return, a remembered agent proves its key again by itself.
+    private func observeSessionLock() {
+        let access = appState.agentAccess
+        if let session = CGSessionCopyCurrentDictionary() as? [String: Any],
+           (session["CGSSessionScreenIsLocked"] as? Bool) == true { access.setLocked(true) }
+        let distributed = DistributedNotificationCenter.default()
+        for (name, value) in [("com.apple.screenIsLocked", true), ("com.apple.screenIsUnlocked", false)] {
+            distributed.addObserver(forName: Notification.Name(name), object: nil, queue: .main) { _ in
+                MainActor.assumeIsolated { access.setLocked(value) }
+            }
+        }
+        let workspace = NSWorkspace.shared.notificationCenter
+        for (name, value) in [(NSWorkspace.sessionDidResignActiveNotification, true),
+                              (NSWorkspace.sessionDidBecomeActiveNotification, false)] {
+            workspace.addObserver(forName: name, object: nil, queue: .main) { _ in
+                MainActor.assumeIsolated { access.setLocked(value) }
+            }
+        }
+    }
+
     @objc func toggleDraftReceipt() {
         let access = appState.agentAccess
-        if access.receiving || access.waitingForReceiveHelper {
+        if access.autoReceive || access.receiving || access.waitingForReceiveHelper {
             access.disableReceive()
         } else {
             _ = access.enableReceive(current: { [weak self] in self?.currentAgentSnapshot($0) },

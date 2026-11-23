@@ -1,10 +1,12 @@
 import Darwin
 import Foundation
+import Security
 
 /// One native signed helper per MCP session. This executable owns both local
 /// connections; the model never sees a receipt capability or pairing identity.
+/// The helper proves which approved client it is with a key only it can use.
 @main struct AgentCatalogMCP {
-    static let maxFrame = 100 * 1024
+    static let maxFrame = AgentLimits.frameBytes
     static let statusTool = "tts_agent_status"
     static let reader = "get_tts_instructions"
     static let plainReceiver = "submit_tts_draft"
@@ -18,12 +20,28 @@ import Foundation
         let profile: String
         let revision: String
         let bodyHash: String
-        let token: String
-        let expiry: ContinuousClock.Instant
+        var token: String
+        var expiry: ContinuousClock.Instant
         var key: String { profile + ":" + revision }
     }
 
+    /// `--client <name>` names the key slot; otherwise the MCP client's own name does.
+    static var clientOverride: String?
+    static var clientName = "default"
+    static var clientKey: ClientKey?
+
     static func main() {
+        // A keychain dialog raised by a background helper would block the agent's
+        // tool call. Fail instead; an unusable key is replaced and approved again.
+        SecKeychainSetUserInteractionAllowed(false)
+        let arguments = Array(CommandLine.arguments.dropFirst())
+        if let flag = arguments.firstIndex(of: "--client"), arguments.indices.contains(flag + 1) {
+            clientOverride = AgentPairing.clientName(arguments[flag + 1])
+        }
+        if arguments.contains("--forget-key") {
+            // Lets the user discard this client's credential from the client side.
+            exit(ClientKey.delete(slot: clientOverride ?? "default") ? 0 : 1)
+        }
         var initialized = false, ready = false
         var proofs: [Proof] = []
         while let input = readFrame() {
@@ -45,6 +63,7 @@ import Foundation
             case "initialize":
                 guard !initialized else { emit(error(id, -32600, "Already initialized")); continue }
                 initialized = true
+                clientName = clientOverride ?? AgentPairing.clientName((params["clientInfo"] as? [String: Any])?["name"] as? String)
                 let requested = params["protocolVersion"] as? String ?? ""
                 let version = ["2025-11-25", "2025-06-18", "2025-03-26"].contains(requested) ? requested : "2025-11-25"
                 result(id, ["protocolVersion":version, "serverInfo":["name":TTSRuntime.mcpServerName, "version":"2.0"],
@@ -62,7 +81,8 @@ import Foundation
                 switch name {
                 case statusTool where args.isEmpty:
                     let status = pairingStatus()
-                    tool(id, describe(status), extra: ["status": status])
+                    tool(id, describe(status), extra: ["status": status, "limits": [
+                        "text_bytes": AgentLimits.textBytes, "frame_bytes": maxFrame] as [String: Any]])
 
                 case reader:
                     let requested = args["profile"] as? String
@@ -71,7 +91,7 @@ import Foundation
                     }
                     let status = pairingStatus()
                     guard status == "ready" || status == "reading_only" else {
-                        tool(id, describe(status), failed: true); continue
+                        tool(id, describe(status), failed: true, extra: ["status": status]); continue
                     }
                     var request: [String: Any] = ["schema_version": 2]
                     if let requested { request["profile"] = requested }
@@ -86,8 +106,8 @@ import Foundation
                         tool(id, "That profile is not approved or its revision changed. Select it in \(TTSRuntime.displayName) → Agent (에이전트).", failed: true); continue
                     }
                     let proof = Proof(profile: selector, revision: rev, bodyHash: hash, token: opaque,
-                                      expiry: .now.advanced(by: .seconds(AgentLimits.grantSeconds)))
-                    proofs.removeAll { $0.key == proof.key || $0.expiry <= .now }
+                                      expiry: .now.advanced(by: .seconds(AgentLimits.proofSeconds)))
+                    proofs.removeAll { $0.key == proof.key }
                     proofs.append(proof)
                     if proofs.count > maxProofs { proofs.removeFirst(proofs.count - maxProofs) }
                     tool(id, text, extra: ["schema_version":2, "profile":selector, "revision":rev,
@@ -95,14 +115,14 @@ import Foundation
                 case plainReceiver:
                     let required: Set<String> = ["idempotency_key", "display_text"]
                     guard validDraft(args, required: required) else {
-                        tool(id, "Invalid plain-text draft arguments.", failed: true); continue
+                        rejectDraft(id, args, "Invalid plain-text draft arguments."); continue
                     }
                     let status = pairingStatus()
                     if status == "ready" || status == "instruction_required" {
                         reportReceipt(id, "instruction_required", shareable: status == "ready"); continue
                     }
                     guard status == "receiving_only" else {
-                        tool(id, describe(status), failed: true); continue
+                        tool(id, describe(status), failed: true, extra: ["status": status]); continue
                     }
                     var request = args
                     request["schema_version"] = 2
@@ -111,19 +131,36 @@ import Foundation
                     let required: Set<String> = ["profile", "revision", "idempotency_key", "display_text"]
                     guard validDraft(args, required: required),
                           let profile = args["profile"] as? String, let revision = args["revision"] as? String else {
-                        tool(id, "Invalid instruction-linked draft arguments.", failed: true); continue
+                        rejectDraft(id, args, "Invalid instruction-linked draft arguments."); continue
                     }
                     let connection = pairingStatus()
                     guard connection == "ready" || connection == "receiving_only" || connection == "instruction_required" else {
                         let message = connection == "reading_only"
                             ? "Draft receipt is not approved. Select an instruction in \(TTSRuntime.displayName) → Agent (에이전트)."
                             : describe(connection)
-                        tool(id, message, failed: true); continue
+                        tool(id, message, failed: true, extra: ["status": connection]); continue
                     }
-                    proofs.removeAll { $0.expiry <= .now }
-                    guard let proof = proofs.last(where: { $0.profile == profile && $0.revision == revision }) else {
-                        tool(id, "This helper did not receive that exact revision. Read it first or paste manually.", failed: true); continue
+                    guard let index = proofs.lastIndex(where: { $0.profile == profile && $0.revision == revision }) else {
+                        tool(id, "This helper did not receive that exact revision. Read it first or paste manually.", failed: true,
+                             extra: ["status": "unproven"]); continue
                     }
+                    if proofs[index].expiry <= .now {
+                        // Only the proof aged out. Read the same selection again through
+                        // the normal channel; anything but the identical revision and
+                        // body means the user changed it, and the agent must read it.
+                        guard let reply = exchange(socket: "i.sock", ["schema_version": 2, "profile": profile]),
+                              reply["revision"] as? String == revision,
+                              reply["body_sha256"] as? String == proofs[index].bodyHash,
+                              let text = reply["instructions"] as? String,
+                              AgentBytes.hash(Data(text.utf8)) == proofs[index].bodyHash,
+                              let opaque = reply["proof"] as? String, UUID(uuidString: opaque) != nil else {
+                            proofs.remove(at: index)
+                            reportReceipt(id, "unproven"); continue
+                        }
+                        proofs[index].token = opaque
+                        proofs[index].expiry = .now.advanced(by: .seconds(AgentLimits.proofSeconds))
+                    }
+                    let proof = proofs[index]
                     var request = args
                     request["schema_version"] = 2
                     request["body_sha256"] = proof.bodyHash
@@ -150,6 +187,17 @@ import Foundation
         return args["speech_text"].map { ($0 as? String).map(AgentBytes.textValid) == true } ?? true
     }
 
+    /// Says which limit a refused draft broke, in bytes, so a client never has to
+    /// guess whether a long script was cut, dropped or rejected.
+    static func rejectDraft(_ id: Any, _ args: [String: Any], _ fallback: String) {
+        let sizes = ["display_text", "speech_text"].compactMap { name in (args[name] as? String).map { (name, $0.utf8.count) } }
+        guard let (name, bytes) = sizes.first(where: { $0.1 > AgentLimits.textBytes }) else {
+            tool(id, fallback, failed: true, extra: ["status": "invalid"]); return
+        }
+        tool(id, "\(name) is \(bytes) UTF-8 bytes; the limit is \(AgentLimits.textBytes). Nothing was opened. Shorten it or split it into separate drafts with their own keys.",
+             failed: true, extra: ["status": "too_large", "field": name, "bytes": bytes, "limit_bytes": AgentLimits.textBytes])
+    }
+
     /// Every outcome carries a machine-readable status, and each failure names a
     /// recovery the agent or the user can actually perform in the reported state.
     static func reportReceipt(_ id: Any, _ status: String?, shareable: Bool? = nil) {
@@ -162,8 +210,6 @@ import Foundation
         case "busy": fail("busy", "Open documents have reached their limit. Ask the user to close a tab in \(app), then retry with the same key.")
         case "editor_full":
             fail("editor_full", "The text open in the app is too large to keep beside a new draft. Ask the user to shorten or move it in \(app), then retry with the same key.")
-        case "session_limit":
-            fail("session_limit", "This helper session has reached its draft-key limit. Ask the user to disconnect and enable a new session.")
         case "rate_limited": fail("rate_limited", "This session’s receipt rate limit was reached. Wait a minute, then retry with the same key.")
         case "instruction_required":
             switch shareable {
@@ -200,9 +246,43 @@ import Foundation
                  "annotations":["readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false]]]
     }
 
+    /// Asks the app where this process stands and, when the app does not know
+    /// it yet, proves which client it is. Never needs the user unless the app
+    /// answers that an approval is required.
     static func pairingStatus() -> String {
         guard pin != nil else { return "signing_required" }
-        return exchange(socket: "p.sock", ["schema_version": 2])?["status"] as? String ?? "app_unavailable"
+        let schema = AgentPairing.schema
+        guard let status = exchange(socket: "p.sock", ["schema_version": schema, "op": "status"])?["status"] as? String else {
+            return "app_unavailable"
+        }
+        guard status == "identify" else { return status }
+        for attempt in 0..<2 {
+            if clientKey == nil { clientKey = ClientKey.load(slot: clientName) }
+            guard let key = clientKey else { return "unavailable" }
+            let hello: [String: Any] = ["schema_version": schema, "op": "hello", "client": clientName,
+                                        "public_key": key.publicKey.base64EncodedString(), "persistent": key.persistent]
+            guard let offer = exchange(socket: "p.sock", hello), let answer = offer["status"] as? String else { return "app_unavailable" }
+            if answer == "revoked", attempt == 0 {
+                // The user forgot this client. Its old credential is dead; a new
+                // one starts over as an unknown client that needs approval.
+                ClientKey.delete(slot: clientName)
+                clientKey = nil
+                continue
+            }
+            guard answer == "challenge", let nonce = offer["nonce"] as? String else { return answer }
+            let message = AgentPairing.message(appID: AgentPeerSigning.appID, nonce: nonce, keyID: AgentBytes.hash(key.publicKey))
+            guard let signature = key.sign(message) else {
+                // The stored key can no longer be used by this build of the helper.
+                ClientKey.delete(slot: clientName)
+                clientKey = nil
+                if attempt == 0 { continue }
+                return "unavailable"
+            }
+            let proof: [String: Any] = ["schema_version": schema, "op": "prove", "nonce": nonce,
+                                        "signature": signature.base64EncodedString()]
+            return exchange(socket: "p.sock", proof)?["status"] as? String ?? "app_unavailable"
+        }
+        return "unavailable"
     }
 
     static func describe(_ status: String) -> String {
@@ -210,7 +290,10 @@ import Foundation
         case "signing_required": return "Use the certificate-signed helper bundled with \(TTSRuntime.displayName)."
         case "app_unavailable": return "Open \(TTSRuntime.displayName) and try again. The running app must match this signed helper."
         case "other_agent": return "Another MCP session is connected. Close it or disconnect it in \(TTSRuntime.displayName) → Agent (에이전트), then retry."
-        case "approval_required": return "Connected. In \(TTSRuntime.displayName) → Agent (에이전트), enable draft receipt."
+        case "approval_required": return "Not approved yet, or receipt is off. Ask the user to turn on the connection in \(TTSRuntime.displayName) → Agent (에이전트), then check again. An approved client is not asked again."
+        case "locked": return "The Mac's screen is locked, so nothing is received. Retry after the user unlocks it; no new approval is needed."
+        case "revoked": return "The user removed this client in \(TTSRuntime.displayName). Ask them to approve it again in Agent (에이전트)."
+        case "upgrade_required": return "The running app and this helper are different versions. Use the helper bundled with the running app."
         case "reading_only": return "Connected. One instruction revision is approved. Draft receipt is off."
         case "receiving_only": return "Connected. Send with submit_tts_draft; there is no selected instruction."
         case "instruction_required": return "A saved instruction was selected but is no longer shareable. Ask the user to update or clear the selection."
@@ -281,7 +364,7 @@ import Foundation
             return true
         }
         guard sent, shutdown(fd, SHUT_WR) == 0 else { return nil }
-        let maximum = endpoint == "i.sock" ? 52 * 1024 : 128
+        let maximum = endpoint == "i.sock" ? 52 * 1024 : 256
         var output = Data(), chunk = [UInt8](repeating: 0, count: 4096)
         let deadline = ContinuousClock.now.advanced(by: .seconds(2))
         var terminated = false
@@ -316,5 +399,64 @@ import Foundation
         var value: [String: Any] = ["content":[["type":"text","text":message]],"isError":failed]
         if let extra { value["structuredContent"] = extra }
         result(id, value)
+    }
+}
+
+/// This client's signing key. Kept in the login keychain, marked non-extractable,
+/// and usable without a prompt only by the helper build that created it. When the
+/// keychain cannot hold one, the key lives for this process only and the app is
+/// told so, which means the user approves each run.
+struct ClientKey {
+    let key: SecKey
+    let publicKey: Data
+    let persistent: Bool
+
+    private static func tag(_ slot: String) -> Data { Data("\(AgentPeerSigning.helperID).client.\(slot)".utf8) }
+
+    private static func query(_ slot: String) -> [String: Any] {
+        [kSecClass as String: kSecClassKey, kSecAttrApplicationTag as String: tag(slot),
+         kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom]
+    }
+
+    static func load(slot: String) -> ClientKey? {
+        var found: CFTypeRef?
+        var lookup = query(slot)
+        lookup[kSecReturnRef as String] = true
+        if SecItemCopyMatching(lookup as CFDictionary, &found) == errSecSuccess, let found,
+           CFGetTypeID(found) == SecKeyGetTypeID(), let existing = make(found as! SecKey, persistent: true),
+           existing.sign(Data("self-test".utf8)) != nil {
+            return existing
+        }
+        delete(slot: slot)
+        let stored: [String: Any] = [
+            kSecAttrIsExtractable as String: false,
+            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom, kSecAttrKeySizeInBits as String: 256,
+            kSecPrivateKeyAttrs as String: [
+                kSecAttrIsPermanent as String: true, kSecAttrApplicationTag as String: tag(slot),
+                kSecAttrLabel as String: "\(TTSRuntime.displayName) agent client (\(slot))"] as [String: Any]]
+        if let created = SecKeyCreateRandomKey(stored as CFDictionary, nil), let key = make(created, persistent: true),
+           key.sign(Data("self-test".utf8)) != nil {
+            return key
+        }
+        delete(slot: slot)
+        let temporary: [String: Any] = [kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+                                        kSecAttrKeySizeInBits as String: 256]
+        return SecKeyCreateRandomKey(temporary as CFDictionary, nil).flatMap { make($0, persistent: false) }
+    }
+
+    @discardableResult
+    static func delete(slot: String) -> Bool {
+        let status = SecItemDelete(query(slot) as CFDictionary)
+        return status == errSecSuccess || status == errSecItemNotFound
+    }
+
+    private static func make(_ key: SecKey, persistent: Bool) -> ClientKey? {
+        guard let publicKey = SecKeyCopyPublicKey(key),
+              let bytes = SecKeyCopyExternalRepresentation(publicKey, nil) as Data?, bytes.count == 65 else { return nil }
+        return ClientKey(key: key, publicKey: bytes, persistent: persistent)
+    }
+
+    func sign(_ message: Data) -> Data? {
+        SecKeyCreateSignature(key, .ecdsaSignatureMessageX962SHA256, message as CFData, nil) as Data?
     }
 }

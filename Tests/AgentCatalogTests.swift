@@ -1,3 +1,4 @@
+import CryptoKit
 import Darwin
 import Foundation
 
@@ -90,14 +91,17 @@ enum CodeExplanation { static let noChange = "변경 없음" }
         proofs.delivered(nonce, snapshot: snapshot, epoch: epoch, now: now)
         precondition(proofs.resolve(nonce, selector: snapshot.selector, revision: snapshot.generation, digest: snapshot.digest, now: now) == nil)
 
+        // Both windows slide: six a minute, sixty an hour, and never used up for good.
         var rate = AgentRateLimit()
-        for window in 0..<4 {
+        for window in 0..<10 {
             let t = now.advanced(by: .seconds(window * 61))
-            for _ in 0..<min(6, 20 - window * 6) {
-                precondition(rate.canAccept(now: t)); rate.mark(now: t)
-            }
+            for _ in 0..<6 { precondition(rate.canAccept(now: t)); rate.mark(now: t) }
             precondition(!rate.canAccept(now: t))
         }
+        precondition(!rate.canAccept(now: now.advanced(by: .seconds(11 * 61))))
+        precondition(rate.canAccept(now: now.advanced(by: .seconds(3601))))
+
+        try trustStore(directory)
 
         for unsafe in ["<break time=\"1s\"/>", "&lt;break&gt;", "&#x3c;break&#62;",
                        "&amp;lt;break", "%3Cbreak%3E", "\\u003cbreak\\u003e", "＜break＞", "[whispering]"] {
@@ -237,6 +241,70 @@ enum CodeExplanation { static let noChange = "변경 없음" }
         _ = try a.save(label: "recovered", body: "safe new entry")
         precondition(AgentCatalog(url: url).records.count == 2)
         print("Catalog: actual second process, separate edits, stale edit/delete, lock busy/retry, external revision delivery guard, corrupt file preservation, and label filter passed")
+    }
+
+    /// Approval record rules, with real P-256 signatures and a controllable clock.
+    static func trustStore(_ directory: URL) throws {
+        let url = directory.appendingPathComponent("agent-clients.json")
+        var clock = Date(timeIntervalSince1970: 1_800_000_000)
+        func open() -> AgentTrustStore { AgentTrustStore(url: url, now: { clock }) }
+        let key = P256.Signing.PrivateKey(), other = P256.Signing.PrivateKey()
+        let publicKey = key.publicKey.x963Representation
+        let keyID = AgentPairingProof.keyID(publicKey)!
+        let message = AgentPairing.message(appID: "app", nonce: "nonce", keyID: keyID)
+        let signature = try key.signature(for: message).derRepresentation
+        precondition(AgentPairingProof.verify(publicKey: publicKey, signature: signature, message: message))
+        precondition(!AgentPairingProof.verify(publicKey: other.publicKey.x963Representation, signature: signature, message: message))
+        precondition(!AgentPairingProof.verify(publicKey: publicKey, signature: signature,
+                                               message: AgentPairing.message(appID: "app", nonce: "other", keyID: keyID)))
+        precondition(AgentPairingProof.keyID(Data([1, 2, 3])) == nil)
+        precondition(AgentPairing.clientName("Claude Code/1.0") == "claudecode1.0" && AgentPairing.clientName("한글") == "default")
+
+        var store = open()
+        precondition(store.clients.isEmpty && !store.autoReceive && store.lookup(keyID: keyID, host: "h") == .unknown)
+        let client = try store.trust(publicKey: publicKey, label: "claude", host: "h")
+        precondition(store.setAutoReceive(true))
+        var attributes = stat()
+        precondition(stat(url.path, &attributes) == 0 && attributes.st_mode & 0o777 == 0o600)
+        store = open()   // a restarted app
+        precondition(store.autoReceive && store.lookup(keyID: keyID, host: "h") == .trusted(client))
+        precondition(store.lookup(keyID: keyID, host: "elsewhere") == .hostChanged)
+        precondition(store.lookup(keyID: AgentPairingProof.keyID(other.publicKey.x963Representation)!, host: "h") == .unknown)
+        clock += AgentTrustStore.idleLimit - 60
+        store.touch(client.id)
+        clock += AgentTrustStore.idleLimit - 60   // sliding: counted from the last reconnect
+        precondition(open().lookup(keyID: keyID, host: "h") != .expired)
+        clock += 120
+        precondition(open().lookup(keyID: keyID, host: "h") == .expired)
+        let renewed = try store.trust(publicKey: publicKey, label: "claude", host: "h")
+        precondition(renewed.id != client.id && store.clients.count == 1)
+
+        // A new key under the same name from the same launcher supersedes the old record only.
+        _ = try store.trust(publicKey: P256.Signing.PrivateKey().publicKey.x963Representation, label: "codex", host: "h")
+        let replaced = try store.trust(publicKey: P256.Signing.PrivateKey().publicKey.x963Representation, label: "codex", host: "h")
+        precondition(store.clients.map(\.id) == [renewed.id, replaced.id])
+        for index in 2..<AgentTrustStore.maxClients {
+            _ = try store.trust(publicKey: P256.Signing.PrivateKey().publicKey.x963Representation, label: "x\(index)", host: "h")
+        }
+        do {
+            _ = try store.trust(publicKey: other.publicKey.x963Representation, label: "x", host: "h")
+            preconditionFailure("a ninth client must not evict an approved one")
+        } catch AgentTrustStore.Failure.full {}
+
+        precondition(store.forget(renewed.id))
+        store = open()
+        precondition(store.lookup(keyID: keyID, host: "h") == .revoked && store.clients.count == AgentTrustStore.maxClients - 1)
+        do {
+            _ = try store.trust(publicKey: publicKey, label: "claude", host: "h")
+            preconditionFailure("a forgotten key must not be approved again")
+        } catch AgentTrustStore.Failure.revoked {}
+
+        // Anything but our own private, intact file is no trust at all.
+        precondition(chmod(url.path, 0o644) == 0 && open().clients.isEmpty && !open().autoReceive)
+        precondition(chmod(url.path, 0o600) == 0 && !open().clients.isEmpty)
+        try Data("{".utf8).write(to: url)
+        precondition(chmod(url.path, 0o600) == 0 && open().clients.isEmpty)
+        print("Trust store: signature binding, restart, host change, sliding idle expiry, full, forget tombstone, and unreadable-file fail-closed passed")
     }
 
     static func childProcess(url: URL, mode: String, selector: String) throws -> (Process, FileHandle) {

@@ -207,6 +207,7 @@ case "${1:-install}" in
     "$BUILD_DIR/local-speech-gate-tests"
     catalog_fixture="$(mktemp -d "$BUILD_DIR/catalog-test.XXXXXX")"
     swiftc -O "$HERE/Sources/Core/AgentCatalog.swift" "$HERE/Sources/Core/AgentDeliveryProofs.swift" \
+      "$HERE/Sources/Core/AgentTrustStore.swift" \
       "$HERE/Sources/Core/ExplanationDraftWorkspace.swift" "$HERE/Tests/AgentCatalogTests.swift" -o "$BUILD_DIR/agent-catalog-tests"
     "$BUILD_DIR/agent-catalog-tests" "$catalog_fixture"
     swiftc -O "$RUNTIME_SOURCE" "$HERE/Sources/Core/AgentMCPConfiguration.swift" "$HERE/Tests/AgentMCPConfigurationTests.swift" \

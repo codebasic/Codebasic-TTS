@@ -155,9 +155,11 @@ struct ExplainWorkspace: View {
     }
 
     private var connectionState: String {
+        if access.locked { return "화면 잠금으로 멈춤" }
         if access.receiptBlockedBySelection { return "대본 받기 막힘" }
         if access.receiving { return "대본 받는 중" }
-        if access.waitingForReceiveHelper { return "MCP 시작 대기 중" }
+        if access.waitingForReceiveHelper { return "새 에이전트 연결 대기 중" }
+        if access.autoReceive { return "기억한 에이전트 기다리는 중" }
         return access.pair != nil ? "연결됨 · 대본 받기 꺼짐" : "연결 안 됨"
     }
 
@@ -175,20 +177,27 @@ struct ExplainWorkspace: View {
             HStack(alignment: .top) {
                 mcpSetup
                 Spacer(minLength: 8)
-                Button(access.receiving ? "받기 끄기" : access.waitingForReceiveHelper ? "연결 취소" : "연결 켜기") {
+                if access.autoReceive, access.pair == nil, !access.waitingForReceiveHelper {
+                    Button("새 에이전트 허용") { access.allowNewAgent() }
+                        .disabled(access.locked)
+                        .help("아직 기억하지 않은 에이전트 한 곳이 잠시 동안 연결할 수 있게 합니다.")
+                }
+                Button(access.autoReceive || access.receiving ? "받기 끄기" : "연결 켜기") {
                     AppDelegate.shared?.toggleDraftReceipt()
                 }
-                .disabled(!access.pairingSupported)
-                .help(access.receiving ? "대본 받기와 지시 공유를 끕니다. 에이전트와의 연결은 유지됩니다."
-                      : "에이전트가 대본을 보낼 수 있게 합니다. 켠 뒤 처음 연결하는 에이전트 한 곳과 연결됩니다.")
-                if access.pair != nil {
-                    Button("연결 해제") { access.disconnect() }
-                        .help("지금 연결된 에이전트를 끊습니다. 다른 에이전트를 연결하려면 다시 켜세요.")
-                }
+                .disabled(!access.pairingSupported || (access.locked && !access.autoReceive))
+                .help(access.autoReceive || access.receiving
+                      ? "대본 받기와 지시 공유를 지금 끕니다. 다시 켤 때까지 기억한 에이전트도 연결되지 않습니다."
+                      : "에이전트가 대본을 보낼 수 있게 합니다. 기억한 에이전트는 바로 연결되고, 새 에이전트는 켠 뒤 처음 연결하는 한 곳만 기억합니다.")
+            }
+            if let waiting = access.awaitingApproval, access.pair == nil, !access.waitingForReceiveHelper {
+                Label("‘\(waiting)’ 에이전트가 연결을 기다립니다. 허용하려면 \(access.autoReceive ? "‘새 에이전트 허용’" : "‘연결 켜기’")을 누르세요.",
+                      systemImage: "person.crop.circle.badge.questionmark")
+                    .font(.caption).foregroundStyle(.orange)
             }
             if let pair = access.pair {
                 // Supplementary only: the helper is verified, the program that launched it is not.
-                Text("연결 상대: \(pair.hostPath.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "알 수 없는 프로그램") · PID \(String(pair.peer.pid))")
+                Text("연결 상대: \(pair.label) · \(pair.hostPath.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "알 수 없는 프로그램") · PID \(String(pair.peer.pid))\(pair.persistent ? "" : " · 이번 실행만")")
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                     .help(pair.hostPath ?? "MCP 도우미를 실행한 프로그램의 경로를 확인할 수 없습니다.")
             }
@@ -212,9 +221,40 @@ struct ExplainWorkspace: View {
                 Label(notice, systemImage: "tray.and.arrow.down").font(.caption).foregroundStyle(.orange)
             }
             if !access.status.isEmpty { Text(access.status).font(.caption).foregroundStyle(.orange) }
+            if !access.trusted.isEmpty { trustedAgents }
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("agent-connection-section")
+    }
+
+    /// Approved once, reconnects without asking. Forgetting is the only way an
+    /// approval ends early, so it sits next to each name.
+    private var trustedAgents: some View {
+        DisclosureGroup("기억한 에이전트 \(access.trusted.count)곳") {
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(access.trusted) { client in
+                    HStack {
+                        Text(client.label).font(.caption)
+                        Text("\(Self.hostName(client.host)) · 마지막 연결 \(client.lastSeen.formatted(date: .abbreviated, time: .shortened))")
+                            .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                        Spacer(minLength: 8)
+                        Button("잊기") { access.forget(client.id) }
+                            .controlSize(.small)
+                            .accessibilityLabel("\(client.label) 잊기")
+                            .help("이 에이전트를 지금 끊고, 다시 승인하기 전에는 연결하지 못하게 합니다.")
+                    }
+                }
+                Text("기억한 에이전트는 받기가 켜져 있으면 다시 묻지 않고 연결됩니다. 30일 동안 연결이 없으면 다시 승인해야 합니다.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .font(.caption)
+        .accessibilityIdentifier("agent-trusted-clients")
+    }
+
+    private static func hostName(_ host: String) -> String {
+        if host.hasPrefix("path:") { return URL(fileURLWithPath: String(host.dropFirst(5))).lastPathComponent }
+        return host.split(separator: ":").dropFirst().first.map(String.init) ?? "알 수 없는 프로그램"
     }
 
     private var instruction: some View {

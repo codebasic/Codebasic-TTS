@@ -93,6 +93,7 @@ def main(preview):
         compile_env = {**env, "SDKROOT":sdk, "CLANG_MODULE_CACHE_PATH":str(BUILD/"module-cache")}
         common = [runtime, SOURCES/"App/AgentPeerSigning.swift", SOURCES/"Core/AgentCatalog.swift"]
         server_src = [SOURCES/"App/LocalInstructionSocket.swift", SOURCES/"App/AgentSessionController.swift",
+                      SOURCES/"Core/AgentTrustStore.swift",
                       SOURCES/"Core/AgentDeliveryProofs.swift", SOURCES/"Core/ExplanationDraftWorkspace.swift",
                       SOURCES/"Core/AgentInstructionEditing.swift",
                       HERE / "LocalExplanationDraftSocketProbe.swift"]
@@ -412,14 +413,16 @@ def main(preview):
                 if index == 6:
                     assert json.loads(command(server, "snapshot"))["editor"] == "document 6"
                     print("unedited burst: closing one tab permits the same-key retry and opens the latest draft")
+            assert command(server, "close-tab 0") == "ok"
+            assert command(server, "disable") == "ok" and command(server, "enable") == "ok"
             assert call(a,"submit_tts_draft",idempotency_key="overflow",
-                        display_text="overflow")["structuredContent"]["status"] == "session_limit"
-            assert call(a,"submit_tts_draft",idempotency_key="key-0",
-                        display_text="document 0")["structuredContent"]["status"] == "duplicate"
-            assert "Retry key already used" in message(call(a,"submit_tts_draft",idempotency_key="key-0",
+                        display_text="overflow")["structuredContent"]["status"] == "accepted"
+            assert call(a,"submit_tts_draft",idempotency_key="key-1",
+                        display_text="document 1")["structuredContent"]["status"] == "duplicate"
+            assert "Retry key already used" in message(call(a,"submit_tts_draft",idempotency_key="key-1",
                                                            display_text="different"))
             assert command(server, "end") == "ok"
-            print("bounded key ledger: capacity blocks new keys and still remembers the first successful key")
+            print("bounded key ledger: a long connection keeps accepting new keys and remembers the most recent 128")
             print("signed stdio MCP: no-profile first receipt, wrong helper and restart disabled, bounded inputs, idempotency, linked/stale scope, dirty tabs, exact revert and no playback")
         finally:
             for proc in process: stop(proc)
