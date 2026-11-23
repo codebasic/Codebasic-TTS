@@ -17,6 +17,10 @@ enum AgentLimits {
     /// Most recent delivery keys remembered per client for duplicate detection.
     static let receiptKeys = 128
     static let frameBytes = 100 * 1024
+    /// A draft's list title: user-perceived characters, and bytes as a backstop
+    /// against long combining sequences.
+    static let titleCharacters = 120
+    static let titleBytes = 512
 }
 
 /// Compiled into both ends. The helper signs these bytes with its client key;
@@ -44,6 +48,22 @@ enum AgentBytes {
     static func textValid(_ text: String) -> Bool {
         text.utf8.count <= AgentLimits.textBytes && !text.utf8.contains(0)
             && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    enum Title: Equatable { case absent, valid(String), invalid }
+
+    /// A missing or blank title is simply absent. Anything else is kept whole
+    /// or refused whole; it is never shortened to fit.
+    static func title(_ input: String?) -> Title {
+        guard let input else { return .absent }
+        let title = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        if title.isEmpty { return .absent }
+        guard title.count <= AgentLimits.titleCharacters, title.utf8.count <= AgentLimits.titleBytes,
+              // Control codes and line breaks only. Format characters stay: joined
+              // emoji and several scripts need them.
+              title.unicodeScalars.allSatisfy({ $0.properties.generalCategory != .control && !CharacterSet.newlines.contains($0) })
+        else { return .invalid }
+        return .valid(title)
     }
 
     static func label(_ input: String) -> String? {

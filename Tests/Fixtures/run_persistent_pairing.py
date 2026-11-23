@@ -54,8 +54,9 @@ def korean(size):
 
 
 class Server:
-    def __init__(self, root, env, ipc, trust, waiting=90000):
-        self.proc = subprocess.Popen([str(root / "server"), ipc, str(root / "helper"), str(waiting), str(trust)],
+    def __init__(self, root, env, ipc, trust, waiting=90000, database=None):
+        self.proc = subprocess.Popen([str(root / "server"), ipc, str(root / "helper"), str(waiting), str(trust),
+                                      *([str(database)] if database else [])],
                                      cwd=root, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=subprocess.DEVNULL, text=True)
         assert self._line() == "ready"
@@ -106,7 +107,7 @@ def build(root):
     common = [runtime, SOURCES / "App/AgentPeerSigning.swift", SOURCES / "Core/AgentCatalog.swift"]
     server = [SOURCES / "App/LocalInstructionSocket.swift", SOURCES / "App/AgentSessionController.swift",
               SOURCES / "Core/AgentTrustStore.swift", SOURCES / "Core/AgentDeliveryProofs.swift",
-              SOURCES / "Core/ExplanationDraftWorkspace.swift", SOURCES / "Core/AgentInstructionEditing.swift",
+              SOURCES / "Core/ExplanationDraftWorkspace.swift", SOURCES / "Core/DraftStore.swift", SOURCES / "Core/AgentInstructionEditing.swift",
               HERE / "LocalExplanationDraftSocketProbe.swift"]
     for name, identifier, files in (("helper", APP_ID + ".agent-helper", [helper_src]), ("server", APP_ID, server),
                                     ("other", APP_ID + ".agent-helper", [other_src])):
@@ -142,7 +143,7 @@ def main(real_idle):
             return session
 
         def app(first_launch=False):
-            server = Server(root, server_env, ipc, trust)
+            server = Server(root, server_env, ipc, trust, database=root / "drafts.sqlite")
             assert server("pair") == "ok" and server("configure") == "ok"   # app launch: no click
             return server
 
@@ -232,9 +233,12 @@ def main(real_idle):
             server = app()
             assert a.status() == "receiving_only"
             assert a.send("after-app-kill", "앱 비정상 종료 뒤 대본")["status"] == "accepted"
-            assert a.send("after-app-quit", "앱 재시작 뒤 대본")["status"] == "accepted"
-            ok("app restart: clean quit and SIGKILL both resume the same pairing with no click")
-            print("LIMIT duplicate detection does not survive an app restart: the same key and body opened a second document")
+            before = server.documents()
+            assert a.send("after-app-quit", "앱 재시작 뒤 대본")["status"] == "duplicate"
+            assert a.send("turn-0", texts[0])["status"] == "duplicate" and a.send("turn-0", "다른 본문")["status"] == "conflict"
+            assert server.documents() == before and len(before) == 7
+            ok("app restart: clean quit and SIGKILL both resume the same pairing with no click; stored drafts are all back "
+               "and still answer duplicate/conflict for their keys")
 
             assert server("lock") == "ok"
             assert a.status() == "locked"
@@ -360,9 +364,10 @@ def main(real_idle):
             shot = server.snapshot()
             assert shot["dirty"][:len(sent)] == edited["dirty"] and any(shot["dirty"])
             assert a.send("sixth", "여섯 번째")["status"] == "accepted"
-            blocked = a.send("overflow", "넘치는 대본")
-            assert blocked["status"] == "busy" and len(server.documents()) == 6 and any(server.snapshot()["dirty"])
-            ok("lost reply: one retry on the same connection with a new request id is a duplicate; edits kept, a full editor refuses instead of discarding")
+            assert server("disable") == "ok" and server("enable") == "ok"
+            assert a.send("seventh", "일곱 번째")["status"] == "accepted"
+            assert len(server.documents()) == 7 and any(server.snapshot()["dirty"])
+            ok("lost reply: one retry on the same connection with a new request id is a duplicate; edits kept, and a seventh draft is stored beside them")
             print(f"approvals clicked in total: {clicks} (first pairing, after key loss, after forget)")
         finally:
             for session in opened:

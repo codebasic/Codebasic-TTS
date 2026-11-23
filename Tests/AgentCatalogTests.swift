@@ -162,21 +162,17 @@ enum CodeExplanation { static let noChange = "변경 없음" }
         precondition(documents.activeDocumentID == nil && documents.documentTabs.isEmpty && !documents.hasEditorContent)
 
         let limits = ExplanationDraftWorkspace()
-        precondition(limits.receiveBlock() == nil && limits.unseenArrivals == 0)
+        precondition(limits.unseenArrivals == 0)
         limits.editDisplay(String(repeating: "가", count: 90 * 1024))
-        precondition(limits.receiveBlock() == .bytes && limits.receiveDocument(first) == .busy && !limits.newDocument())
+        precondition(limits.newDocument())   // a large open text no longer blocks anything
         limits.editDisplay("짧은 글")
         precondition(limits.receiveDocument(first) == .accepted && limits.unseenArrivals == 1 && limits.arrivalNotice != nil)
         limits.editDisplay(first.display + " 수정", pasted: true)
         precondition(limits.origin == .received && limits.arrivalNotice == nil)
         limits.markArrivalsSeen()
         precondition(limits.unseenArrivals == 0 && limits.arrivalCount == 1)
-        for index in 0..<4 {
-            precondition(limits.receiveDocument(ExplanationDraft(id: "fill\(index)", display: "채움 \(index)", speech: nil)!) == .accepted)
-        }
-        precondition(limits.receiveBlock() == .documents && limits.documentTabs.count == ExplanationDraftWorkspace.maxDocuments)
+        try draftHistory(directory)
         print("Agent documents: revert, playback and close are pinned to their document; a lone received document can be closed or left for a new one")
-        print("Agent documents: an oversized open text and a full tab bar are reported as different receive blocks")
         print("Agent documents: an untitled editor keeps its identity when parked; stale clear cannot affect a receipt")
         print("Agent documents: sole parked edited tab remains visible after clearing the active manual document and reopens with both edits intact")
         print("Agent catalog: atomic persistence/failure, stable identity, oversized preservation, exact generations, proof cap/epoch/TTL, rate, speech guard passed")
@@ -241,6 +237,100 @@ enum CodeExplanation { static let noChange = "변경 없음" }
         _ = try a.save(label: "recovered", body: "safe new entry")
         precondition(AgentCatalog(url: url).records.count == 2)
         print("Catalog: actual second process, separate edits, stale edit/delete, lock busy/retry, external revision delivery guard, corrupt file preservation, and label filter passed")
+    }
+
+    /// Titles, the unlimited stored list, and what survives a restart.
+    @MainActor static func draftHistory(_ directory: URL) throws {
+        // Title rules: kept whole or refused whole.
+        precondition(AgentBytes.title(nil) == .absent && AgentBytes.title("  \n ") == .absent)
+        precondition(AgentBytes.title("  수업 정리 🎧  ") == .valid("수업 정리 🎧"))
+        let family = "👨‍👩‍👧‍👦"   // one character, 25 bytes
+        precondition(AgentBytes.title(String(repeating: "가", count: AgentLimits.titleCharacters)) != .invalid)
+        precondition(AgentBytes.title(String(repeating: "가", count: AgentLimits.titleCharacters + 1)) == .invalid)
+        precondition(AgentBytes.title(String(repeating: family, count: 20)) != .invalid)
+        precondition(AgentBytes.title(String(repeating: family, count: 21)) == .invalid)   // 525 bytes
+        precondition(AgentBytes.title("e\u{301}" + String(repeating: "\u{301}", count: 300)) == .invalid)   // one character, too many bytes
+        precondition(AgentBytes.title("두 줄\n제목") == .invalid && AgentBytes.title("탭\t문자") == .invalid)
+        precondition(ExplanationDraft(id: "t", display: "본문", speech: nil, title: "두 줄\n제목") == nil)
+
+        let body = "본문 첫 줄입니다.\n둘째 줄", spoken = "읽을 글"
+        let titled = ExplanationDraft(id: "k1", display: body, speech: spoken, title: " 제목만 다른 글 ")!
+        let plain = ExplanationDraft(id: "k1", display: body, speech: spoken)!
+        let blank = ExplanationDraft(id: "k1", display: body, speech: spoken, title: "   ")!
+        precondition(titled.title == "제목만 다른 글" && plain.title == nil && blank.title == nil)
+        precondition(titled.fingerprintHex != plain.fingerprintHex && blank.fingerprintHex == plain.fingerprintHex)
+
+        let url = directory.appendingPathComponent("drafts.sqlite")
+        func open() -> ExplanationDraftWorkspace { ExplanationDraftWorkspace(store: SQLiteDraftStore(url: url)!) }
+        var work = open()
+        precondition(work.documentTabs.isEmpty)
+        precondition(work.receiveDocument(titled) == .accepted)
+        var attributes = stat()
+        precondition(stat(url.path, &attributes) == 0 && attributes.st_mode & 0o777 == 0o600)
+        // The title names the document and appears nowhere in what is edited, copied or read.
+        precondition(work.documentTabs.map(\.title) == ["제목만 다른 글"])
+        precondition(work.display == body && work.speech == spoken && !work.display.contains("제목만"))
+        work.confirmSpeech()
+        precondition(work.playback()! == (body, spoken) && work.playback(displayOnly: true)! == (body, body))
+        // Same key: identical is one document; another title or body is a conflict, never an edit.
+        precondition(work.receiveDocument(titled) == .duplicate)
+        precondition(work.receiveDocument(plain) == .conflict)
+        precondition(work.receiveDocument(ExplanationDraft(id: "k1", display: "다른 본문", speech: spoken, title: "제목만 다른 글")!) == .conflict)
+        precondition(work.documentTabs.count == 1 && work.display == body)
+        // Same title under different keys stays two documents.
+        precondition(work.receiveDocument(ExplanationDraft(id: "k2", display: "또 다른 본문", speech: nil, title: "제목만 다른 글")!) == .accepted)
+        // No title: the first line that is not blank stands in, and old clients keep working.
+        precondition(work.receiveDocument(ExplanationDraft(id: "k3", display: "\n   \n  대체 제목 줄  \n본문", speech: nil)!) == .accepted)
+        precondition(work.documentTabs.map(\.title) == ["제목만 다른 글", "제목만 다른 글", "대체 제목 줄"])
+
+        // Editing one document, browsing another, and coming back.
+        work.selectDocument("k1")
+        work.editDisplay(body + " 수정")
+        work.selectDocument("k3")
+        precondition(work.documentTabs.map(\.dirty) == [true, false, false])
+        work.selectDocument("k1")
+        precondition(work.display == body + " 수정" && work.canRevertReceived && work.activeOriginal?.display == body)
+
+        // While the user is searching the list, an arrival is listed but does not take the editor.
+        work.browsing = true
+        precondition(work.receiveDocument(ExplanationDraft(id: "k4", display: "검색 중 도착", speech: nil, title: "늦게 온 글")!) == .accepted)
+        precondition(work.activeDocumentID == "k1" && work.display == body + " 수정")
+        precondition(work.documentTabs.last?.unseen == true && work.arrivalNotice != nil)
+        work.browsing = false
+        work.selectDocument("k4")
+        precondition(work.display == "검색 중 도착" && work.documentTabs.last?.unseen == false)
+        work.selectDocument("k1")
+
+        // Far beyond the old six: nothing is refused, closed or overwritten.
+        for number in 0..<150 {
+            let next = ExplanationDraft(id: "bulk-\(number)", display: "연속 수신 \(number)", speech: nil, title: number % 2 == 0 ? "묶음 \(number)" : nil)!
+            precondition(work.receiveDocument(next) == .accepted)
+        }
+        precondition(work.documentTabs.count == 154 && work.activeDocumentID == "bulk-149")
+        work.selectDocument("k1")
+        work.flush()
+
+        // A restarted app: same list, same order, the edit, the original, and the open document.
+        work = open()
+        precondition(work.documentTabs.count == 154 && work.activeDocumentID == "k1")
+        precondition(work.display == body + " 수정" && work.activeOriginal?.display == body && work.activeOriginal?.title == "제목만 다른 글")
+        precondition(work.documentTabs.prefix(4).map(\.title) == ["제목만 다른 글", "제목만 다른 글", "대체 제목 줄", "늦게 온 글"])
+        precondition(work.documentTabs[5].title == "연속 수신 1" && work.documentTabs.first?.dirty == true)
+        // The stored original still answers for its key.
+        precondition(work.receiveDocument(titled) == .duplicate && work.receiveDocument(plain) == .conflict)
+        work.revertReceivedDocument()
+        precondition(work.display == body && !work.canRevertReceived)
+        work.closeInactiveDocument("k2")
+        work = open()
+        precondition(work.documentTabs.count == 153 && !work.documentTabs.contains { $0.id == "k2" } && work.display == body)
+
+        // A draft that cannot be stored is refused and changes nothing.
+        let memory = MemoryDraftStore()
+        let failing = ExplanationDraftWorkspace(store: memory)
+        failing.editDisplay("쓰던 글")
+        memory.failWrites = true
+        precondition(failing.receiveDocument(titled) == .busy && failing.display == "쓰던 글" && failing.unseenArrivals == 0)
+        print("Draft history: title rules, title kept out of body and playback, key duplicate/conflict, fallback title, 154 documents, search-time arrival, restart restore, storage failure passed")
     }
 
     /// Approval record rules, with real P-256 signatures and a controllable clock.

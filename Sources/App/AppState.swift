@@ -88,7 +88,12 @@ final class AppState: ObservableObject {
     }
 
     // External workspace is never connected to the legacy generator buffers.
-    let explanationDrafts = ExplanationDraftWorkspace()
+    /// Received and written drafts are kept in a private database, so the list
+    /// is not limited by memory and survives a restart. Without a usable file the
+    /// list still works for this run.
+    let explanationDrafts = ExplanationDraftWorkspace(
+        store: SQLiteDraftStore(url: TTSRuntime.applicationSupport().appendingPathComponent("drafts.sqlite"))
+            ?? MemoryDraftStore())
     let agentCatalog = AgentCatalog(url: URL(fileURLWithPath: Secrets.appSupportDir)
         .appendingPathComponent("agent-instructions-v1.json"))
     let agentAccess = AgentSessionController()

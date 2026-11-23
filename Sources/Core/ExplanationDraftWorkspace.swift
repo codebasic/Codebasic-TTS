@@ -3,19 +3,27 @@ import CryptoKit
 import Foundation
 
 /// The payload of a receive-only operation. The user may edit or discard it later.
-struct ExplanationDraft: Identifiable, Sendable {
+struct ExplanationDraft: Identifiable, Sendable, Codable {
     static let maxTextBytes = 8 * 1024
     let id: String
     let display: String
     let speech: String?
     let provenance: AgentDraftOrigin?
+    /// A name for lists and headers only. It is never put into `display` or
+    /// `speech`, so it is never edited, copied, captioned or read aloud.
+    let title: String?
     var displayHash: String { AgentBytes.hash(Data(display.utf8)) }
 
-    init?(id: String, display: String, speech: String?, provenance: AgentDraftOrigin? = nil) {
+    init?(id: String, display: String, speech: String?, provenance: AgentDraftOrigin? = nil, title: String? = nil) {
         guard (1...128).contains(id.utf8.count),
               id.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0)
                   || (97...122).contains($0) || $0 == 45 || $0 == 46 || $0 == 95 }),
               Self.validText(display), speech.map(Self.validText) ?? true else { return nil }
+        switch AgentBytes.title(title) {
+        case .absent: self.title = nil
+        case .valid(let value): self.title = value
+        case .invalid: return nil
+        }
         self.id = id
         self.display = display
         self.speech = speech
@@ -31,74 +39,67 @@ struct ExplanationDraft: Identifiable, Sendable {
         // The separator cannot occur in either field. Missing speech is distinct
         // from every valid (nonblank) supplied speech string.
         let scope = provenance.map { "\($0.principal.uuidString)\0\($0.selector)\0\($0.revision.uuidString)\0" } ?? ""
-        return SHA256.hash(data: Data((scope + display + "\0" + (speech ?? "")).utf8))
+        // A title is part of what was sent: the same key with another title is a conflict.
+        let named = title.map { "\0\0" + $0 } ?? ""
+        return SHA256.hash(data: Data((scope + display + "\0" + (speech ?? "") + named).utf8))
     }
+
+    var fingerprintHex: String { fingerprint.map { String(format: "%02x", $0) }.joined() }
 }
 
-/// Owns only in-memory drafts and the editable selection. No provider dependency.
+/// Owns the editable selection and the list of documents. The document in the
+/// editor is in memory; every other one is in the store, so the list has no size
+/// limit and comes back after a restart. No provider dependency.
 @MainActor
 final class ExplanationDraftWorkspace: ObservableObject {
     enum Receipt: String { case accepted, duplicate, conflict, busy }
-    enum Origin: String {
+    enum Origin: String, Codable {
         case manual = "직접 입력"
         case pasted = "붙여넣음"
         case received = "받은 대본"
     }
 
-    struct DocumentTab: Identifiable {
-        let id: String
-        let title: String
-        let dirty: Bool
-    }
+    typealias DocumentTab = DraftSummary
 
-    private struct ParkedDocument {
-        let original: ExplanationDraft?
-        let display: String
-        let speech: String
-        let speechNeedsReview: Bool
-        let confirmedDisplayHash: String?
-        let confirmedSpeechHash: String?
-        let provenance: AgentDraftOrigin?
-        let origin: Origin?
-        let hasManualEdits: Bool
-
-        var dirty: Bool {
-            guard let original else { return !display.isEmpty || !speech.isEmpty }
-            return !AgentBytes.same(display, original.display) || !AgentBytes.same(speech, original.speech ?? "")
-        }
-    }
-
-    static let maxDocuments = 6
-    private static let maxParkedBytes = 256 * 1024
     @Published private(set) var activeDocumentID: String?
     @Published private(set) var activeOriginal: ExplanationDraft?
-    @Published private var parked: [String: ParkedDocument] = [:]
-    @Published private var tabOrder: [String] = []
+    /// Arrival order, oldest first. The active document's row is refreshed from the editor.
+    @Published private var index: [DraftSummary] = []
+    /// While the user is searching the list, a new draft is added to it without
+    /// taking over the editor.
+    @Published var browsing = false
     private var untitledDocumentID = UUID().uuidString
+    private var activeCreatedAt = Date()
+    private let store: DraftStoring
+    private var saveTask: Task<Void, Never>?
 
-    var editorDocumentID: String { activeDocumentID ?? untitledDocumentID }
-    var hasInactiveDocuments: Bool { !parked.isEmpty }
-    var canRevertReceived: Bool { activeOriginal != nil && capturedDocument.dirty }
-    var activeDocumentIsDirty: Bool { capturedDocument.dirty }
-    /// Every open document, including a not-yet-parked manual one with content.
-    var documentTabs: [DocumentTab] {
-        let active = editorDocumentID
-        let ids = tabOrder.contains(active) || !hasEditorContent ? tabOrder : tabOrder + [active]
-        return ids.compactMap { id in
-            let document = id == active ? capturedDocument : parked[id]
-            return document.map { value in
-                let heading = value.original?.display.split(whereSeparator: \.isNewline).first
-                let title = heading.map { String($0.prefix(32)) } ?? "직접 입력"
-                return DocumentTab(id: id, title: title, dirty: value.dirty)
-            }
-        }
+    init(store: DraftStoring = MemoryDraftStore()) {
+        self.store = store
+        index = store.summaries()
+        if let id = store.activeID, let document = store.load(id) { activate(id, document) }
     }
 
-    private var capturedDocument: ParkedDocument {
-        ParkedDocument(original: activeOriginal, display: display, speech: speech,
-                       speechNeedsReview: speechNeedsReview, confirmedDisplayHash: confirmedDisplayHash,
-                       confirmedSpeechHash: confirmedSpeechHash, provenance: provenance,
-                       origin: origin, hasManualEdits: hasManualEdits)
+    var editorDocumentID: String { activeDocumentID ?? untitledDocumentID }
+    var hasInactiveDocuments: Bool { index.contains { $0.id != editorDocumentID } }
+    var canRevertReceived: Bool { activeOriginal != nil && capturedDocument.dirty }
+    var activeDocumentIsDirty: Bool { capturedDocument.dirty }
+    /// Every document, oldest first, including a not-yet-listed manual one with content.
+    var documentTabs: [DocumentTab] {
+        let active = editorDocumentID
+        var rows = index.map { row in
+            row.id == active ? DraftSummary(id: active, document: capturedDocument) : row
+        }
+        if !rows.contains(where: { $0.id == active }), hasEditorContent {
+            rows.append(DraftSummary(id: active, document: capturedDocument))
+        }
+        return rows
+    }
+
+    private var capturedDocument: DraftDocument {
+        DraftDocument(original: activeOriginal, display: display, speech: speech,
+                      speechNeedsReview: speechNeedsReview, confirmedDisplayHash: confirmedDisplayHash,
+                      confirmedSpeechHash: confirmedSpeechHash, provenance: provenance,
+                      origin: origin, hasManualEdits: hasManualEdits, createdAt: activeCreatedAt)
     }
 
     static let maxPending = 8
@@ -130,27 +131,16 @@ final class ExplanationDraftWorkspace: ObservableObject {
     func setReceiver(_ pid: Int32?) { receiverPID = pid }
 
     func preflight(_ draft: ExplanationDraft) -> Receipt {
-        let retained = parked.values.compactMap(\.original) + [activeOriginal].compactMap { $0 }
-        let previous = recent[draft.id] ?? (retained + pending).first(where: { $0.id == draft.id })?.fingerprint
+        let listed = documentTabs.compactMap(\.fingerprint)
+        if let known = documentTabs.first(where: { $0.id == draft.id })?.fingerprint {
+            return known == draft.fingerprintHex ? .duplicate : .conflict
+        }
+        let previous = recent[draft.id] ?? pending.first(where: { $0.id == draft.id })?.fingerprint
         if let previous { return previous == draft.fingerprint ? .duplicate : .conflict }
-        if draft.provenance != nil && (recent.values.contains(draft.fingerprint)
-            || (retained + pending).contains(where: { $0.fingerprint == draft.fingerprint })) { return .duplicate }
+        if draft.provenance != nil && (recent.values.contains(draft.fingerprint) || listed.contains(draft.fingerprintHex)
+            || pending.contains(where: { $0.fingerprint == draft.fingerprint })) { return .duplicate }
         return pending.count < Self.maxPending ? .accepted : .busy
     }
-
-    enum ReceiveBlock { case documents, bytes }
-
-    /// Why another document cannot be opened beside the current ones, if it cannot.
-    /// The two causes need different recovery: closing a tab does not help when the
-    /// open text itself is too large to keep.
-    func receiveBlock() -> ReceiveBlock? {
-        guard parked.count + (shouldParkActiveDocument ? 2 : 1) <= Self.maxDocuments else { return .documents }
-        guard shouldParkActiveDocument else { return nil }
-        let bytes = parked.values.reduce(0) { $0 + $1.display.utf8.count + $1.speech.utf8.count }
-        return bytes + display.utf8.count + speech.utf8.count <= Self.maxParkedBytes ? nil : .bytes
-    }
-
-    func canReceiveDocument() -> Bool { receiveBlock() == nil }
 
     func markArrivalsSeen() {
         if unseenArrivals != 0 { unseenArrivals = 0 }
@@ -160,36 +150,69 @@ final class ExplanationDraftWorkspace: ObservableObject {
         if arrivalNotice != nil { arrivalNotice = nil }
     }
 
-    /// Live agent receipt updates the visible editor and never starts playback.
-    /// Keep every open document, including an unedited receipt, until explicitly closed.
+    /// Live agent receipt never starts playback and never closes, replaces or
+    /// trims another document. The new draft is written to the store first; if
+    /// that fails nothing else changes and the sender is told it was not taken.
     func receiveDocument(_ draft: ExplanationDraft) -> Receipt {
-        guard canReceiveDocument() else { return .busy }
+        if let known = documentTabs.first(where: { $0.id == draft.id }) {
+            // Also true after a restart: the stored original answers for its key.
+            return known.fingerprint == draft.fingerprintHex ? .duplicate : .conflict
+        }
+        let arrived = DraftDocument(original: draft, display: draft.display, speech: draft.speech ?? "",
+                                    speechNeedsReview: draft.speech.map { !AgentBytes.same(draft.display, $0) } ?? false,
+                                    provenance: draft.provenance, origin: .received, hasManualEdits: false)
+        guard store.save(draft.id, arrived) else { return .busy }
         let kept = shouldParkActiveDocument
-        parkActiveDocument()
-        installReceived(draft)
         unseenArrivals += 1
         arrivalCount += 1
-        arrivalNotice = kept ? "새 대본을 받았습니다. 보던 글은 탭에 그대로 있습니다." : "새 대본을 받았습니다."
+        if browsing && kept {
+            index.append(DraftSummary(id: draft.id, document: arrived, unseen: true))
+            arrivalNotice = "새 대본이 목록에 추가되었습니다. 보던 글은 그대로입니다."
+            return .accepted
+        }
+        parkActiveDocument()
+        index.append(DraftSummary(id: draft.id, document: arrived))
+        activate(draft.id, arrived)
+        arrivalNotice = kept ? "새 대본을 받았습니다. 보던 글은 목록에 그대로 있습니다." : "새 대본을 받았습니다."
         return .accepted
     }
 
+    /// Writes the document in the editor to the store and lists it.
     private func parkActiveDocument() {
+        saveTask?.cancel(); saveTask = nil
         guard shouldParkActiveDocument else { return }
-        let id = editorDocumentID
-        if !tabOrder.contains(id) { tabOrder.append(id) }
-        parked[id] = capturedDocument
+        let id = editorDocumentID, document = capturedDocument
+        // A failed write keeps the text in the editor's place in the list; the
+        // stored copy is then the older one.
+        _ = store.save(id, document)
+        let row = DraftSummary(id: id, document: document)
+        if let position = index.firstIndex(where: { $0.id == id }) { index[position] = row }
+        else { index.append(row) }
+    }
+
+    /// Makes what is on screen durable. Called shortly after edits and at quit.
+    func flush() { parkActiveDocument() }
+
+    private func scheduleSave() {
+        saveTask?.cancel()
+        saveTask = Task { [weak self] in
+            do { try await Task.sleep(for: .milliseconds(800)) } catch { return }
+            self?.flush()
+        }
     }
 
     func selectDocument(_ id: String) {
-        guard id != activeDocumentID, let next = parked.removeValue(forKey: id) else { return }
+        guard id != editorDocumentID, index.contains(where: { $0.id == id }), let next = store.load(id) else { return }
         parkActiveDocument()
         activate(id, next)
     }
 
-    private func activate(_ id: String, _ next: ParkedDocument) {
+    private func activate(_ id: String, _ next: DraftDocument) {
         arrivalNotice = nil
+        if let position = index.firstIndex(where: { $0.id == id }) { index[position].unseen = false }
         activeDocumentID = id
         activeOriginal = next.original
+        activeCreatedAt = next.createdAt
         display = next.display
         speech = next.speech
         speechNeedsReview = next.speechNeedsReview
@@ -198,28 +221,30 @@ final class ExplanationDraftWorkspace: ObservableObject {
         provenance = next.provenance
         origin = next.origin
         hasManualEdits = next.hasManualEdits
+        store.activeID = id
     }
 
     func closeInactiveDocument(_ id: String) {
-        guard id != activeDocumentID else { return }
-        parked.removeValue(forKey: id)
-        tabOrder.removeAll { $0 == id }
+        guard id != editorDocumentID else { return }
+        store.delete(id)
+        index.removeAll { $0.id == id }
     }
 
-    /// Closes the document in the editor, discarding its edits. The most recently
-    /// opened remaining document comes forward, or a blank one when none is left.
+    /// Closes the document in the editor, discarding it. The most recently
+    /// arrived remaining document comes forward, or a blank one when none is left.
     func closeActiveDocument(expectedDocumentID: String) {
         guard expectedDocumentID == editorDocumentID else { return }
-        tabOrder.removeAll { $0 == expectedDocumentID }
-        if let id = tabOrder.last, let next = parked.removeValue(forKey: id) { activate(id, next) }
+        saveTask?.cancel(); saveTask = nil
+        store.delete(expectedDocumentID)
+        index.removeAll { $0.id == expectedDocumentID }
+        if let id = index.last?.id, let next = store.load(id) { activate(id, next) }
         else { resetToBlank() }
     }
 
-    /// Keeps the current document in its tab and starts an empty manual one.
+    /// Keeps the current document in the list and starts an empty manual one.
     @discardableResult
     func newDocument() -> Bool {
         guard shouldParkActiveDocument else { return true }
-        guard canReceiveDocument() else { return false }
         parkActiveDocument()
         resetToBlank()
         return true
@@ -235,7 +260,6 @@ final class ExplanationDraftWorkspace: ObservableObject {
     private func installReceived(_ value: ExplanationDraft) {
         activeDocumentID = value.id
         activeOriginal = value
-        if !tabOrder.contains(value.id) { tabOrder.append(value.id) }
         display = value.display
         speech = value.speech ?? ""
         confirmedDisplayHash = nil
@@ -244,6 +268,8 @@ final class ExplanationDraftWorkspace: ObservableObject {
         provenance = value.provenance
         origin = .received
         hasManualEdits = false
+        parkActiveDocument()
+        store.activeID = value.id
     }
 
     private func recordReceipt(_ draft: ExplanationDraft) {
@@ -265,7 +291,11 @@ final class ExplanationDraftWorkspace: ObservableObject {
     func open(_ id: String, replace: Bool = false) -> Bool {
         guard (!hasEditorContent || replace), let index = pending.firstIndex(where: { $0.id == id }) else { return false }
         let value = pending.remove(at: index)
-        if let id = activeDocumentID { tabOrder.removeAll { $0 == id } }
+        if let old = activeDocumentID {
+            store.delete(old)
+            self.index.removeAll { $0.id == old }
+        }
+        activeCreatedAt = Date()
         installReceived(value)
         return true
     }
@@ -282,6 +312,7 @@ final class ExplanationDraftWorkspace: ObservableObject {
         if pasted { if activeOriginal == nil { origin = .pasted } }
         else if origin == nil { origin = .manual }
         hasManualEdits = !pasted
+        scheduleSave()
     }
 
     func editSpeech(_ value: String) {
@@ -294,12 +325,14 @@ final class ExplanationDraftWorkspace: ObservableObject {
         speechNeedsReview = nonblank && (speechNeedsReview || !AgentBytes.same(value, display))
         if origin == nil { origin = .manual }
         hasManualEdits = true
+        scheduleSave()
     }
 
     func confirmSpeech() {
         confirmedDisplayHash = AgentBytes.hash(Data(display.utf8))
         confirmedSpeechHash = AgentBytes.hash(Data(speech.utf8))
         speechNeedsReview = false
+        scheduleSave()
     }
 
     func clearEditor(expectedDocumentID: String) {
@@ -309,13 +342,17 @@ final class ExplanationDraftWorkspace: ObservableObject {
             editSpeech("")
             return
         }
-        if let id = activeDocumentID { tabOrder.removeAll { $0 == id } }
+        saveTask?.cancel(); saveTask = nil
+        store.delete(expectedDocumentID)
+        index.removeAll { $0.id == expectedDocumentID }
         resetToBlank()
     }
 
     private func resetToBlank() {
         arrivalNotice = nil
         untitledDocumentID = UUID().uuidString
+        activeCreatedAt = Date()
+        store.activeID = nil
         activeDocumentID = nil
         activeOriginal = nil
         display = ""

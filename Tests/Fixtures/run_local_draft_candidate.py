@@ -62,7 +62,7 @@ def initialize(proc, server_name="codebasic-tts-agent"):
     res = rpc(proc, "initialize", {"protocolVersion":"2025-11-25", "capabilities":{}})
     assert res["serverInfo"]["name"] == server_name
     write(proc, '{"jsonrpc":"2.0","method":"notifications/initialized"}')
-    assert {t["name"] for t in rpc(proc, "tools/list")["tools"]} == {"tts_agent_status","get_tts_instructions","submit_explanation_draft","submit_tts_draft"}
+    assert {t["name"] for t in rpc(proc, "tools/list")["tools"]} == {"tts_agent_status","get_tts_submission_guide","get_tts_instructions","submit_explanation_draft","submit_tts_draft"}
 
 
 def command(proc, instruction):
@@ -94,7 +94,7 @@ def main(preview):
         common = [runtime, SOURCES/"App/AgentPeerSigning.swift", SOURCES/"Core/AgentCatalog.swift"]
         server_src = [SOURCES/"App/LocalInstructionSocket.swift", SOURCES/"App/AgentSessionController.swift",
                       SOURCES/"Core/AgentTrustStore.swift",
-                      SOURCES/"Core/AgentDeliveryProofs.swift", SOURCES/"Core/ExplanationDraftWorkspace.swift",
+                      SOURCES/"Core/AgentDeliveryProofs.swift", SOURCES/"Core/ExplanationDraftWorkspace.swift", SOURCES/"Core/DraftStore.swift",
                       SOURCES/"Core/AgentInstructionEditing.swift",
                       HERE / "LocalExplanationDraftSocketProbe.swift"]
         other_src = root / "Other.swift"
@@ -341,8 +341,13 @@ def main(preview):
                 assert call(a,"submit_tts_draft",**args)["structuredContent"]["status"] == "accepted"
                 assert command(server,"edit-document") == "ok"
                 assert command(server,"edit-speech") == "ok"
-            full = call(a,"submit_tts_draft",idempotency_key="cap-overflow",display_text="넘치는 문서")
-            assert full["isError"] and full["structuredContent"]["status"] == "busy"
+            # No document limit: a seventh arrives beside six edited ones and touches none of them.
+            assert command(server, "disable") == "ok" and command(server, "enable") == "ok"
+            seventh = call(a,"submit_tts_draft",idempotency_key="cap-overflow",display_text="일곱 번째 문서")
+            assert seventh["structuredContent"]["status"] == "accepted"
+            snapshot = json.loads(command(server,"snapshot"))
+            assert len(snapshot["tabs"]) == 7 and all(snapshot["dirty"][:6]) and not snapshot["dirty"][6]
+            assert command(server, "switch-tab 5") == "ok" and command(server, "close-tab 6") == "ok"
             snapshot = json.loads(command(server,"snapshot"))
             assert len(snapshot["tabs"]) == 6 and all(snapshot["dirty"])
             assert snapshot["editor"] == "직접 수정: 합성 문서 5"
@@ -399,20 +404,17 @@ def main(preview):
                     before = json.loads(command(server, "snapshot"))
                     assert before["tabs"] == [f"document {number}" for number in range(6)]
                     assert before["editor"] == "document 5" and not any(before["dirty"])
-                    full = call(a,"submit_tts_draft",idempotency_key="key-6",display_text="document 6")
-                    assert full["isError"] and full["structuredContent"]["status"] == "busy"
-                    assert json.loads(command(server, "snapshot")) == before
                     assert command(server, "switch-tab 0") == "ok"
                     assert json.loads(command(server, "snapshot"))["editor"] == "document 0"
                     assert command(server, "switch-tab 5") == "ok"
-                    print("unedited burst: six receipts remain open; seventh is busy and the first can still be opened")
+                    print("unedited burst: six receipts remain listed and the first can still be opened")
                 if index >= 6:
                     assert command(server, "close-tab 0") == "ok"
                 assert call(a,"submit_tts_draft",idempotency_key=f"key-{index}",
                             display_text=f"document {index}")["structuredContent"]["status"] == "accepted"
                 if index == 6:
                     assert json.loads(command(server, "snapshot"))["editor"] == "document 6"
-                    print("unedited burst: closing one tab permits the same-key retry and opens the latest draft")
+                    print("unedited burst: a seventh receipt is accepted and opens as the latest draft")
             assert command(server, "close-tab 0") == "ok"
             assert command(server, "disable") == "ok" and command(server, "enable") == "ok"
             assert call(a,"submit_tts_draft",idempotency_key="overflow",

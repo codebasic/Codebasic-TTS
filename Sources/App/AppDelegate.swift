@@ -214,6 +214,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        appState.explanationDrafts.flush()
         localSpeechSocket?.stop()
         revokeLocalInstructions()
         appState.agentAccess.stopPairing()

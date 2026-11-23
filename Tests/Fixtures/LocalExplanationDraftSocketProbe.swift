@@ -6,7 +6,7 @@ enum CodeExplanation { static let noChange = "변경 없음" }
 
 @MainActor final class AgentFixture {
     let access: AgentSessionController
-    let drafts = ExplanationDraftWorkspace()
+    let drafts: ExplanationDraftWorkspace
     let catalog = AgentCatalog(url: URL(fileURLWithPath: "catalog-\(UUID()).json"))
     let selector = "66666666-6666-4666-8666-666666666666"
     let original = "합성 지시 e\u{301}\n"
@@ -15,7 +15,9 @@ enum CodeExplanation { static let noChange = "변경 없음" }
     var clearDocumentID: String?
     let alternate = AgentInstructionSnapshot(selector: "continue", generation: UUID(), text: "두 번째 합성 지시")
 
-    init(directory: String, expectedHelper: String, wait: Duration, trust: String) {
+    init(directory: String, expectedHelper: String, wait: Duration, trust: String, database: String?) {
+        // With a database path this is the app's real stored list; without, memory only.
+        drafts = ExplanationDraftWorkspace(store: database.flatMap { SQLiteDraftStore(url: URL(fileURLWithPath: $0)) } ?? MemoryDraftStore())
         access = AgentSessionController(directory: directory, bundledHelper: {
             AgentPeerSigning.signedHash(at: URL(fileURLWithPath: expectedHelper))
         }, selectionWaiting: wait, trust: AgentTrustStore(url: URL(fileURLWithPath: trust)))
@@ -126,11 +128,19 @@ enum CodeExplanation { static let noChange = "변경 없음" }
                 "hosts": access.trusted.map(\.host), "persistent": access.pair?.persistent ?? false,
                 "awaiting": access.awaitingApproval ?? "", "status": access.status,
                 "tabs": drafts.documentTabs.map(\.title), "dirty": drafts.documentTabs.map(\.dirty),
+                "unseen": drafts.documentTabs.map(\.unseen), "activeTitle": drafts.activeOriginal?.title ?? "",
                 "canRevert": drafts.canRevertReceived, "original": drafts.activeOriginal?.display ?? "",
                 "associated": drafts.provenance?.selector ?? "",
             ]
             report(String(decoding: try! JSONSerialization.data(withJSONObject: body), as: UTF8.self))
-        case "end": access.stopPairing(); report("ok"); exit(0)
+        case "browse": drafts.browsing = pieces.last == "on"; report("ok")
+        case "flush": drafts.flush(); report("ok")
+        case "play":
+            // What either play button would hand to synthesis. Nothing is synthesized here.
+            drafts.confirmSpeech()
+            let both = [drafts.playback(), drafts.playback(displayOnly: true)].map { $0.map { [$0.display, $0.speech] } ?? [] }
+            report(String(decoding: try! JSONSerialization.data(withJSONObject: both), as: UTF8.self))
+        case "end": drafts.flush(); access.stopPairing(); report("ok"); exit(0)
         default: exit(2)
         }
     }
@@ -141,7 +151,8 @@ enum CodeExplanation { static let noChange = "변경 없음" }
         let fixture = AgentFixture(directory: CommandLine.arguments[1],
                                    expectedHelper: CommandLine.arguments.dropFirst(2).first ?? "helper",
                                    wait: .milliseconds(Int64(CommandLine.arguments.dropFirst(3).first ?? "90000") ?? 90000),
-                                   trust: CommandLine.arguments.dropFirst(4).first ?? "agent-clients-\(UUID()).json")
+                                   trust: CommandLine.arguments.dropFirst(4).first ?? "agent-clients-\(UUID()).json",
+                                   database: CommandLine.arguments.dropFirst(5).first)
         print("ready"); fflush(stdout)
         DispatchQueue.global().async {
             while let cmd = readLine() { DispatchQueue.main.async { fixture.command(cmd) } }

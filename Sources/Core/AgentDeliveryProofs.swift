@@ -1,6 +1,6 @@
 import Foundation
 
-struct AgentDraftOrigin: Equatable, Sendable {
+struct AgentDraftOrigin: Equatable, Sendable, Codable {
     let principal: UUID
     let agentLabel: String
     let selector: String

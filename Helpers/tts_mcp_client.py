@@ -16,7 +16,8 @@ on the same connection, with the same key and bytes and a new request id.
 Diagnostics hold states and byte counts only, never the draft text.
 
   tts_mcp_client.py --helper PATH status
-  tts_mcp_client.py --helper PATH send --key K --display-file F [--speech-file F]
+  tts_mcp_client.py --helper PATH guide
+  tts_mcp_client.py --helper PATH send --key K --display-file F [--speech-file F] [--title T]
 """
 import argparse
 import json
@@ -107,10 +108,18 @@ class Session:
         result = (reply or {}).get("result", {})
         return None if result.get("isError", True) else result.get("structuredContent")
 
+    def guide(self):
+        """The submission format as the helper describes it: fields, limits, examples, results."""
+        reply = self.call("get_tts_submission_guide")[1]
+        return (reply or {}).get("result", {}).get("structuredContent")
+
     def send(self, key, display, speech=None, profile=None, revision=None,
-             local_checks=True, discard_reply=False, timeout=8.0):
-        """One draft, one frame. `discard_reply` drops the answer, as a lost reply would."""
+             local_checks=True, discard_reply=False, timeout=8.0, title=None):
+        """One draft, one frame. `discard_reply` drops the answer, as a lost reply would.
+        `title` names the draft in the app's list only; it is never part of the text."""
         arguments = {"idempotency_key": key, "display_text": display}
+        if title is not None:
+            arguments["title"] = title
         if speech is not None:
             arguments["speech_text"] = speech
         tool = "submit_tts_draft"
@@ -176,13 +185,18 @@ def main():
     parser.add_argument("--client", help="name of this client's key slot (default: this program's MCP name)")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("status")
+    commands.add_parser("guide")
     send = commands.add_parser("send")
     send.add_argument("--key", required=True)
     send.add_argument("--display-file", required=True)
     send.add_argument("--speech-file")
+    send.add_argument("--title", help="name shown in the app's draft list only")
     options = parser.parse_args()
     session = Session(options.helper, options.client)
     try:
+        if options.command == "guide":
+            print(json.dumps(session.guide(), ensure_ascii=False, indent=2))
+            return 0
         state = session.status()
         if options.command == "status":
             print(json.dumps({"status": state, "limits": session.limits}))
@@ -194,7 +208,7 @@ def main():
             with open(options.speech_file, "rb") as handle:
                 speech = handle.read().decode("utf-8")
         instruction = session.read_instruction() if state == "ready" else None
-        report = session.send(options.key, display, speech,
+        report = session.send(options.key, display, speech, title=options.title,
                               profile=instruction and instruction["profile"],
                               revision=instruction and instruction["revision"])
         print(json.dumps({**report, "connection": state}))

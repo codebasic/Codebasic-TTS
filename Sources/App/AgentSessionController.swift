@@ -573,15 +573,19 @@ import Security
             let linkedKeys: Set<String> = ["profile", "revision", "body_sha256", "proof"]
             var keys = Set(request.keys)
             keys.remove("speech_text")
+            keys.remove("title")
             let linked = keys == base.union(linkedKeys)
             guard (linked || keys == base),
                   let clientKey = request["idempotency_key"] as? String,
                   let display = request["display_text"] as? String,
                   (request["speech_text"] == nil || request["speech_text"] is String),
-                  ExplanationDraft(id: clientKey, display: display, speech: request["speech_text"] as? String) != nil else {
+                  (request["title"] == nil || request["title"] is String),
+                  ExplanationDraft(id: clientKey, display: display, speech: request["speech_text"] as? String,
+                                   title: request["title"] as? String) != nil else {
                 return Self.reply("invalid")
             }
             let speech = request["speech_text"] as? String
+            let title = request["title"] as? String
             let response = Reply()
             let signal = DispatchSemaphore(value: 0)
             let responseDeadline = DispatchTime.now() + .milliseconds(750)
@@ -616,33 +620,31 @@ import Security
                 }
                 let scopedKey = AgentBytes.hash(Data((pair.client.uuidString + "\0" + clientKey).utf8))
                 guard let draft = ExplanationDraft(id: scopedKey, display: display, speech: speech,
-                                                   provenance: origin) else {
+                                                   provenance: origin, title: title) else {
                     response.set("invalid"); return
                 }
                 let fingerprint = draft.fingerprint
                 if let previous = self.receiptKeys[pair.client]?.first(where: { $0.key == clientKey }) {
                     response.set(previous.digest == fingerprint ? "duplicate" : "conflict"); return
                 }
-                switch workspace.receiveBlock() {
-                case .documents:
-                    self.receiptNotice = "열린 대본이 \(ExplanationDraftWorkspace.maxDocuments)개라 새 대본을 받지 않았습니다. 탭을 닫으면 에이전트가 다시 보낼 수 있습니다."
-                    response.set("busy"); return
-                case .bytes:
-                    self.receiptNotice = "열어 둔 글이 너무 커서 새 대본을 받지 않았습니다. 글을 줄이거나 다른 곳에 옮긴 뒤 다시 받으세요."
-                    response.set("editor_full"); return
-                case nil: break
-                }
                 guard self.rate.canAccept() else {
                     self.receiptNotice = "대본이 너무 자주 와서 잠시 받지 않았습니다."
                     response.set("rate_limited"); return
                 }
                 let result = workspace.receiveDocument(draft)
-                if result == .accepted {
+                if result == .busy {
+                    self.receiptNotice = "새 대본을 저장하지 못해 받지 않았습니다. 디스크 공간을 확인하세요."
+                }
+                if result == .accepted || result == .duplicate {
+                    // A stored document also answers for its key after an app restart;
+                    // remember it here so the answer stays the same if it is closed.
                     var known = self.receiptKeys[pair.client] ?? []
                     known.append((clientKey, fingerprint))
                     // Oldest keys fall out, so a connection kept open all day never fills up.
                     if known.count > AgentLimits.receiptKeys { known.removeFirst(known.count - AgentLimits.receiptKeys) }
                     self.receiptKeys[pair.client] = known
+                }
+                if result == .accepted {
                     self.rate.mark()
                     self.receiptNotice = nil
                 }

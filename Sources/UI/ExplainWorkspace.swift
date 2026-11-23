@@ -23,6 +23,9 @@ struct ExplainWorkspace: View {
     @State private var confirmEditorChange = false
     @State private var instructionEdits = AgentInstructionEditBuffer()
     @State private var copiedMCPClient: String?
+    @AppStorage("draftHistoryOpen") private var historyOpen = true
+    @State private var historySearch = ""
+    @State private var historyAnchor: String?
 
     private var sharingSelection: String { access.instructionScope ?? "" }
     private var editorSelection: String? {
@@ -88,7 +91,18 @@ struct ExplainWorkspace: View {
             VStack(alignment: .leading, spacing: 0) {
                 connection.padding()
                 Divider()
+                GeometryReader { area in
+                // Beside the editor when there is room. With the instruction panel
+                // open in a narrow window the list folds away rather than squeeze either.
+                let showHistory = historyOpen && (!showInstructions || area.size.width >= 900)
                 HStack(alignment: .top, spacing: 0) {
+                    if showHistory {
+                        history.padding(10).frame(width: 230)
+                        Divider()
+                    } else {
+                        historyHandle.padding(.vertical, 10).padding(.horizontal, 4)
+                        Divider()
+                    }
                     ScrollView {
                         VStack(alignment: .leading, spacing: 12) {
                             editor
@@ -107,6 +121,7 @@ struct ExplainWorkspace: View {
                         }
                         .frame(width: 337)
                     }
+                }
                 }
             }
             .onAppear { _ = catalog.refresh() }
@@ -135,7 +150,7 @@ struct ExplainWorkspace: View {
                 Button("취소", role: .cancel) { removeProfile = nil }
             } message: {
                 Text(removeProfile.flatMap { instructionEdits.drafts[$0.selector] } == nil
-                     ? "이미 받은 대본은 열린 탭에 그대로 남지만, 이 지시 버전의 새 대본은 받을 수 없습니다."
+                     ? "이미 받은 대본은 목록에 그대로 남지만, 이 지시 버전의 새 대본은 받을 수 없습니다."
                      : "이 지시의 저장하지 않은 변경도 함께 사라집니다. 이미 받은 대본은 그대로 남습니다.")
             }
             .confirmationDialog(editorChange?.question ?? "", isPresented: $confirmEditorChange,
@@ -512,8 +527,12 @@ struct ExplainWorkspace: View {
     private var editor: some View {
         let documentID = drafts.editorDocumentID
         return VStack(alignment: .leading, spacing: 8) {
-            Text("대본").font(.headline).accessibilityAddTraits(.isHeader)
-            if !drafts.documentTabs.isEmpty { documentTabs }
+            // The title names the document; it is not part of the text below.
+            Text(verbatim: drafts.documentTabs.first { $0.id == documentID }?.title ?? "새 대본")
+                .font(.headline).lineLimit(1).truncationMode(.tail)
+                .help(drafts.documentTabs.first { $0.id == documentID }?.title ?? "새 대본")
+                .accessibilityAddTraits(.isHeader)
+                .accessibilityIdentifier("draft-title")
             if let notice = drafts.arrivalNotice {
                 HStack {
                     Label(notice, systemImage: "tray.and.arrow.down.fill").font(.caption)
@@ -624,49 +643,129 @@ struct ExplainWorkspace: View {
         }
     }
 
-    private var documentTabs: some View {
+    private var historyRows: [ExplanationDraftWorkspace.DocumentTab] {
+        let term = historySearch.trimmingCharacters(in: .whitespacesAndNewlines)
+        let newestFirst = drafts.documentTabs.reversed()
+        return term.isEmpty ? Array(newestFirst) : newestFirst.filter { $0.title.localizedStandardContains(term) }
+    }
+
+    /// Shown in place of the list when it is folded away.
+    private var historyHandle: some View {
+        Button {
+            historyOpen = true
+            // In a narrow window the two side panels take turns.
+            if showInstructions { showInstructions = false }
+        } label: {
+            VStack(spacing: 4) {
+                Image(systemName: "sidebar.left")
+                Text("\(drafts.documentTabs.count)").font(.caption2)
+            }
+        }
+        .buttonStyle(.borderless)
+        .help("대본 목록 펼치기")
+        .accessibilityLabel("대본 목록 펼치기, \(drafts.documentTabs.count)건")
+    }
+
+    /// Every draft, newest first. Browsing only: folding, searching and new
+    /// arrivals never close, remove or overwrite an entry.
+    private var history: some View {
+        let rows = historyRows
         let activeID = drafts.editorDocumentID
-        return ScrollView(.horizontal) {
-            HStack(spacing: 6) {
-                ForEach(drafts.documentTabs) { tab in
-                    let isActive = tab.id == activeID
-                    HStack(spacing: 2) {
-                        Button {
-                            drafts.selectDocument(tab.id)
-                        } label: {
-                            Text(verbatim: tab.title + (tab.dirty ? " •" : "")).lineLimit(1)
-                                .fontWeight(isActive ? .semibold : .regular)
-                        }
-                        .accessibilityLabel(tab.title + (tab.dirty ? ", 수정됨" : ""))
-                        .accessibilityAddTraits(isActive ? .isSelected : [])
-                        Button {
-                            if tab.dirty {
-                                editorChange = isActive ? .closeActive(tab.id, title: tab.title) : .close(tab.id, title: tab.title)
-                                confirmEditorChange = true
-                            } else if isActive {
-                                drafts.closeActiveDocument(expectedDocumentID: tab.id)
-                            } else {
-                                drafts.closeInactiveDocument(tab.id)
-                            }
-                        } label: {
-                            Image(systemName: "xmark").accessibilityLabel("‘\(tab.title)’ 탭 닫기")
-                        }
-                        .buttonStyle(.borderless)
-                    }
-                    .padding(.horizontal, 4).padding(.vertical, 2)
-                    .background(RoundedRectangle(cornerRadius: 5).fill(isActive ? Color.accentColor.opacity(0.15) : Color.clear))
-                }
-                Button {
-                    _ = drafts.newDocument()
-                } label: {
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 4) {
+                Text("대본 목록").font(.subheadline.weight(.semibold)).accessibilityAddTraits(.isHeader)
+                Text("\(drafts.documentTabs.count)").font(.caption).foregroundStyle(.secondary)
+                Spacer(minLength: 4)
+                Button { _ = drafts.newDocument() } label: {
                     Image(systemName: "plus").accessibilityLabel("새 빈 대본")
                 }
                 .buttonStyle(.borderless)
-                .disabled(!drafts.hasEditorContent && drafts.activeDocumentID == nil || !drafts.canReceiveDocument())
-                .help("지금 글은 탭에 두고 빈 대본을 엽니다.")
+                .disabled(!drafts.hasEditorContent && drafts.activeDocumentID == nil)
+                .help("지금 글은 목록에 두고 빈 대본을 엽니다.")
+                Button { historyOpen = false } label: {
+                    Image(systemName: "sidebar.left").accessibilityLabel("대본 목록 접기")
+                }
+                .buttonStyle(.borderless)
+                .help("목록을 접습니다. 대본은 그대로 있습니다.")
             }
+            TextField("제목 검색", text: $historySearch)
+                .textFieldStyle(.roundedBorder).controlSize(.small)
+                .accessibilityLabel("대본 제목 검색")
+            if rows.isEmpty {
+                Text(drafts.documentTabs.isEmpty ? "아직 대본이 없습니다." : "제목에 ‘\(historySearch)’가 들어간 대본이 없습니다.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 2) {
+                    ForEach(rows) { row in historyRow(row, isActive: row.id == activeID) }
+                }
+                .scrollTargetLayout()
+            }
+            .scrollPosition(id: $historyAnchor, anchor: .top)
+            .focusable()
+            .onMoveCommand { direction in
+                guard let current = rows.firstIndex(where: { $0.id == activeID }) else {
+                    if let first = rows.first { drafts.selectDocument(first.id) }
+                    return
+                }
+                let next = direction == .up ? current - 1 : direction == .down ? current + 1 : current
+                if next != current, rows.indices.contains(next) { drafts.selectDocument(rows[next].id) }
+            }
+            .accessibilityLabel("대본 목록")
         }
-        .accessibilityLabel("열린 대본")
+        .onChange(of: historySearch) { _, term in
+            drafts.browsing = !term.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        .onChange(of: drafts.documentTabs.last?.id) { previous, newest in
+            // Someone reading the top sees the new arrival; someone scrolled down stays put.
+            if historyAnchor == nil || historyAnchor == previous { historyAnchor = newest }
+        }
+        .onDisappear { drafts.browsing = false }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("draft-history")
+    }
+
+    private func historyRow(_ row: ExplanationDraftWorkspace.DocumentTab, isActive: Bool) -> some View {
+        let stamp = Calendar.current.isDateInToday(row.date)
+            ? row.date.formatted(date: .omitted, time: .shortened)
+            : row.date.formatted(date: .abbreviated, time: .shortened)
+        let state = [row.unseen ? "새 대본" : nil, row.dirty ? "수정됨" : nil, row.received ? nil : "직접 입력"].compactMap { $0 }
+        return HStack(spacing: 2) {
+            Button { drafts.selectDocument(row.id) } label: {
+                VStack(alignment: .leading, spacing: 1) {
+                    HStack(spacing: 4) {
+                        if row.unseen { Circle().fill(Color.accentColor).frame(width: 6, height: 6) }
+                        Text(verbatim: row.title).lineLimit(1).truncationMode(.tail)
+                            .fontWeight(isActive || row.unseen ? .semibold : .regular)
+                        if row.dirty { Text("•").foregroundStyle(.orange) }
+                    }
+                    Text(([stamp] + state).joined(separator: " · ")).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(row.title)
+            .accessibilityLabel(([row.title, stamp] + state).joined(separator: ", "))
+            .accessibilityAddTraits(isActive ? .isSelected : [])
+            Button {
+                if row.dirty {
+                    editorChange = isActive ? .closeActive(row.id, title: row.title) : .close(row.id, title: row.title)
+                    confirmEditorChange = true
+                } else if isActive {
+                    drafts.closeActiveDocument(expectedDocumentID: row.id)
+                } else {
+                    drafts.closeInactiveDocument(row.id)
+                }
+            } label: {
+                Image(systemName: "xmark").font(.caption2).accessibilityLabel("‘\(row.title)’ 닫기")
+            }
+            .buttonStyle(.borderless)
+            .help("이 대본을 목록에서 닫습니다.")
+        }
+        .padding(.horizontal, 6).padding(.vertical, 4)
+        .background(RoundedRectangle(cornerRadius: 5).fill(isActive ? Color.accentColor.opacity(0.15) : Color.clear))
+        .id(row.id)
     }
 
     private var editorBorder: some View { RoundedRectangle(cornerRadius: 6).stroke(.quaternary) }
