@@ -18,18 +18,21 @@ private enum CatalogConfirm: Equatable {
 struct ExplainWorkspace: View {
     @EnvironmentObject private var app: AppState
     @ObservedObject private var agent: AgentWorkspaceController
+    @ObservedObject private var rendezvous: AgentBridgeRendezvous
     @ObservedObject private var catalog: AgentInstructionCatalog
     @ObservedObject private var drafts: ExplanationDraftWorkspace
     @State private var query = ""
-    @State private var pidText = ""
-    @State private var labelText = ""
     @State private var editTarget: InstructionEditTarget?
     @State private var catalogConfirm: CatalogConfirm?
     @State private var showCatalogConfirm = false
     @State private var catalogError: String?
     @State private var showExactPreview = false
     @State private var showSpeech = false
-    @State private var showInbox = false
+    @State private var showPicker = false
+    @State private var editID: UUID?
+    @State private var editLabel = ""
+    @State private var editBody = ""
+    @State private var copiedSetup: String?
     @State private var showAdvanced = false
     @State private var pendingReplacement: String?
     @State private var confirmEditorChange = false
@@ -38,6 +41,7 @@ struct ExplainWorkspace: View {
     @MainActor
     init(agent: AgentWorkspaceController) {
         _agent = ObservedObject(wrappedValue: agent)
+        _rendezvous = ObservedObject(wrappedValue: agent.rendezvous)
         _catalog = ObservedObject(wrappedValue: agent.catalog)
         _drafts = ObservedObject(wrappedValue: agent.drafts)
     }
@@ -46,6 +50,11 @@ struct ExplainWorkspace: View {
         catalog.selectedProfileID.flatMap { catalog.profile(id: $0) }
     }
     private var canUsePlayer: Bool { !app.isBusy && !app.explaining && !app.normalizing }
+    /// Unsaved inline edits exist. They stay in this view only; sharing always uses the saved body.
+    private var dirty: Bool {
+        guard let profile = selected, !profile.isBuiltIn, editID == profile.id else { return false }
+        return editLabel != profile.label || !editBody.utf8.elementsEqual(profile.body.utf8)
+    }
 
     var body: some View {
         if showAdvanced {
@@ -81,6 +90,8 @@ struct ExplainWorkspace: View {
                 .frame(maxWidth: 1050)
                 .frame(maxWidth: .infinity)
             }
+            .onAppear { loadBuffer() }
+            .onChange(of: catalog.selectedProfileID) { _ in loadBuffer() }
             .sheet(item: $editTarget) { target in
                 InstructionProfileEditor(target: target) { label, text in save(target, label: label, body: text) }
             }
@@ -105,39 +116,77 @@ struct ExplainWorkspace: View {
     private var pairingSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("에이전트 브리지").font(.headline)
-            if let pairing = agent.pairing {
+            if agent.pairing != nil {
                 HStack {
-                    Text(verbatim: "「\(pairing.label)」 · PID \(pairing.pid) · 이번 실행 동안만 연결").font(.callout)
+                    Text("서명 확인된 브리지 연결됨 · 이번 실행 동안만").font(.callout)
                     Spacer()
                     Button("연결 해제") { agent.unpair() }
                 }
-                Text("연결은 이 Mac에서 같은 인증서로 서명된 이 브리지 프로세스 하나에만 적용됩니다. 연결을 해제하거나 앱 또는 브리지가 종료되면 읽기·받기 허용이 모두 끝납니다.")
+                Text("연결을 해제하거나 앱 또는 브리지가 종료되면 지시 제공과 대본 받기가 모두 끝납니다.")
                     .font(.caption).foregroundStyle(.secondary)
             } else {
-                HStack {
-                    TextField("브리지 PID", text: $pidText).frame(width: 110)
-                    TextField("내가 붙이는 이름 (예: 코딩 에이전트)", text: $labelText)
-                    Button("연결") {
-                        if agent.pair(pidText: pidText, label: labelText) { pidText = "" }
-                    }
-                    .disabled(agent.ownSignerSHA1 == nil || pidText.isEmpty
-                              || labelText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-                .textFieldStyle(.roundedBorder)
-                Text("이 Mac에서 같은 인증서로 서명된 브리지 프로세스(PID) 하나만 지정합니다. 이름은 내가 알아보기 위한 표시일 뿐이며, 원격 에이전트의 이름이나 신원을 확인하지 않습니다. 연결만으로는 아무것도 공유되지 않습니다.")
-                    .font(.caption).foregroundStyle(.secondary)
-                if let summary = agent.setupSummary {
-                    Text(verbatim: "MCP 설정값  " + summary)
-                        .font(.caption.monospaced()).foregroundStyle(.secondary)
-                        .textSelection(.enabled).lineLimit(2)
-                } else {
-                    Text("이 앱은 안정적인 서명 인증서 없이 빌드되어 브리지를 연결할 수 없습니다. 지시 복사와 대본 붙여넣기는 그대로 사용할 수 있습니다.")
-                        .font(.caption).foregroundStyle(.orange)
-                }
+                pendingBridges
             }
+            mcpSetup
             if let notice = agent.notice {
                 Text(verbatim: notice).font(.caption).foregroundStyle(.orange)
             }
+        }
+    }
+
+    /// One approval per bridge process. Every value shown comes from the kernel and the code
+    /// signature check of the live peer; there is nothing to type in.
+    @ViewBuilder private var pendingBridges: some View {
+        switch rendezvous.availability {
+        case .unsigned:
+            Text("이 앱은 안정적인 서명 인증서 없이 빌드되어 브리지를 연결할 수 없습니다. 지시 복사와 대본 붙여넣기는 그대로 사용할 수 있습니다.")
+                .font(.caption).foregroundStyle(.orange)
+        case .identifierMismatch, .endpointUnavailable, .stopped:
+            Text("이 실행에서는 브리지 연결을 받을 수 없습니다. 앱을 다시 시작해 보세요. 지시 복사와 대본 붙여넣기는 그대로 사용할 수 있습니다.")
+                .font(.caption).foregroundStyle(.orange)
+        case .listening:
+            if rendezvous.candidates.isEmpty {
+                Text("연결 요청 없음 · 아래 명령으로 한 번 등록한 에이전트가 도구를 호출하면 여기에 요청이 나타납니다. 승인 전에는 아무것도 공유되지 않습니다.")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                if rendezvous.candidates.count > 1 {
+                    Text("여러 브리지가 연결을 요청했습니다. 연결할 하나를 직접 고르세요.")
+                        .font(.caption).foregroundStyle(.orange)
+                }
+                ForEach(rendezvous.candidates) { candidate in
+                    HStack {
+                        (Text("서명 확인된 브리지 · 시작 ")
+                            + Text(Date(timeIntervalSince1970: TimeInterval(candidate.identity.startSeconds)), style: .time))
+                            .font(.callout)
+                        Spacer()
+                        Button("연결 승인") { agent.approve(candidate) }
+                        Button("거절") { agent.decline(candidate) }
+                    }
+                }
+                Text("승인은 이 브리지 하나에 이번 실행 동안만 적용됩니다. 승인만으로는 아무것도 공유되지 않습니다.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// Copies a registration command only when asked. The app never registers or edits any config.
+    private var mcpSetup: some View {
+        let helper = AgentMCPSetup.helperPath
+        return HStack(spacing: 8) {
+            Text("에이전트 등록 명령 복사:").font(.caption).foregroundStyle(.secondary)
+            ForEach(AgentMCPSetup.Client.allCases, id: \.self) { client in
+                Button(copiedSetup == client.rawValue ? "복사됨" : client.rawValue) {
+                    guard let helper else { return }
+                    let clipboard = NSPasteboard.general
+                    clipboard.clearContents()
+                    if clipboard.setString(client.command(helperPath: helper), forType: .string) { copiedSetup = client.rawValue }
+                }
+                .controlSize(.small).disabled(helper == nil)
+            }
+            Text(helper == nil ? "이 앱 번들에 브리지 도구가 없어 등록할 수 없습니다."
+                 : "복사만 합니다. 터미널에서 직접 실행하세요.")
+                .font(.caption).foregroundStyle(.secondary)
+            Spacer()
         }
     }
 
@@ -147,17 +196,21 @@ struct ExplainWorkspace: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Text("에이전트 지시문").font(.headline)
+                Button { showPicker.toggle() } label: {
+                    Label(selected?.label ?? "지시 고르기", systemImage: "chevron.up.chevron.down")
+                }
+                .disabled(dirty)
+                .help(dirty ? "저장하거나 되돌린 뒤 다른 지시를 고를 수 있습니다." : "목록을 엽니다. 여는 것만으로는 아무것도 바뀌지 않습니다.")
+                .popover(isPresented: $showPicker, arrowEdge: .bottom) { pickerPopover }
                 Spacer()
-                TextField("이름·내용 검색", text: $query).textFieldStyle(.roundedBorder).frame(width: 200)
                 Button("새 지시…") { editTarget = InstructionEditTarget(profileID: nil, label: "", body: "") }
-                    .disabled(!catalog.canAddCustomProfile)
+                    .disabled(!catalog.canAddCustomProfile || dirty)
             }
             persistenceBanner
-            profileList
             if let profile = selected {
                 profileDetail(profile)
             } else {
-                Text("지시를 선택하면 정확한 내용을 보고 복사하거나 공유를 요청할 수 있습니다. 선택만으로는 아무것도 공유되지 않습니다.")
+                Text("목록에서 지시를 고르세요. 앱을 열거나 목록을 살펴보는 것만으로는 아무것도 제공되지 않습니다.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             shareStatus
@@ -204,6 +257,30 @@ struct ExplainWorkspace: View {
         }
     }
 
+    /// The filter only narrows this list. Nothing changes until a row is deliberately chosen.
+    private var pickerPopover: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            TextField("이름·내용으로 목록 거르기", text: $query).textFieldStyle(.roundedBorder)
+            Text(agent.pairing == nil
+                 ? "연결된 브리지가 없어, 골라도 아무것도 제공되지 않습니다."
+                 : "지시를 직접 고르면 저장된 그 버전 그대로를 승인한 브리지가 최대 10분 동안 읽을 수 있고, 이전에 제공하던 지시는 바로 해제됩니다. 원격 모델을 쓰는 에이전트는 이 내용을 해당 서비스로 보낼 수 있습니다. 목록을 열거나 거르는 것만으로는 아무것도 바뀌지 않습니다.")
+                .font(.caption).foregroundStyle(agent.pairing == nil ? Color.secondary : Color.orange)
+                .fixedSize(horizontal: false, vertical: true)
+            profileList
+        }
+        .padding(10)
+        .frame(width: 380)
+    }
+
+    /// The one deliberate act that makes a saved revision readable by the approved bridge.
+    private func choose(_ profile: AgentInstructionProfile) {
+        catalog.selectedProfileID = profile.id
+        showPicker = false
+        showExactPreview = false
+        catalogError = nil
+        if agent.pairing != nil { agent.activateShare(profileID: profile.id) }
+    }
+
     private var profileList: some View {
         let matches = catalog.search(query)
         return ScrollView {
@@ -223,9 +300,7 @@ struct ExplainWorkspace: View {
     private func profileRow(_ profile: AgentInstructionProfile) -> some View {
         let isSelected = catalog.selectedProfileID == profile.id
         return Button {
-            catalog.selectedProfileID = profile.id
-            showExactPreview = false
-            catalogError = nil
+            choose(profile)
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: isSelected ? "largecircle.fill.circle" : "circle")
@@ -233,7 +308,7 @@ struct ExplainWorkspace: View {
                 Text(kindName(profile.kind)).font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 if agent.shareLease?.profileID == profile.id {
-                    Text("읽기 허용 중").font(.caption).foregroundStyle(.green)
+                    Text("브리지에 제공 중").font(.caption).foregroundStyle(.green)
                 }
                 if !profile.canTransmit {
                     Text("공유 불가").font(.caption).foregroundStyle(.orange)
@@ -260,11 +335,8 @@ struct ExplainWorkspace: View {
                     case .failure(let error): catalogError = Self.message(error)
                     }
                 }
-                .disabled(!catalog.canAddCustomProfile)
+                .disabled(!catalog.canAddCustomProfile || dirty)
                 if !profile.isBuiltIn {
-                    Button("편집…") {
-                        editTarget = InstructionEditTarget(profileID: profile.id, label: profile.label, body: profile.body)
-                    }
                     Button("삭제…") {
                         catalogConfirm = .delete(profile.id)
                         showCatalogConfirm = true
@@ -272,15 +344,16 @@ struct ExplainWorkspace: View {
                 }
                 Spacer()
                 if agent.shareLease?.profileID == profile.id {
-                    Button("읽기 허용 해제") { agent.revokeShare() }
+                    Button("제공 중지") { agent.revokeShare() }
                 } else {
-                    Button("이 지시 공유…") { agent.requestShare(profileID: profile.id) }
-                        .disabled(agent.pairing == nil || !profile.canTransmit)
-                        .help("연결한 브리지에 공유하기 전에 전송될 정확한 내용을 한 번 더 확인합니다.")
+                    Button("저장된 이 버전을 브리지에 제공") { agent.activateShare(profileID: profile.id) }
+                        .disabled(agent.pairing == nil || !profile.canTransmit || dirty)
+                        .help("다시 묻지 않고, 저장된 이 버전 그대로를 승인한 브리지가 최대 10분 동안 읽을 수 있게 합니다. 저장하지 않은 편집 내용은 제공되지 않습니다.")
                 }
             }
             Text(verbatim: detailCaption(profile))
                 .font(.caption).foregroundStyle(profile.canTransmit ? Color.secondary : Color.orange)
+            if !profile.isBuiltIn, editID == profile.id { inlineEditor(profile) }
             if showExactPreview {
                 ScrollView {
                     Text(verbatim: profile.body)
@@ -296,17 +369,60 @@ struct ExplainWorkspace: View {
         }
     }
 
-    @ViewBuilder private var shareStatus: some View {
-        if let lease = agent.shareLease, let pairing = agent.pairing {
+    /// Edits stay in this buffer until Save. Saving ends any share of the old revision and never
+    /// shares the new bytes; providing them again is a separate deliberate act.
+    private func inlineEditor(_ profile: AgentInstructionProfile) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            TextField("이름 (이 Mac에만 표시되고 전송되지 않습니다)", text: $editLabel).textFieldStyle(.roundedBorder)
+            TextEditor(text: $editBody)
+                .font(.callout.monospaced()).frame(minHeight: 120, maxHeight: 220)
+                .overlay(editorBorder)
+                .accessibilityLabel("지시 내용 편집")
             HStack {
-                (Text(verbatim: "읽기 허용: 「\(catalog.profile(id: lease.profileID)?.label ?? "지시")」 r\(lease.revision.sequence) → 「\(pairing.label)」(PID \(pairing.pid)) · ")
+                Text(verbatim: "UTF-8 \(editBody.utf8.count) / \(AgentInstructionLimits.maxBodyUTF8Bytes)바이트"
+                     + (dirty ? " · 저장하지 않은 변경은 어디에도 제공되지 않습니다." : ""))
+                    .font(.caption).foregroundStyle(dirty ? Color.orange : Color.secondary)
+                Spacer()
+                Button("되돌리기") {
+                    editLabel = profile.label
+                    editBody = profile.body
+                    catalogError = nil
+                }
+                .disabled(!dirty)
+                Button("저장") {
+                    switch catalog.updateProfile(id: profile.id, label: editLabel, body: editBody) {
+                    case .success(let saved): editLabel = saved.label; editBody = saved.body; catalogError = nil
+                    case .failure(let error): catalogError = Self.message(error)
+                    }
+                }
+                .disabled(!dirty)
+            }
+            if agent.pairing != nil, agent.shareLease?.profileID != profile.id, !dirty {
+                Text("저장된 내용은 「저장된 이 버전을 브리지에 제공」을 눌러야 브리지에 제공됩니다.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func loadBuffer() {
+        guard let profile = selected, !profile.isBuiltIn else { editID = nil; return }
+        guard editID != profile.id else { return }
+        editID = profile.id
+        editLabel = profile.label
+        editBody = profile.body
+    }
+
+    @ViewBuilder private var shareStatus: some View {
+        if let lease = agent.shareLease, agent.pairing != nil {
+            HStack {
+                (Text(verbatim: "브리지에 제공 중: 「\(catalog.profile(id: lease.profileID)?.label ?? "지시")」 r\(lease.revision.sequence) · ")
                     + Text(lease.expires, style: .time) + Text("까지"))
                     .font(.caption).foregroundStyle(.secondary)
                 Spacer()
-                Button("읽기 허용 해제") { agent.revokeShare() }.controlSize(.small)
+                Button("제공 중지") { agent.revokeShare() }.controlSize(.small)
             }
         } else {
-            Text("지시 읽기 허용 안 함 · 복사해서 에이전트에 직접 붙여넣을 수 있습니다.")
+            Text("브리지에 제공 중인 지시 없음 · 복사해서 에이전트에 직접 붙여넣을 수 있습니다.")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }
@@ -392,8 +508,8 @@ struct ExplainWorkspace: View {
                 }
                 .disabled(agent.receiptLease == nil && agent.pairing == nil)
             }
-            if let lease = agent.receiptLease, let pairing = agent.pairing {
-                (Text(verbatim: "「\(pairing.label)」(PID \(pairing.pid))에서 받기 허용됨 · ")
+            if let lease = agent.receiptLease, agent.pairing != nil {
+                (Text("연결된 브리지에서 받기 허용됨 · ")
                     + Text(lease.expires, style: .time) + Text("까지 · 지시 읽기 허용과 별개"))
                     .font(.caption).foregroundStyle(.secondary)
             } else {
@@ -401,18 +517,19 @@ struct ExplainWorkspace: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             if !drafts.pending.isEmpty {
-                DisclosureGroup("받은 대본 확인", isExpanded: $showInbox) {
+                Group {
                     VStack(spacing: 6) {
                         ForEach(drafts.pending) { item in
-                            HStack(spacing: 8) {
+                            HStack(alignment: .top, spacing: 8) {
                                 VStack(alignment: .leading, spacing: 1) {
-                                    Text(verbatim: item.display).lineLimit(2)
+                                    Text(verbatim: item.display).textSelection(.enabled)
+                                        .fixedSize(horizontal: false, vertical: true)
                                     if let provenance = item.provenance {
                                         Text(verbatim: originText(provenance)).font(.caption2).foregroundStyle(.secondary)
                                     }
                                 }
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                                Button("열기…") {
+                                Button("편집기에서 사용…") {
                                     if drafts.hasEditorContent {
                                         pendingReplacement = item.id
                                         confirmEditorChange = true
@@ -583,5 +700,36 @@ private struct InstructionProfileEditor: View {
         }
         .padding()
         .frame(minWidth: 540, minHeight: 380)
+    }
+}
+
+/// User-initiated registration commands for the fixed bundled helper. Pure text: nothing here runs,
+/// registers or edits configuration, and no process ID or environment option is ever included.
+enum AgentMCPSetup {
+    static let serverName = "codebasic-tts-agent"
+    enum Client: String, CaseIterable {
+        case codex = "Codex CLI"
+        case claude = "Claude Code"
+
+        func command(helperPath: String) -> String {
+            let helper = AgentMCPSetup.shellQuoted(helperPath)
+            switch self {
+            case .codex: return "codex mcp add \(AgentMCPSetup.serverName) -- \(helper)"
+            case .claude: return "claude mcp add --scope local \(AgentMCPSetup.serverName) -- \(helper)"
+            }
+        }
+    }
+
+    /// The bundled helper only; nil (fail closed) when it is missing, not executable or oddly named.
+    static var helperPath: String? {
+        let path = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/codebasic-tts-agent-bridge").path
+        guard FileManager.default.isExecutableFile(atPath: path),
+              !path.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F }) else { return nil }
+        return path
+    }
+
+    /// POSIX single quoting: every byte is literal; an embedded quote becomes '\''.
+    static func shellQuoted(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 }

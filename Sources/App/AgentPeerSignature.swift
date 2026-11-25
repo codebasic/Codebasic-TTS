@@ -16,6 +16,8 @@ import Security
 
 enum AgentPeerSignature {
     static let bridgeIdentifier = "com.codebasic.tts.agent-bridge"
+    /// Fixed signing identifier of the app. Compiled in; never read from the environment or a file.
+    static let appIdentifier = "com.seongjoo.SelectedTextTTS"
 
     // <sys/un.h>: #define SOL_LOCAL 0, #define LOCAL_PEERTOKEN 0x006 (audit_token_t = 8 x UInt32).
     private static let solLocal: Int32 = 0
@@ -137,6 +139,14 @@ enum AgentPeerSignature {
         guard SecCodeCheckValidity(code, [], nil) == errSecSuccess else { return nil }
         guard let info = signer(of: code, currentlyValid: true) else { return nil }
         return info.leafSHA1
+    }
+
+    /// Signing identifier of this process's own, currently valid signature. Public information only.
+    static func ownSigningIdentifier() -> String? {
+        var me: SecCode?
+        guard SecCodeCopySelf([], &me) == errSecSuccess, let code = me else { return nil }
+        guard SecCodeCheckValidity(code, [], nil) == errSecSuccess else { return nil }
+        return signer(of: code, currentlyValid: true)?.identifier
     }
 
     /// INFORMATIONAL ONLY (UI text when the owner selects a PID). Never use for a trust decision:

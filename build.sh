@@ -43,7 +43,14 @@ build() {
     -o "$BRIDGE" \
     $(find "$HERE/Integrations/AgentBridge" -name '*.swift') \
     "$HERE/Sources/App/AgentPeerSignature.swift" \
+    "$HERE/Sources/App/AgentBridgeEndpoint.swift" \
     -framework Security
+
+  # The bridge authenticates the app by a compiled-in signing identifier; it must match the bundle.
+  PLIST_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$HERE/Resources/Info.plist" 2>/dev/null || true)"
+  if ! grep -qF "static let appIdentifier = \"$PLIST_ID\"" "$HERE/Sources/App/AgentPeerSignature.swift"; then
+    echo "    (warning: CFBundleIdentifier '$PLIST_ID' is not AgentPeerSignature.appIdentifier: Agent pairing stays unavailable)"
+  fi
 
   cp "$HERE/Resources/Info.plist" "$APP_DIR/Contents/Info.plist"
   [ -f "$HERE/Resources/AppIcon.icns" ] && cp "$HERE/Resources/AppIcon.icns" "$RES_DIR/AppIcon.icns"
@@ -172,7 +179,7 @@ case "${1:-install}" in
     # configuration, so it cannot reach an app, a socket or any service.
     # shellcheck disable=SC2046
     swiftc -O $(find "$HERE/Integrations/AgentBridge" -name '*.swift') "$HERE/Sources/App/AgentPeerSignature.swift" \
-      -framework Security -o "$BUILD_DIR/codebasic-tts-agent-bridge"
+      "$HERE/Sources/App/AgentBridgeEndpoint.swift" -framework Security -o "$BUILD_DIR/codebasic-tts-agent-bridge"
     BRIDGE_PROBE="$(printf '%s\n' \
       '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"build-test","version":"0"}}}' \
       '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
@@ -183,6 +190,18 @@ case "${1:-install}" in
     AGENT_BRIDGE_ABS="$(cd "$BUILD_DIR" && pwd)/codebasic-tts-agent-bridge"
     env -u CODEBASIC_TTS_APP_BUNDLE_ID -u CODEBASIC_TTS_SIGNER_SHA1 AGENT_BRIDGE_BIN="$AGENT_BRIDGE_ABS" \
       python3 "$HERE/Tests/test_agent_bridge_protocol.py"
+    # Synthetic fixture build of the same source. -D AGENT_BRIDGE_TEST_SEAM replaces the signature check
+    # with the kernel peer identity and takes the socket root from the test; it is never put in the app.
+    # shellcheck disable=SC2046
+    swiftc -O -D AGENT_BRIDGE_TEST_SEAM $(find "$HERE/Integrations/AgentBridge" -name '*.swift') \
+      "$HERE/Sources/App/AgentPeerSignature.swift" "$HERE/Sources/App/AgentBridgeEndpoint.swift" \
+      -framework Security -o "$BUILD_DIR/codebasic-tts-agent-bridge-fixture"
+    AGENT_BRIDGE_BIN="$AGENT_BRIDGE_ABS" AGENT_BRIDGE_FIXTURE_BIN="$AGENT_BRIDGE_ABS-fixture" \
+      python3 "$HERE/Tests/test_agent_bridge_discovery.py"
+    swiftc -O "$HERE/Sources/App/AgentPeerSignature.swift" "$HERE/Sources/App/AgentBridgeEndpoint.swift" \
+      "$HERE/Sources/Core/AgentBridgeAdmission.swift" "$HERE/Sources/App/AgentBridgeRendezvous.swift" \
+      "$HERE/Tests/AgentBridgeAdmissionTests.swift" -framework Security -o "$BUILD_DIR/agent-bridge-admission-tests"
+    "$BUILD_DIR/agent-bridge-admission-tests"
     echo "agent bridge offline probe and protocol tests passed"
     ;;
   clean) rm -rf "$BUILD_DIR"; echo "cleaned" ;;

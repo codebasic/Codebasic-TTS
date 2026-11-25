@@ -17,11 +17,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var localSpeechGate: LocalSpeechGate?
     private var localSpeechMenu: NSMenuItem?
     private var agentWorkspaceStorage: AgentWorkspaceController?
+    /// Consent rendezvous for the bundled agent bridge. Listening grants nothing by itself.
+    private let agentRendezvous = AgentBridgeRendezvous()
 
     /// Created on first use (the Agent tab). Owns the instruction catalog, pairing and both leases.
     var agentWorkspace: AgentWorkspaceController {
         if let existing = agentWorkspaceStorage { return existing }
-        let created = AgentWorkspaceController(app: appState)
+        let created = AgentWorkspaceController(app: appState, rendezvous: agentRendezvous)
         agentWorkspaceStorage = created
         return created
     }
@@ -33,6 +35,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         registerServices()
         registerHotKeys()
         observeState()
+        // Lets the bundled bridge find this running app. Nothing is shared or granted until the
+        // owner approves one listed bridge process in the Agent tab.
+        agentRendezvous.start()
 
         // Opening the app does not refresh cloud voices. Settings already
         // loads voice/model inventory when the user opens it.
@@ -70,6 +75,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         localSpeechSocket?.stop()
         agentWorkspaceStorage?.shutdown()
+        agentRendezvous.shutdown()
     }
 
     @objc private func openWindow() { mainWindow.show() }

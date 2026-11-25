@@ -192,6 +192,8 @@ final class AgentWorkspaceController: ObservableObject {
         let instanceID: UUID
         fileprivate let peer: LocalInstructionPeer
         fileprivate let leafSHA1: String
+        fileprivate let pidVersion: UInt32
+        fileprivate let directory: String
     }
 
     struct ShareLease: Equatable {
@@ -233,6 +235,8 @@ final class AgentWorkspaceController: ObservableObject {
     let drafts: ExplanationDraftWorkspace
     /// Public leaf certificate SHA-1 of this app's own valid signature; nil for ad hoc builds.
     let ownSignerSHA1: String?
+    /// Consent rendezvous and the private endpoint directory of this app generation.
+    let rendezvous: AgentBridgeRendezvous
 
     @Published private(set) var pairing: Pairing?
     @Published private(set) var shareLease: ShareLease?
@@ -245,8 +249,9 @@ final class AgentWorkspaceController: ObservableObject {
     private var catalogChanges: AnyCancellable?
     private var timer: Timer?
 
-    init(app: AppState) {
+    init(app: AppState, rendezvous: AgentBridgeRendezvous) {
         drafts = app.explanationDrafts
+        self.rendezvous = rendezvous
         // Legacy prompts are copied once, exactly, and only when their bytes differ from the presets.
         var seeds: [AgentLegacyPromptSeed] = []
         // The raw stored bytes are seeded, blank included; common rules are never appended here.
@@ -260,51 +265,53 @@ final class AgentWorkspaceController: ObservableObject {
         }
         catalog = AgentInstructionCatalog(storage: AgentCatalogSecureStorage.standard(),
                                           builtIns: Self.builtIns, legacySeed: seeds)
-        ownSignerSHA1 = AgentPeerSignature.ownSignerSHA1()
+        ownSignerSHA1 = rendezvous.ownLeafSHA1
         catalogChanges = catalog.changes.sink { [weak self] change in self?.catalogChanged(change) }
-    }
-
-    /// Values the owner copies into the MCP client configuration. Public information only.
-    var setupSummary: String? {
-        guard let leaf = ownSignerSHA1, let bundleID = Bundle.main.bundleIdentifier else { return nil }
-        return "CODEBASIC_TTS_APP_BUNDLE_ID=\(bundleID)  CODEBASIC_TTS_SIGNER_SHA1=\(leaf)"
     }
 
     // MARK: Pairing
 
+    /// The single connection decision. The candidate comes from the consent rendezvous, where the
+    /// kernel audit token and code signature of the live peer were checked; nothing typed by the
+    /// owner selects a process. Approval shares nothing: reading and receiving stay separate steps.
     @discardableResult
-    func pair(pidText: String, label: String) -> Bool {
-        guard let leaf = ownSignerSHA1 else {
-            return fail("이 앱은 안정적인 서명 인증서 없이 빌드되어 브리지를 확인할 수 없습니다. 지시는 복사해서 직접 붙여넣으세요.")
+    func approve(_ candidate: AgentBridgeAdmission.Candidate) -> Bool {
+        let identity = candidate.identity
+        guard let leaf = ownSignerSHA1, let directory = rendezvous.directory else {
+            return fail("이 실행에서는 브리지 연결을 받을 수 없습니다. 지시는 복사해서 직접 붙여넣으세요.")
         }
-        guard getuid() == geteuid(),
-              let pid = Int32(pidText.trimmingCharacters(in: .whitespacesAndNewlines)), pid != getpid(),
-              let peer = LocalInstructionPeer.current(pid: pid) else {
-            return fail("같은 계정에서 지금 실행 중인 브리지의 PID가 필요합니다.")
-        }
-        // Selection aid only. Every connection is verified again by its kernel audit token.
-        guard let signer = AgentPeerSignature.informationalSigner(pid: pid), signer.currentlyValid,
-              signer.identifier == AgentPeerSignature.bridgeIdentifier, signer.leafSHA1 == leaf,
-              LocalInstructionPeer.current(pid: pid) == peer else {
-            return fail("이 PID는 이 앱과 같은 인증서로 서명된 에이전트 브리지가 아닙니다.")
+        guard getuid() == geteuid(), identity.pid != getpid(),
+              let peer = LocalInstructionPeer.current(pid: identity.pid),
+              peer.startSeconds == identity.startSeconds,
+              peer.startMicroseconds == identity.startMicroseconds else {
+            rendezvous.refresh()
+            return fail("연결을 요청한 브리지 프로세스가 이미 종료됐습니다. 에이전트에서 다시 요청하세요.")
         }
         let instanceID = UUID()
-        let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard case .success = session.pair(instanceID: instanceID, ownerLabel: trimmed) else {
-            return fail("이름은 비워 둘 수 없고 80자를 넘을 수 없습니다.")
+        let label = "에이전트 브리지"
+        unpair()
+        guard rendezvous.approve(identity) else {
+            return fail("연결 요청이 만료됐습니다. 에이전트에서 다시 요청하세요.")
         }
-        revokeShare()
-        revokeReceipt()
-        pairing = Pairing(pid: pid, label: trimmed, instanceID: instanceID, peer: peer, leafSHA1: leaf)
+        guard case .success = session.pair(instanceID: instanceID, ownerLabel: label) else {
+            rendezvous.revoke()
+            return fail("브리지를 연결할 수 없습니다.")
+        }
+        pairing = Pairing(pid: identity.pid, label: label, instanceID: instanceID, peer: peer, leafSHA1: leaf,
+                          pidVersion: identity.pidVersion, directory: directory)
         notice = nil
         startTimer()
         return true
     }
 
+    /// Owner declined a listed request. Nothing was granted and nothing is remembered on disk.
+    func decline(_ candidate: AgentBridgeAdmission.Candidate) { rendezvous.deny(candidate.identity) }
+
     func unpair() {
         revokeShare()
         revokeReceipt()
         session.unpair()
+        rendezvous.revoke()
         if pairing != nil { pairing = nil }
         timer?.invalidate()
         timer = nil
@@ -315,51 +322,43 @@ final class AgentWorkspaceController: ObservableObject {
 
     // MARK: Instruction reads (ai.sock)
 
-    /// The only way an instruction leaves the app: one modal showing the exact bytes.
-    func requestShare(profileID: UUID) {
-        guard let current = pairing else { notice = "먼저 에이전트 브리지를 연결하세요."; return }
-        let snapshot: AgentInstructionShareSnapshot
+    /// The only way an instruction leaves the app: the owner deliberately picks a saved profile for
+    /// the already approved bridge. The labelled picker is the confirmation; this is the one trigger.
+    /// Fails closed: without a live verified bridge or a shareable saved revision nothing stays shared.
+    @discardableResult
+    func activateShare(profileID: UUID) -> Bool {
+        revokeShare()
+        guard let current = pairing else { return fail("먼저 에이전트 브리지를 연결하세요.") }
+        guard LocalInstructionPeer.current(pid: current.pid) == current.peer else {
+            unpair()
+            return fail("연결한 브리지 프로세스가 종료되어 연결과 모든 허용을 해제했습니다.")
+        }
         switch catalog.shareSnapshot(for: profileID) {
-        case .success(let value): snapshot = value
-        case .failure(let block): notice = Self.describe(block); return
+        case .success(let snapshot): return grantShare(snapshot, to: current)
+        case .failure(let block): return fail(Self.describe(block))
         }
-        let alert = NSAlert()
-        alert.messageText = "「\(current.label)」(PID \(current.pid)) 브리지에 아래 지시를 공유할까요?"
-        alert.informativeText = "아래에 보이는 \(snapshot.bodyUTF8.count)바이트 그대로, 이 지시 하나만 최대 10분 동안 읽을 수 있습니다. 지시 이름은 전송되지 않습니다. 원격 모델을 사용하는 에이전트는 이 내용을 해당 서비스로 보낼 수 있습니다. 비밀이나 외부에 공개할 수 없는 내용이 있으면 취소하세요."
-        alert.addButton(withTitle: "이 지시만 공유")
-        alert.addButton(withTitle: "취소")
-        let scroll = NSTextView.scrollableTextView()
-        scroll.frame = NSRect(x: 0, y: 0, width: 430, height: 214)
-        guard let preview = scroll.documentView as? NSTextView else { return }
-        preview.isRichText = false
-        preview.string = snapshot.text
-        preview.isEditable = false
-        preview.isSelectable = true
-        alert.accessoryView = scroll
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        guard pairing == current, case .success(let fresh) = catalog.shareSnapshot(for: profileID), fresh == snapshot else {
-            notice = "미리 보는 동안 지시나 연결이 바뀌었습니다. 새 내용을 확인한 뒤 다시 공유하세요."
-            return
-        }
+    }
+
+    /// The one lease implementation: replaces any earlier share with exactly this saved snapshot.
+    private func grantShare(_ snapshot: AgentInstructionShareSnapshot, to current: Pairing) -> Bool {
         revokeShare()
         guard case .success(let grant) = session.grantShare(snapshot, to: current.instanceID) else {
-            notice = "이 지시는 지금 공유할 수 없습니다."
-            return
+            return fail("이 지시는 지금 공유할 수 없습니다.")
         }
         let socket = LocalApprovedSocket(
-            peer: current.peer, endpoint: "ai.sock", directory: LocalApprovedSocket.defaultDirectory,
+            peer: current.peer, endpoint: "ai.sock", directory: current.directory,
             lifetime: .seconds(Int(AgentSessionLimits.maxGrantLifetime)), maxFrame: 64,
-            verifier: Self.verifier(pid: current.pid, leafSHA1: current.leafSHA1),
+            verifier: Self.verifier(pid: current.pid, pidVersion: current.pidVersion, leafSHA1: current.leafSHA1),
             respond: Self.shareResponder(session: session, shareID: grant.shareID, instanceID: current.instanceID))
         guard socket.start() else {
             session.revokeShare()
-            notice = "읽기 소켓을 열 수 없습니다. 브리지가 종료됐거나 이전 소켓 경로가 남아 있습니다."
-            return
+            return fail("읽기 소켓을 열 수 없습니다. 브리지가 종료됐거나 이전 소켓 경로가 남아 있습니다.")
         }
         shareSocket = socket
         shareLease = ShareLease(shareID: grant.shareID, profileID: snapshot.profileID, revision: snapshot.revision,
                                 expires: Date().addingTimeInterval(grant.expiresAt - grant.grantedAt))
         notice = nil
+        return true
     }
 
     /// Ends reads only. A receipt grant and already delivered versions are unaffected.
@@ -375,7 +374,7 @@ final class AgentWorkspaceController: ObservableObject {
     func requestReceipt() {
         guard let current = pairing else { notice = "먼저 에이전트 브리지를 연결하세요."; return }
         let alert = NSAlert()
-        alert.messageText = "「\(current.label)」(PID \(current.pid)) 브리지의 대본을 받을까요?"
+        alert.messageText = "연결된 에이전트 브리지의 대본을 받을까요?"
         alert.informativeText = "최대 10분 동안, 이 브리지가 실제로 읽어 간 지시 버전에 대한 대본만 보관함에 받습니다. 편집기를 덮어쓰거나 재생하지 않으며, 지시 읽기 허용과는 별개입니다."
         alert.addButton(withTitle: "대본 받기 허용")
         alert.addButton(withTitle: "취소")
@@ -386,9 +385,9 @@ final class AgentWorkspaceController: ObservableObject {
             return
         }
         let socket = LocalApprovedSocket(
-            peer: current.peer, endpoint: "ad.sock", directory: LocalApprovedSocket.defaultDirectory,
+            peer: current.peer, endpoint: "ad.sock", directory: current.directory,
             lifetime: .seconds(Int(AgentSessionLimits.maxGrantLifetime)), maxFrame: 100 * 1024,
-            verifier: Self.verifier(pid: current.pid, leafSHA1: current.leafSHA1),
+            verifier: Self.verifier(pid: current.pid, pidVersion: current.pidVersion, leafSHA1: current.leafSHA1),
             respond: Self.draftResponder(controller: self, grantID: info.grantID))
         guard socket.start() else {
             session.revokeReceipt()
@@ -527,13 +526,14 @@ final class AgentWorkspaceController: ObservableObject {
         return (profileID, revision, sha)
     }
 
-    private nonisolated static func verifier(pid: pid_t, leafSHA1: String) -> (Int32) -> Bool {
+    private nonisolated static func verifier(pid: pid_t, pidVersion: UInt32, leafSHA1: String) -> (Int32) -> Bool {
         { fd in
             guard getuid() == geteuid(),
                   let peer = AgentPeerSignature.verifyConnectedPeer(fd: fd, expectedUID: getuid(),
                                                                     identifier: AgentPeerSignature.bridgeIdentifier,
                                                                     leafSHA1: leafSHA1) else { return false }
-            return peer.pid == pid
+            // Exact kernel identity: the PID version changes on exec, so a reused PID never matches.
+            return peer.pid == pid && peer.pidVersion == pidVersion
         }
     }
 
