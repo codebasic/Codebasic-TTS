@@ -33,19 +33,30 @@ with tempfile.TemporaryDirectory(prefix="u", dir=REPO / "build") as temp:
         f.write('''\nextension AppDelegate {
     func syntheticInstructionFixtureSetUp() { setUpMainMenu(); observeState() }
 }\n''')
-    socket = sources / "App" / "LocalInstructionSocket.swift"
-    source = socket.read_text()
-    gate = r'"/private/tmp/codebasic-tts-mcp-\(getuid())"'
+    workspace = sources / "UI" / "ExplainWorkspace.swift"
+    with workspace.open("a") as f:
+        f.write('''\nextension ExplainWorkspace {
+    static func syntheticInstructionSelectors(_ app: AppState, editing selector: String?) -> (editor: String?, sharing: String) {
+        var view = ExplainWorkspace(drafts: app.explanationDrafts, catalog: app.agentCatalog, access: app.agentAccess)
+        view._editingProfile = State(initialValue: selector)
+        return (view.editorSelection, view.sharingSelection)
+    }
+}\n''')
+    runtime = sources / "Core" / "TTSRuntime.swift"
+    source = runtime.read_text()
+    gate = 'static var socketDirectory: String { socketDirectory(uid: getuid()) }'
     assert source.count(gate) == 1
-    socket.write_text(source.replace(gate, 'ProcessInfo.processInfo.environment["TTS_APPROVAL_FIXTURE_ROOT"]!'))
+    runtime.write_text(source.replace(gate, 'static var socketDirectory: String { ProcessInfo.processInfo.environment["TTS_APPROVAL_FIXTURE_ROOT"]! }'))
     paths = [str(x) for x in sorted(sources.rglob("*.swift")) if x.name != "main.swift"]
     executable = root / "approval-test"
     sdk = subprocess.check_output(["/usr/bin/xcrun", "--sdk", "macosx26.5", "--show-sdk-path"], text=True).strip()
-    env = {"PATH":"/usr/bin:/bin", "HOME":str(root), "TTS_APPROVAL_FIXTURE_ROOT":str(root),
+    # Relative socket names keep the fixture under the worktree without tying
+    # macOS AF_UNIX length to a caller's checkout path.
+    env = {"PATH":"/usr/bin:/bin", "HOME":str(root), "TTS_APPROVAL_FIXTURE_ROOT":"ipc",
            "TTS_APPROVAL_FIXTURE_PROFILE":str(profile)}
     subprocess.run(["/usr/bin/swiftc", "-Onone", "-o", str(executable), *paths,
                     str(HERE / "TTSInstructionApprovalUI.swift"), "-framework", "AppKit", "-framework", "SwiftUI",
                     "-framework", "AVFoundation", "-framework", "Carbon", "-framework", "ApplicationServices",
                     "-lsqlite3"], check=True, timeout=130,
                    env={**env, "SDKROOT":sdk, "CLANG_MODULE_CACHE_PATH":str(CACHE)})
-    subprocess.run([str(executable)], check=True, timeout=12, env=env)
+    subprocess.run([str(executable)], check=True, timeout=12, env=env, cwd=root)

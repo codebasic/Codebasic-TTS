@@ -91,6 +91,40 @@ extension NSAlert {
         }
 
         assertOff()
+        delegate.selectAgentInstruction("4aa2c775-2dd6-4b91-b317-b6ffa11220b3")
+        precondition(delegate.appState.agentAccess.selectionStatus == .catalogUnavailable)
+        delegate.selectAgentInstruction("normalize")
+        precondition(delegate.appState.agentAccess.selectionStatus == .pairingUnavailable)
+        let catalog = delegate.appState.agentCatalog
+        delegate.appState.agentAccess.revokeSelection()
+        let savedWithoutShare = try! catalog.save(label: "공유하지 않은 합성 지시", body: "합성 새 지시")
+        let unshared = ExplainWorkspace.syntheticInstructionSelectors(delegate.appState, editing: savedWithoutShare.selector)
+        precondition(unshared.editor == savedWithoutShare.selector && unshared.sharing.isEmpty)
+        precondition(delegate.appState.agentAccess.instructionScope == nil)
+        let original = try! catalog.save(label: "삭제할 합성 지시", body: "합성 저장본")
+        delegate.selectAgentInstruction(original.selector)
+        precondition(delegate.appState.agentAccess.instructionScope == original.selector)
+        let savedWhileSelected = try! catalog.save(label: "별도로 편집할 합성 지시", body: "합성 새 편집본")
+        let separate = ExplainWorkspace.syntheticInstructionSelectors(delegate.appState, editing: savedWhileSelected.selector)
+        precondition(separate.editor == savedWhileSelected.selector && separate.sharing == original.selector)
+        let selectedOnly = ExplainWorkspace.syntheticInstructionSelectors(delegate.appState, editing: nil)
+        precondition(selectedOnly.editor == original.selector && selectedOnly.sharing == original.selector)
+        print("new instruction save targets the editor while the share picker follows the existing scope or no scope")
+        let renamed = try! catalog.save(id: original.id, expected: original.editVersion,
+                                        label: "이름이 바뀐 합성 지시", body: original.body)
+        precondition(renamed.generation == original.generation)
+        precondition(delegate.appState.agentAccess.instructionScope == original.selector)
+        try! catalog.delete(renamed.id, expected: renamed.editVersion)
+        precondition(delegate.appState.agentAccess.instructionScope == nil)
+        precondition(delegate.appState.agentAccess.selectionStatus == .notSelected)
+        print("selection follows the saved profile across a rename and clears when that profile is deleted")
+        click([choice, confirm]); assertOn()
+        delegate.selectAgentInstruction("normalize")
+        precondition(delegate.appState.agentAccess.selectionStatus == .legacySharing)
+        assertOn() // failed new selection does not break the legacy grant
+        click([]); assertOff()
+        print("actual selection callback reports missing catalog item, unavailable helper and legacy grant without dialog")
+
         click([{ alert in
             precondition(alert.buttons.map(\.title) == ["미리 보기", "취소"])
             return .alertSecondButtonReturn
@@ -153,7 +187,7 @@ extension NSAlert {
         assertOff()
         print("stale preview denied; exact customized explain/continue/normalize presets and edit/revert revocation passed; menu revoke and termination removed socket")
 
-        guard let receipt = application.mainMenu?.items.first?.submenu?.item(withTitle: "외부 대본 받기 허용 (이번 실행)…"),
+        guard let receipt = application.mainMenu?.items.first?.submenu?.item(withTitle: "외부 대본 받기 허용 (이번 실행)"),
               let receiptAction = receipt.action else { preconditionFailure("Missing separate receipt consent") }
         let dSocket = directory + "/d.sock"
         func receiptClick(_ responses: [(NSAlert) -> NSApplication.ModalResponse]) {
@@ -167,10 +201,7 @@ extension NSAlert {
             precondition(!FileManager.default.fileExists(atPath: dSocket))
         }
         assertDraftOff()
-        receiptClick([{ alert in
-            precondition(alert.informativeText.contains("서명된 도우미를 먼저 연결"))
-            return .alertFirstButtonReturn
-        }])
+        receiptClick([]) // a missing bundled pairing listener fails closed without a modal
         assertDraftOff(); assertOff()
         print("unpaired receipt explicitly rejected; signed grant behavior is covered by the round-trip fixture")
     }

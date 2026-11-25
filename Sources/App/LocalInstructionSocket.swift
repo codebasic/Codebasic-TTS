@@ -17,6 +17,28 @@ struct LocalInstructionPeer: Equatable {
         return Self(pid: pid, startSeconds: info.pbi_start_tvsec, startMicroseconds: info.pbi_start_tvusec)
     }
 
+    /// Context for the consent dialog, not an authentication input.
+    func parentExecutable() -> String? {
+        var child = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+        guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &child, size) == size,
+              child.pbi_start_tvsec == startSeconds, child.pbi_start_tvusec == startMicroseconds,
+              child.pbi_ppid > 1 else { return nil }
+        var path = [CChar](repeating: 0, count: Int(MAXPATHLEN) * 4)
+        guard proc_pidpath(pid_t(child.pbi_ppid), &path, UInt32(path.count)) > 0,
+              Self.current(pid: pid) == self else { return nil }
+        return String(validatingUTF8: path)
+    }
+
+    func parentPID() -> pid_t? {
+        var child = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+        guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &child, size) == size,
+              child.pbi_start_tvsec == startSeconds, child.pbi_start_tvusec == startMicroseconds,
+              child.pbi_ppid > 1 else { return nil }
+        return pid_t(child.pbi_ppid)
+    }
+
     static func connected(_ fd: Int32) -> Self? {
         var uid: uid_t = 0, gid: gid_t = 0, pid: pid_t = 0
         var size = socklen_t(MemoryLayout<pid_t>.size)
@@ -70,32 +92,58 @@ final class LocalInstructionSocket {
 /// Private Unix transport for one explicitly approved live process. Endpoint
 /// instances have disjoint paths, handlers, and leases.
 final class LocalApprovedSocket {
-    static var defaultDirectory: String { "/private/tmp/codebasic-tts-mcp-\(getuid())" }
+    static var defaultDirectory: String { TTSRuntime.socketDirectory }
     static let unknownPathMessage = "기존 소켓의 출처를 확인할 수 없어 그대로 두었습니다. 이전 앱을 종료하고 다시 시도하거나 복사·붙여넣기를 사용하세요."
     private let directory: String
     private let endpoint: String
     private var path: String { directory + "/" + endpoint }
     private let queue: DispatchQueue
     private let lock = NSLock()
-    private let approvedPeer: LocalInstructionPeer
+    private let approvedPeer: LocalInstructionPeer?
     private let maxFrame: Int
     private let verified: (Int32) -> Bool
     private let didDeliver: (Data) -> Void
     private let deliveryGate: (@escaping () -> Void) -> Void
     private let expires: DispatchTime
-    private let handle: (Data, @escaping () -> Bool) -> Data?
+    private let handle: (Data, LocalInstructionPeer, @escaping () -> Bool) -> Data?
     private var source: DispatchSourceRead?
     private var pathLease: SocketPathLease?
     private var identity: String?
     private var revoked = false
     private(set) var requiresPathInspection = false
 
-    init(peer: LocalInstructionPeer, endpoint: String, directory: String,
-         lifetime: DispatchTimeInterval, maxFrame: Int,
+    /// `lifetime: nil` lasts until `stop()`; the caller owns revocation.
+    convenience init(peer: LocalInstructionPeer, endpoint: String, directory: String,
+         lifetime: DispatchTimeInterval?, maxFrame: Int,
          verified: @escaping (Int32) -> Bool = { _ in true },
          deliveryGate: @escaping (@escaping () -> Void) -> Void = { $0() },
          didDeliver: @escaping (Data) -> Void = { _ in },
          handle: @escaping (Data, @escaping () -> Bool) -> Data?) {
+        self.init(peer: peer, endpoint: endpoint, directory: directory, lifetime: lifetime, maxFrame: maxFrame,
+                  verified: verified, deliveryGate: deliveryGate, didDeliver: didDeliver,
+                  identifiedHandler: { data, _, active in handle(data, active) })
+    }
+
+    /// Pairing discovers a verified live process without granting it access to data.
+    /// There is no unsigned or unrestricted mode for an unbound listener.
+    init(pairingDirectory directory: String, verified: @escaping (Int32) -> Bool,
+         handler: @escaping (Data, LocalInstructionPeer, @escaping () -> Bool) -> Data?) {
+        approvedPeer = nil
+        endpoint = "p.sock"
+        self.directory = directory
+        maxFrame = 1024
+        self.verified = verified
+        deliveryGate = { $0() }
+        didDeliver = { _ in }
+        handle = handler
+        queue = DispatchQueue(label: "com.codebasic.tts.approved-ipc.pairing")
+        expires = .distantFuture
+    }
+
+    private init(peer: LocalInstructionPeer, endpoint: String, directory: String,
+                 lifetime: DispatchTimeInterval?, maxFrame: Int, verified: @escaping (Int32) -> Bool,
+                 deliveryGate: @escaping (@escaping () -> Void) -> Void, didDeliver: @escaping (Data) -> Void,
+                 identifiedHandler: @escaping (Data, LocalInstructionPeer, @escaping () -> Bool) -> Data?) {
         approvedPeer = peer
         self.endpoint = endpoint
         self.directory = directory
@@ -103,15 +151,16 @@ final class LocalApprovedSocket {
         self.verified = verified
         self.deliveryGate = deliveryGate
         self.didDeliver = didDeliver
-        self.handle = handle
+        self.handle = identifiedHandler
         queue = DispatchQueue(label: "com.codebasic.tts.approved-ipc." + endpoint)
-        expires = .now() + lifetime
+        expires = lifetime.map { .now() + $0 } ?? .distantFuture
     }
 
     /// Start/stop are owned by the AppDelegate's main actor. Requests are serialized separately.
     func start() -> Bool {
         requiresPathInspection = false
-        guard source == nil, LocalInstructionPeer.current(pid: approvedPeer.pid) == approvedPeer else { return false }
+        guard source == nil else { return false }
+        if let approvedPeer, LocalInstructionPeer.current(pid: approvedPeer.pid) != approvedPeer { return false }
         var addr = sockaddr_un()
         let bytes = Array(path.utf8CString)
         guard bytes.count <= MemoryLayout.size(ofValue: addr.sun_path),
@@ -158,23 +207,23 @@ final class LocalApprovedSocket {
         guard fd >= 0 else { return }
         defer { close(fd) }
         var noSigPipe: Int32 = 1
-        guard LocalInstructionPeer.connected(fd) == approvedPeer, verified(fd),
+        guard let peer = LocalInstructionPeer.connected(fd), approvedPeer == nil || approvedPeer == peer, verified(fd),
               setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size)) == 0,
               fcntl(fd, F_SETFL, O_NONBLOCK) == 0 else { return }
         let deadline = DispatchTime.now() + .milliseconds(600)
         guard let bytes = readFrame(fd, deadline: deadline),
-              LocalInstructionPeer.connected(fd) == approvedPeer, verified(fd),
-              active(),
-              var out = handle(bytes, { [weak self] in self?.active() == true }) else { return }
+              LocalInstructionPeer.connected(fd) == peer, verified(fd),
+              active(peer),
+              var out = handle(bytes, peer, { [weak self] in self?.active(peer) == true }) else { return }
         out.append(10)
-        deliveryGate { self.sendFrame(out, fd: fd) }
+        deliveryGate { self.sendFrame(out, fd: fd, peer: peer) }
     }
 
-    private func sendFrame(_ out: Data, fd: Int32) {
+    private func sendFrame(_ out: Data, fd: Int32, peer: LocalInstructionPeer) {
         lock.lock()
         defer { lock.unlock() }
         // Keep the lease checked across the write. Stop can wait only for the short send deadline.
-        guard !revoked, DispatchTime.now() < expires, LocalInstructionPeer.connected(fd) == approvedPeer,
+        guard !revoked, DispatchTime.now() < expires, LocalInstructionPeer.connected(fd) == peer,
               verified(fd) else { return }
         let sendDeadline = DispatchTime.now() + .milliseconds(100)
         let delivered = out.withUnsafeBytes { (view: UnsafeRawBufferPointer) -> Bool in
@@ -191,10 +240,10 @@ final class LocalApprovedSocket {
         if delivered { didDeliver(out) }
     }
 
-    private func active() -> Bool {
+    private func active(_ peer: LocalInstructionPeer) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        return !revoked && DispatchTime.now() < expires && LocalInstructionPeer.current(pid: approvedPeer.pid) == approvedPeer
+        return !revoked && DispatchTime.now() < expires && LocalInstructionPeer.current(pid: peer.pid) == peer
     }
 
     /// Require a single LF-terminated frame followed by client half-close.
@@ -242,7 +291,7 @@ private final class SocketPathLease {
     private let leaseStat: stat
 
     init?(directory: String, endpoint: String) {
-        guard ["i.sock", "d.sock"].contains(endpoint) else { return nil }
+        guard ["i.sock", "d.sock", "p.sock"].contains(endpoint) else { return nil }
         if mkdir(directory, 0o700) != 0 && errno != EEXIST { return nil }
         let dir = Darwin.open(directory, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard dir >= 0 else { return nil }

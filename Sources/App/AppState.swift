@@ -88,16 +88,44 @@ final class AppState: ObservableObject {
     }
 
     // External workspace is never connected to the legacy generator buffers.
-    let explanationDrafts = ExplanationDraftWorkspace()
+    /// Received and written drafts are kept in a private database, so the list
+    /// is not limited by memory and survives a restart. Without a usable file the
+    /// list still works for this run.
+    let explanationDrafts = ExplanationDraftWorkspace(
+        store: SQLiteDraftStore(url: TTSRuntime.applicationSupport().appendingPathComponent("drafts.sqlite"))
+            ?? MemoryDraftStore())
     let agentCatalog = AgentCatalog(url: URL(fileURLWithPath: Secrets.appSupportDir)
         .appendingPathComponent("agent-instructions-v1.json"))
     let agentAccess = AgentSessionController()
+    private static let agentPresetURL = URL(fileURLWithPath: Secrets.appSupportDir)
+        .appendingPathComponent("agent-preset-instructions-v1.json")
+    private static let storedPresets = Result { try AgentPresetInstructions.read(at: agentPresetURL) }
+    @Published private(set) var agentPresetInstructions = (try? AppState.storedPresets.get()) ?? [:]
+    /// A damaged override file is not the same as "never customized": the saved text
+    /// is unknown, so built-in instructions are not shared until a save succeeds.
+    @Published private(set) var agentPresetUnreadable: Bool = {
+        if case .failure = AppState.storedPresets { return true }
+        return false
+    }()
+
+    func saveAgentPresetInstruction(_ selector: String, expected: UUID, text: String) throws {
+        guard LocalInstructionProfile.Name(rawValue: selector) != nil,
+              agentSnapshot(selector)?.generation == expected else { throw AgentCatalog.Failure.conflict }
+        let saved = try AgentPresetInstructions.write(text, for: selector,
+                                                       expectedOverride: agentPresetInstructions[selector],
+                                                       at: Self.agentPresetURL)
+        agentPresetInstructions = saved
+        agentPresetUnreadable = false
+        invalidatePreset(selector)
+    }
+
     private var presetSnapshots: [String: AgentInstructionSnapshot] = [:]
     @Published var sharedInstructionProfile: LocalInstructionProfile.Name?
 
     func agentSnapshot(_ selector: String) -> AgentInstructionSnapshot? {
         if let builtin = LocalInstructionProfile.Name(rawValue: selector) {
-            let text = instructionText(builtin)
+            guard !agentPresetUnreadable else { return nil }
+            let text = agentPresetInstructions[selector] ?? instructionText(builtin)
             if let old = presetSnapshots[selector], AgentBytes.same(old.text, text) { return old }
             let snapshot = AgentInstructionSnapshot(selector: selector, generation: UUID(), text: text)
             presetSnapshots[selector] = snapshot
@@ -131,9 +159,9 @@ final class AppState: ObservableObject {
 
     /// The external agent has already done the text work. Only the current
     /// voice engine may be used, and only on this explicit editor action.
-    func playExplanationDraft(displayOnly: Bool = false) {
-        guard !isBusy, !explaining, !normalizing,
-              let input = explanationDrafts.playback(displayOnly: displayOnly),
+    func playExplanationDraft(displayOnly: Bool = false, expectedDocumentID: String? = nil) {
+        guard !TTSRuntime.isPreview, !isBusy, !explaining, !normalizing,
+              let input = explanationDrafts.playback(displayOnly: displayOnly, expectedDocumentID: expectedDocumentID),
               AgentBytes.safeForSpeech(input.speech) else { return }
         playbackMode = .explain
         synthesize(input.speech, displayText: input.display, preserveLiteral: true)

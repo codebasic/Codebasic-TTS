@@ -4,69 +4,114 @@ import Security
 
 enum CodeExplanation { static let noChange = "변경 없음" }
 
-private final class ProbeCounter {
-    private let lock = NSLock()
-    private var count = 0
-    func record() { lock.lock(); count += 1; lock.unlock() }
-    func value() -> Int { lock.lock(); defer { lock.unlock() }; return count }
-}
-
 @MainActor final class AgentFixture {
     let access: AgentSessionController
-    let drafts = ExplanationDraftWorkspace()
+    let drafts: ExplanationDraftWorkspace
+    let catalog = AgentCatalog(url: URL(fileURLWithPath: "catalog-\(UUID()).json"))
     let selector = "66666666-6666-4666-8666-666666666666"
     let original = "합성 지시 e\u{301}\n"
     var current: AgentInstructionSnapshot?
-    private let directory: String
-    private let probeCount = ProbeCounter()
-    private var probeSocket: LocalApprovedSocket?
-    init(directory: String, expectedHelper: String) {
-        self.directory = directory
+    var edits = AgentInstructionEditBuffer()
+    var clearDocumentID: String?
+    let alternate = AgentInstructionSnapshot(selector: "continue", generation: UUID(), text: "두 번째 합성 지시")
+
+    init(directory: String, expectedHelper: String, wait: Duration, trust: String, database: String?) {
+        // With a database path this is the app's real stored list; without, memory only.
+        drafts = ExplanationDraftWorkspace(store: database.flatMap { SQLiteDraftStore(url: URL(fileURLWithPath: $0)) } ?? MemoryDraftStore())
         access = AgentSessionController(directory: directory, bundledHelper: {
-            AgentPeerSigning.signedHash(at: URL(fileURLWithPath: directory).appendingPathComponent(expectedHelper))
-        })
+            AgentPeerSigning.signedHash(at: URL(fileURLWithPath: expectedHelper))
+        }, selectionWaiting: wait, trust: AgentTrustStore(url: URL(fileURLWithPath: trust)))
         current = AgentInstructionSnapshot(selector: selector, generation: UUID(), text: original)
-        drafts.editDisplay("manual untouched")
+        catalog.didChange = { [weak self] selector, deleted in self?.access.invalidate(selector, deleted: deleted) }
+    }
+
+    func resolve(_ value: String) -> AgentInstructionSnapshot? {
+        if value == alternate.selector { return alternate }
+        if current?.selector == value { return current }
+        guard let record = catalog.record(value) else { return nil }
+        return AgentInstructionSnapshot(selector: value, generation: record.generation, text: record.body)
     }
 
     func command(_ line: String) {
         func report(_ value: String) { print(value); fflush(stdout) }
         let pieces = line.split(separator: " ")
         switch pieces.first {
-        case "bind":
-            report(pieces.count == 2 && access.bind(pid: Int32(pieces[1]) ?? 0, name: "Owner label") ? "ok" : "no")
-        case "inspect-signing-info":
-            var selfCode: SecCode?, staticCode: SecStaticCode?, info: CFDictionary?
-            precondition(SecCodeCopySelf([], &selfCode) == errSecSuccess)
-            precondition(SecCodeCopyStaticCode(selfCode!, [], &staticCode) == errSecSuccess)
-            precondition(SecCodeCopySigningInformation(staticCode!, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess)
-            let values = info as! [String: Any]
-            let dictionary = values[kSecCodeInfoEntitlementsDict as String] as? [String: Bool]
-            let raw = values[kSecCodeInfoEntitlements as String] as? Data
-            report(dictionary?["com.apple.security.network.client"] == false && raw?.isEmpty == false ? "dict+raw" : "missing")
-        case "observe-request":
-            guard pieces.count == 2, let pid = Int32(pieces[1]),
-                  let peer = LocalInstructionPeer.current(pid: pid) else { report("no"); return }
-            // Only verifies whether the production helper sends a request.
-            // This isolated test listener cannot disclose any payload or return a body.
-            let socket = LocalApprovedSocket(peer: peer, endpoint: "i.sock", directory: directory,
-                                            lifetime: .seconds(30), maxFrame: 128) { [probeCount] _, _ in
-                probeCount.record()
-                return nil
+        case "pair": report(access.startPairing() ? "ok" : "no")
+        case "disconnect": access.disconnect(); report("ok")
+        case "enable":
+            report(access.enableReceive(current: { [weak self] in self?.resolve($0) }, workspace: drafts) ? "ok" : "no")
+        case "disable": access.disableReceive(); report("ok")
+        // What the app does at launch, with no click.
+        case "configure": access.configure(current: { [weak self] in self?.resolve($0) }, workspace: drafts); report("ok")
+        case "allow-new": access.allowNewAgent(); report("ok")
+        case "lock": access.setLocked(true); report("ok")
+        case "unlock": access.setLocked(false); report("ok")
+        case "forget":
+            guard let client = access.pair?.client ?? access.trusted.last?.id else { report("no"); return }
+            access.forget(client); report("ok")
+        case "reset-documents":
+            for _ in 0..<16 {
+                guard let tab = drafts.documentTabs.first else { break }
+                if tab.id == drafts.editorDocumentID { drafts.closeActiveDocument(expectedDocumentID: tab.id) }
+                else { drafts.closeInactiveDocument(tab.id) }
             }
-            guard socket.start() else { report("no"); return }
-            probeSocket = socket; report("ok")
-        case "stop-observing":
-            probeSocket?.stop(); probeSocket = nil
-            report(String(probeCount.value()))
-        case "share":
-            report(current.map { access.share($0) } == true ? "ok" : "no")
-        case "receipt":
-            report(access.receive(current: { [weak self] value in
-                guard let self, self.current?.selector == value else { return nil }
-                return self.current
-            }, workspace: drafts) ? "ok" : "no")
-        case "stopreceipt": access.stopReceipt(); report("ok")
+            report("ok")
+        case "documents":
+            let all = drafts.documentTabs.map { tab -> String in
+                drafts.selectDocument(tab.id)
+                return AgentBytes.hash(Data(drafts.display.utf8)) + ":" + String(drafts.display.utf8.count)
+            }
+            report(all.joined(separator: " "))
+        case "select", "select-alternate":
+            let selection = pieces.first == "select-alternate" ? alternate : current
+            report(selection.map { chosen in
+                access.select(chosen, current: { [weak self] in self?.resolve($0) })
+            } == true ? "ok" : "no")
+        case "edit-document": drafts.editDisplay("직접 수정: " + drafts.display); report("ok")
+        case "edit-speech": drafts.editSpeech("음성 수정: " + drafts.speech); report("ok")
+        case "begin-clear": clearDocumentID = drafts.editorDocumentID; report("ok")
+        case "confirm-clear":
+            guard let id = clearDocumentID else { report("no"); return }
+            clearDocumentID = nil
+            drafts.clearEditor(expectedDocumentID: id)
+            report("ok")
+        case "switch-tab", "close-tab":
+            guard pieces.count == 2, let index = Int(pieces[1]), drafts.documentTabs.indices.contains(index) else {
+                report("no"); return
+            }
+            let id = drafts.documentTabs[index].id
+            if pieces.first == "close-tab" { drafts.closeInactiveDocument(id) }
+            else { drafts.selectDocument(id) }
+            report("ok")
+        case "revert-document": drafts.revertReceivedDocument(); report("ok")
+        case "save-new-instruction":
+            let saved = try? catalog.save(label: "합성 새 지시 " + UUID().uuidString, body: "공유하지 않은 저장본")
+            report(saved?.selector ?? "no")
+        case "edit-buffer":
+            guard let current else { report("no"); return }
+            var entry = edits.entry(for: selector, expected: current.generation, label: "합성", text: current.text)
+            entry.text = "저장하지 않은 합성 지시"
+            edits.update(entry, for: selector)
+            report("ok")
+        case "save-buffer":
+            guard let old = current, let entry = edits.drafts[selector], entry.expected == old.generation else {
+                report("no"); return
+            }
+            let file = URL(fileURLWithPath: "inline-preset.json")
+            guard let saved = try? AgentPresetInstructions.write(entry.text, for: "explain", expectedOverride: nil, at: file),
+                  let text = saved["explain"] else { report("no"); return }
+            current = AgentInstructionSnapshot(selector: selector, generation: UUID(), text: text)
+            access.invalidate(selector, deleted: false)
+            edits.revert(selector)
+            report("ok")
+        case "revert-buffer": edits.revert(selector); report("ok")
+        case "revoke": access.revokeSelection(); report("ok")
+        case "reject":
+            access.rejectSelection(selector, reason: .catalogUnavailable)
+            report("ok")
+        case "invalidate-pending":
+            access.invalidate(selector, deleted: false)
+            report("ok")
         case "change", "revert", "delete":
             let verb = pieces[0]
             access.invalidate(selector, deleted: verb == "delete")
@@ -75,13 +120,27 @@ private final class ProbeCounter {
             report("ok")
         case "snapshot":
             let body: [String: Any] = [
-                "count": drafts.pending.count, "editor": drafts.display, "shared": access.shared != nil,
-                "receiving": access.receiving, "old": drafts.pending.map { $0.provenance?.older ?? false },
-                "labels": drafts.pending.map { $0.provenance?.agentLabel ?? "" },
-                "pairs": drafts.pending.map { ($0.provenance?.principal.uuidString ?? "") },
+                "selection": access.selectionStatus.rawValue, "diagnostics": access.selectionDiagnostics.map(\.rawValue),
+                "paired": access.pair != nil, "editor": drafts.display, "speech": drafts.speech,
+                "editorID": drafts.editorDocumentID, "shared": access.shared != nil, "scope": access.instructionScope ?? "",
+                "receiving": access.receiving, "waiting": access.waitingForReceiveHelper,
+                "auto": access.autoReceive, "locked": access.locked, "trusted": access.trusted.map(\.label),
+                "hosts": access.trusted.map(\.host), "persistent": access.pair?.persistent ?? false,
+                "awaiting": access.awaitingApproval ?? "", "status": access.status,
+                "tabs": drafts.documentTabs.map(\.title), "dirty": drafts.documentTabs.map(\.dirty),
+                "unseen": drafts.documentTabs.map(\.unseen), "activeTitle": drafts.activeOriginal?.title ?? "",
+                "canRevert": drafts.canRevertReceived, "original": drafts.activeOriginal?.display ?? "",
+                "associated": drafts.provenance?.selector ?? "",
             ]
             report(String(decoding: try! JSONSerialization.data(withJSONObject: body), as: UTF8.self))
-        case "end": probeSocket?.stop(); access.disconnect(); exit(0)
+        case "browse": drafts.browsing = pieces.last == "on"; report("ok")
+        case "flush": drafts.flush(); report("ok")
+        case "play":
+            // What either play button would hand to synthesis. Nothing is synthesized here.
+            drafts.confirmSpeech()
+            let both = [drafts.playback(), drafts.playback(displayOnly: true)].map { $0.map { [$0.display, $0.speech] } ?? [] }
+            report(String(decoding: try! JSONSerialization.data(withJSONObject: both), as: UTF8.self))
+        case "end": drafts.flush(); access.stopPairing(); report("ok"); exit(0)
         default: exit(2)
         }
     }
@@ -90,7 +149,10 @@ private final class ProbeCounter {
 @main struct LocalExplanationDraftSocketProbe {
     @MainActor static func main() {
         let fixture = AgentFixture(directory: CommandLine.arguments[1],
-                                   expectedHelper: CommandLine.arguments.dropFirst(2).first ?? "helper")
+                                   expectedHelper: CommandLine.arguments.dropFirst(2).first ?? "helper",
+                                   wait: .milliseconds(Int64(CommandLine.arguments.dropFirst(3).first ?? "90000") ?? 90000),
+                                   trust: CommandLine.arguments.dropFirst(4).first ?? "agent-clients-\(UUID()).json",
+                                   database: CommandLine.arguments.dropFirst(5).first)
         print("ready"); fflush(stdout)
         DispatchQueue.global().async {
             while let cmd = readLine() { DispatchQueue.main.async { fixture.command(cmd) } }

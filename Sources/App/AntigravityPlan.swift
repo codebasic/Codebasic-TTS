@@ -9,8 +9,8 @@ enum AntigravityPlan {
             .first { FileManager.default.isExecutableFile(atPath: $0) }.map(URL.init(fileURLWithPath:))
     }
     static var home: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/Codebasic TTS/antigravity-plan")
+        URL(fileURLWithPath: Secrets.appSupportDir, isDirectory: true)
+            .appendingPathComponent("antigravity-plan", isDirectory: true)
     }
     static func environment(home: URL) -> [String: String] {
         ["HOME": home.path,
@@ -32,6 +32,7 @@ enum AntigravityPlan {
         try JSONSerialization.data(withJSONObject: settings).write(to: config.appendingPathComponent("settings.json"), options: .atomic)
     }
     @MainActor static func login() throws {
+        guard !TTSRuntime.isPreview else { throw connectionError("프리뷰에서는 Google 계정 연결을 사용할 수 없습니다.") }
         guard let executable else { throw connectionError("Antigravity CLI를 설치한 뒤 다시 시도하세요.") }
         try prepare(home: home)
         let script = home.appendingPathComponent("Google 로그인.command")
@@ -44,6 +45,7 @@ enum AntigravityPlan {
     }
     @MainActor static func run(arguments: [String], input: Data = Data(), executable: URL? = AntigravityPlan.executable,
                                home: URL = AntigravityPlan.home, timeout: TimeInterval = 180, onOutput: ((Data) throws -> Void)? = nil) async throws -> (Data, Int32) {
+        guard !TTSRuntime.isPreview else { throw connectionError("프리뷰에서는 Google 계정 연결을 사용할 수 없습니다.") }
         guard let executable else { throw connectionError("Antigravity CLI(agy) 설치가 필요합니다.") }
         try prepare(home: home)
         let process = Process()

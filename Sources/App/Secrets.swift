@@ -1,11 +1,8 @@
 import Foundation
 
-/// API key access. MVP reads a plaintext key file from Application Support
-/// (user-readable only); build.sh installs it there from Sidecar/.eleven_key.
-/// Keychain hardening is a later milestone.
+/// API keys live in files under the active build's Application Support directory.
 enum Secrets {
-    static let appSupportDir = ("~/Library/Application Support/Codebasic TTS"
-        as NSString).expandingTildeInPath
+    static let appSupportDir = TTSRuntime.applicationSupport().path
 
     static var elevenLabsKey: String? { key(named: "eleven_key") }
     static var geminiKey: String? { key(named: "gemini_key") }

@@ -1,6 +1,6 @@
 import Foundation
 
-struct AgentDraftOrigin: Equatable, Sendable {
+struct AgentDraftOrigin: Equatable, Sendable, Codable {
     let principal: UUID
     let agentLabel: String
     let selector: String
@@ -34,7 +34,7 @@ final class AgentDeliveryProofs: @unchecked Sendable {
         guard epoch == expected else { return }
         entries.removeAll { $0.expiry <= now }
         entries.append(Entry(token: token, selector: snapshot.selector, revision: snapshot.generation,
-                             digest: snapshot.digest, expiry: now.advanced(by: .seconds(AgentLimits.grantSeconds))))
+                             digest: snapshot.digest, expiry: now.advanced(by: .seconds(AgentLimits.proofSeconds))))
         if entries.count > AgentLimits.proofCount { entries.removeFirst(entries.count - AgentLimits.proofCount) }
     }
 
@@ -54,16 +54,14 @@ final class AgentDeliveryProofs: @unchecked Sendable {
 }
 
 struct AgentRateLimit {
+    /// Both windows slide, so a connection kept open all day is never used up.
     private var recent: [ContinuousClock.Instant] = []
-    private var accepted = 0
 
     mutating func canAccept(now: ContinuousClock.Instant = .now) -> Bool {
-        recent.removeAll { $0.advanced(by: .seconds(60)) <= now }
-        return accepted < AgentLimits.acceptedPerGrant && recent.count < AgentLimits.acceptedPerMinute
+        recent.removeAll { $0.advanced(by: .seconds(3600)) <= now }
+        let minute = recent.filter { $0.advanced(by: .seconds(60)) > now }.count
+        return recent.count < AgentLimits.acceptedPerHour && minute < AgentLimits.acceptedPerMinute
     }
 
-    mutating func mark(now: ContinuousClock.Instant = .now) {
-        accepted += 1
-        recent.append(now)
-    }
+    mutating func mark(now: ContinuousClock.Instant = .now) { recent.append(now) }
 }

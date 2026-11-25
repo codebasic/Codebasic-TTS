@@ -25,20 +25,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         AppDelegate.shared = self
 
         setUpMainMenu()
-        registerServices()
-        registerHotKeys()
+        if TTSRuntime.registersSystemIntegration {
+            registerServices()
+            registerHotKeys()
+        }
         observeState()
+        appState.agentAccess.configure(current: { [weak self] in self?.currentAgentSnapshot($0) },
+                                       workspace: appState.explanationDrafts)
+        observeSessionLock()
+        appState.agentAccess.startPairing()
 
         // Opening the app does not refresh cloud voices. Settings already
         // loads voice/model inventory when the user opens it.
         mainWindow.show()                       // open the management window on launch
 
-        Log.app.info("Codebasic TTS launched. Backend: \(self.appState.backendIdentity, privacy: .public)")
+        Log.app.info("\(TTSRuntime.displayName, privacy: .public) launched. Backend: \(self.appState.backendIdentity, privacy: .public)")
     }
 
     // MARK: - Local MCP opt-in
 
     @objc private func toggleLocalSpeech() {
+        guard !TTSRuntime.isPreview else { return }
         if let socket = localSpeechSocket {
             socket.stop(); localSpeechSocket = nil; localSpeechGate = nil
             localSpeechMenu?.state = .off
@@ -63,6 +70,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func toggleLocalInstructions() { toggleInstructionSharing() }
 
     func toggleInstructionSharing(preselect: LocalInstructionProfile.Name? = nil) {
+        guard !TTSRuntime.isPreview else { return }
         if localInstructionSocket != nil { revokeLocalInstructions(); return }
         guard appState.agentAccess.shared == nil else {
             showInstructionShareError("활성 에이전트 지시 조회를 먼저 해제하세요.")
@@ -117,6 +125,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         localInstructionSocket = socket
+        if appState.agentAccess.selectionStatus == .waitingForHelper,
+           let selector = appState.agentAccess.instructionScope {
+            appState.agentAccess.rejectSelection(selector, reason: .legacySharing)
+        }
         appState.sharedInstructionProfile = profile.name
         localInstructionMenu?.state = .on
         let expiry = DispatchWorkItem { [weak self, weak socket] in
@@ -141,81 +153,71 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         localInstructionMenu?.state = .off
     }
 
-    func pairAgent() {
-        let state = appState.agentAccess
-        let alert = NSAlert()
-        alert.messageText = state.pair == nil ? "서명된 에이전트 도우미 연결" : "에이전트 도우미 다시 연결"
-        alert.informativeText = "표시 이름은 나만 볼 수 있습니다. 서명과 실행 중인 프로세스를 확인하며, 다시 연결하면 이전 허용과 전달 증명이 모두 지워집니다."
-        let name = NSTextField(frame: NSRect(x: 0, y: 32, width: 360, height: 23))
-        name.placeholderString = "내가 지은 에이전트 이름"
-        let pid = NSTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 23))
-        pid.placeholderString = "서명된 도우미 PID"
-        let fields = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 57))
-        fields.addSubview(name); fields.addSubview(pid); alert.accessoryView = fields
-        alert.addButton(withTitle: "이 도우미만 연결"); alert.addButton(withTitle: "취소")
-        guard alert.runModal() == .alertFirstButtonReturn,
-              let value = Int32(pid.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)) else { return }
-        _ = state.bind(pid: value, name: name.stringValue)
+    func selectAgentInstruction(_ selector: String) {
+        let access = appState.agentAccess
+        let custom = LocalInstructionProfile.Name(rawValue: selector) == nil
+        guard localInstructionSocket == nil else {
+            access.rejectSelection(selector, reason: .legacySharing)
+            return
+        }
+        guard !custom || appState.agentCatalog.refresh() else {
+            access.rejectSelection(selector, reason: .catalogUnavailable)
+            return
+        }
+        guard let snapshot = appState.agentSnapshot(selector) else {
+            access.rejectSelection(selector, reason: .catalogUnavailable)
+            return
+        }
+        guard snapshot.shareable else {
+            access.rejectSelection(selector, reason: .invalidInstruction)
+            return
+        }
+        _ = access.select(snapshot, current: { [weak self] in self?.currentAgentSnapshot($0) },
+                          deliveryGate: custom ? appState.agentCatalog.deliveryGate(for: snapshot) : { $0() })
     }
 
-    func toggleAgentSharing(_ selector: String) {
-        let state = appState.agentAccess
-        if state.shared != nil { state.stopShare(); return }
-        guard localInstructionSocket == nil else {
-            showInstructionShareError("호환용 기본 지시 공유를 먼저 해제하세요.")
-            return
+    private func currentAgentSnapshot(_ selector: String) -> AgentInstructionSnapshot? {
+        guard LocalInstructionProfile.Name(rawValue: selector) != nil
+                || appState.agentCatalog.refresh() else { return nil }
+        return appState.agentSnapshot(selector)
+    }
+
+    /// Nothing is received while the screen is locked or another user has the
+    /// console. On return, a remembered agent proves its key again by itself.
+    private func observeSessionLock() {
+        let access = appState.agentAccess
+        if let session = CGSessionCopyCurrentDictionary() as? [String: Any],
+           (session["CGSSessionScreenIsLocked"] as? Bool) == true { access.setLocked(true) }
+        let distributed = DistributedNotificationCenter.default()
+        for (name, value) in [("com.apple.screenIsLocked", true), ("com.apple.screenIsUnlocked", false)] {
+            distributed.addObserver(forName: Notification.Name(name), object: nil, queue: .main) { _ in
+                MainActor.assumeIsolated { access.setLocked(value) }
+            }
         }
-        let custom = LocalInstructionProfile.Name(rawValue: selector) == nil
-        guard !custom || appState.agentCatalog.refresh(),
-              let pair = state.pair, let snapshot = appState.agentSnapshot(selector), snapshot.shareable else {
-            showInstructionShareError("서명된 도우미를 연결하고 공유할 지시문을 선택하세요.")
-            return
-        }
-        let alert = NSAlert()
-        alert.messageText = "\(pair.label) 도우미(PID \(pair.peer.pid))에 아래 지시만 공개할까요?"
-        alert.informativeText = "이 지시의 이 버전만 최대 10분간 공유합니다. 원격 모델을 쓰는 에이전트는 받은 지시문을 해당 서비스로 보낼 수 있습니다. 선택을 바꿔도 다른 지시는 공유되지 않습니다."
-        let scroll = NSTextView.scrollableTextView()
-        scroll.frame = NSRect(x: 0, y: 0, width: 425, height: 225)
-        guard let preview = scroll.documentView as? NSTextView else { return }
-        preview.isRichText = false; preview.isEditable = false; preview.isSelectable = true
-        preview.string = snapshot.text
-        alert.accessoryView = scroll
-        alert.addButton(withTitle: "이 버전만 공개"); alert.addButton(withTitle: "취소")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        guard (!custom || appState.agentCatalog.refresh()), state.pair?.id == pair.id,
-              appState.agentSnapshot(selector) == snapshot, localInstructionSocket == nil else {
-            showInstructionShareError("선택한 도우미나 지시문이 바뀌었습니다. 다시 확인하세요.")
-            return
-        }
-        if !state.share(snapshot, deliveryGate: custom ? appState.agentCatalog.deliveryGate(for: snapshot) : { $0() }) {
-            showInstructionShareError(state.status.isEmpty ? "지시 조회를 허용할 수 없습니다." : state.status)
+        let workspace = NSWorkspace.shared.notificationCenter
+        for (name, value) in [(NSWorkspace.sessionDidResignActiveNotification, true),
+                              (NSWorkspace.sessionDidBecomeActiveNotification, false)] {
+            workspace.addObserver(forName: name, object: nil, queue: .main) { _ in
+                MainActor.assumeIsolated { access.setLocked(value) }
+            }
         }
     }
 
     @objc func toggleDraftReceipt() {
-        let state = appState.agentAccess
-        if state.receiving { state.stopReceipt(); draftReceiptMenu?.state = .off; return }
-        guard let pair = state.pair else {
-            showInstructionShareError("에이전트 탭에서 서명된 도우미를 먼저 연결하세요. 붙여넣기는 계속 사용할 수 있습니다.")
-            return
+        let access = appState.agentAccess
+        if access.autoReceive || access.receiving || access.waitingForReceiveHelper {
+            access.disableReceive()
+        } else {
+            _ = access.enableReceive(current: { [weak self] in self?.currentAgentSnapshot($0) },
+                                     workspace: appState.explanationDrafts)
         }
-        let alert = NSAlert()
-        alert.messageText = "\(pair.label) 도우미의 대본을 받을까요?"
-        alert.informativeText = "이 도우미에 실제 전달한 지시 버전의 대본만 최대 10분간 받습니다. 편집기를 덮어쓰거나 재생하지 않으며 지시문 조회도 따로 허용해야 합니다."
-        alert.addButton(withTitle: "이 도우미 대본만 받기"); alert.addButton(withTitle: "취소")
-        guard alert.runModal() == .alertFirstButtonReturn, state.pair?.id == pair.id else { return }
-        if state.receive(current: { [weak self] selector in
-            guard let self, LocalInstructionProfile.Name(rawValue: selector) != nil
-                    || self.appState.agentCatalog.refresh() else { return nil }
-            return self.appState.agentSnapshot(selector)
-        },
-                         workspace: appState.explanationDrafts) { draftReceiptMenu?.state = .on }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        appState.explanationDrafts.flush()
         localSpeechSocket?.stop()
         revokeLocalInstructions()
-        appState.agentAccess.disconnect()
+        appState.agentAccess.stopPairing()
     }
 
     @objc private func openWindow() { mainWindow.show() }
@@ -268,7 +270,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Global hotkeys (read/explain the selection from any app)
 
-    private let hotKeys = HotKeyCenter()
+    private lazy var hotKeys = HotKeyCenter()
 
     /// ⌃⌥⌘R → read the selection aloud. The selection is
     /// grabbed via a clipboard-preserving copy, so it works even where the
@@ -294,6 +296,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Called by ServiceProvider when the user picks "Codebasic TTS": synthesize
     /// the selected text (cache-first) and play it without opening the window.
     func handleSelectedText(_ text: String) {
+        guard !TTSRuntime.isPreview else { return }
         let preview = text.replacingOccurrences(of: "\n", with: " ").prefix(60)
         Log.app.info("handleSelectedText: \(text.count) chars — \"\(preview, privacy: .public)\"")
         appState.captureHUDTarget()
@@ -307,25 +310,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let appItem = NSMenuItem()
         main.addItem(appItem)
-        let appMenu = NSMenu(title: "Codebasic TTS")
+        let appMenu = NSMenu(title: TTSRuntime.displayName)
         appItem.submenu = appMenu
-        appMenu.addItem(withTitle: "설정…", action: #selector(openSettings), keyEquivalent: ",").target = self
-        appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "재생 중지", action: #selector(stopSpeaking), keyEquivalent: "").target = self
-        let local = appMenu.addItem(withTitle: "로컬 MCP 음성 입력 허용 (이번 실행)",
-                                    action: #selector(toggleLocalSpeech), keyEquivalent: "")
-        local.target = self
-        localSpeechMenu = local
-        let instructions = appMenu.addItem(withTitle: "로컬 MCP 지시 공유 (이번 실행)…",
-                                           action: #selector(toggleLocalInstructions), keyEquivalent: "")
-        instructions.target = self
-        localInstructionMenu = instructions
-        let draftReceipt = appMenu.addItem(withTitle: "외부 대본 받기 허용 (이번 실행)…",
+        if !TTSRuntime.isPreview {
+            appMenu.addItem(withTitle: "설정…", action: #selector(openSettings), keyEquivalent: ",").target = self
+            appMenu.addItem(.separator())
+            appMenu.addItem(withTitle: "재생 중지", action: #selector(stopSpeaking), keyEquivalent: "").target = self
+            let local = appMenu.addItem(withTitle: "로컬 MCP 음성 입력 허용 (이번 실행)",
+                                        action: #selector(toggleLocalSpeech), keyEquivalent: "")
+            local.target = self
+            localSpeechMenu = local
+            let instructions = appMenu.addItem(withTitle: "로컬 MCP 지시 공유 (이번 실행)…",
+                                               action: #selector(toggleLocalInstructions), keyEquivalent: "")
+            instructions.target = self
+            localInstructionMenu = instructions
+        }
+        let draftReceipt = appMenu.addItem(withTitle: "외부 대본 받기 허용 (이번 실행)",
                                            action: #selector(toggleDraftReceipt), keyEquivalent: "")
         draftReceipt.target = self
         draftReceiptMenu = draftReceipt
         appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "Codebasic TTS 가리기", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        appMenu.addItem(withTitle: "\(TTSRuntime.displayName) 가리기", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         appMenu.addItem(withTitle: "다른 항목 가리기",
                         action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
             .keyEquivalentModifierMask = [.command, .option]
@@ -351,8 +356,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         windowMenu.addItem(withTitle: "최소화", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
         windowMenu.addItem(withTitle: "닫기", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         windowMenu.addItem(.separator())
-        windowMenu.addItem(withTitle: "Codebasic TTS 열기", action: #selector(openWindow), keyEquivalent: "").target = self
-        windowMenu.addItem(withTitle: "재생 기록", action: #selector(openHistory), keyEquivalent: "").target = self
+        windowMenu.addItem(withTitle: "\(TTSRuntime.displayName) 열기", action: #selector(openWindow), keyEquivalent: "").target = self
+        if !TTSRuntime.isPreview {
+            windowMenu.addItem(withTitle: "재생 기록", action: #selector(openHistory), keyEquivalent: "").target = self
+        }
         NSApp.windowsMenu = windowMenu
 
         NSApp.mainMenu = main

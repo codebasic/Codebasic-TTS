@@ -8,7 +8,7 @@ final class LocalSpeechSocket {
     private var fd: Int32 = -1
     private var source: DispatchSourceRead?
     private var socketInode: ino_t = 0
-    private let directory = "/private/tmp/codebasic-tts-mcp-\(getuid())"
+    private let directory = TTSRuntime.socketDirectory
     private var path: String { directory + "/s.sock" }
     private let handler: @MainActor (String, String) -> String
 

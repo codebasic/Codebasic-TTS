@@ -19,7 +19,7 @@
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>LSMinimumSystemVersion</key>
-    <string>13.0</string>
+    <string>14.0</string>
 
     <!-- macOS Services registration. NSMessage maps to the selector
          readSelectedText:userData:error: in ServiceProvider.swift. -->

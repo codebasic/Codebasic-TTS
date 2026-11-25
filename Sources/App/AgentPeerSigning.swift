@@ -4,9 +4,8 @@ import Foundation
 import Security
 
 enum AgentPeerSigning {
-    static let appID = "com.seongjoo.SelectedTextTTS"
-    static let helperID = "com.seongjoo.SelectedTextTTS.agent-helper"
-    static let pinEnvironment = "CODEBASIC_TTS_SIGNER_SHA1"
+    static let appID = TTSRuntime.appID
+    static let helperID = TTSRuntime.helperID
 
     static func ownLeaf() -> String? {
         var code: SecCode?
@@ -32,11 +31,6 @@ enum AgentPeerSigning {
         return signedHash(code)
     }
 
-    static func matches(pid: pid_t, identifier: String, leaf: String, expectedHash: Data) -> Bool {
-        check([kSecGuestAttributePid as String: NSNumber(value: pid)], identifier: identifier, leaf: leaf,
-              expectedHash: expectedHash)
-    }
-
     static func matches(socket fd: Int32, identifier: String, leaf: String, expectedHash: Data? = nil) -> Bool {
         var uid: uid_t = 0, gid: gid_t = 0
         var token = audit_token_t()
@@ -46,6 +40,23 @@ enum AgentPeerSigning {
               count == MemoryLayout<audit_token_t>.size else { return false }
         return check([kSecGuestAttributeAudit as String: Data(bytes: &token, count: Int(count))],
                      identifier: identifier, leaf: leaf, expectedHash: expectedHash)
+    }
+
+    /// "identifier:team" of a validly signed, team-identified running program.
+    /// Looked up by PID, so it narrows who may reuse an approved key but is not
+    /// by itself proof of identity; the key signature is.
+    static func teamSignedIdentity(pid: pid_t) -> String? {
+        var guest: SecCode?
+        var code: SecStaticCode?
+        var info: CFDictionary?
+        guard SecCodeCopyGuestWithAttributes(nil, [kSecGuestAttributePid as String: pid] as CFDictionary, [], &guest) == errSecSuccess,
+              let guest, SecCodeCheckValidity(guest, [], nil) == errSecSuccess,
+              SecCodeCopyStaticCode(guest, [], &code) == errSecSuccess, let code,
+              SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
+              let details = info as? [String: Any],
+              let identifier = details[kSecCodeInfoIdentifier as String] as? String,
+              let team = details[kSecCodeInfoTeamIdentifier as String] as? String, !team.isEmpty else { return nil }
+        return identifier + ":" + team
     }
 
     private static func signedHash(_ code: SecStaticCode) -> Data? {

@@ -18,7 +18,7 @@ import Foundation
             while true { pause() } // parent terminates this synthetic fixture without cleanup
         }
         precondition(chdir(root.path) == 0) // short AF_UNIX paths, all files remain in this fixture
-        for endpoint in ["i.sock", "d.sock"] {
+        for endpoint in ["i.sock", "d.sock", "p.sock"] {
             let proc = Process(), output = Pipe()
             proc.executableURL = executable
             proc.currentDirectoryURL = root
@@ -73,6 +73,6 @@ import Foundation
             precondition(lstat(path, &current) == 0 && live.st_ino == current.st_ino && unlink(path) == 0)
         }
         precondition(!transport("native", "not-allowed.sock").start())
-        print("Approved sockets: live ownership preserved, crash recovery for both endpoints, no recovery of unknown inode/symlink/file/path")
+        print("Approved sockets: live ownership preserved, crash recovery for all endpoints, no recovery of unknown inode/symlink/file/path")
     }
 }
