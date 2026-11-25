@@ -170,24 +170,35 @@ final class ExplanationDraftWorkspace: ObservableObject {
             arrivalNotice = "새 대본이 목록에 추가되었습니다. 보던 글은 그대로입니다."
             return .accepted
         }
-        parkActiveDocument()
+        guard parkActiveDocument() else {
+            // The arrival is stored; the unsaved editor text must not be replaced.
+            index.append(DraftSummary(id: draft.id, document: arrived, unseen: true))
+            arrivalNotice = "새 대본은 목록에 추가했지만, 보던 글을 저장하지 못해 편집기에 그대로 두었습니다."
+            return .accepted
+        }
         index.append(DraftSummary(id: draft.id, document: arrived))
         activate(draft.id, arrived)
         arrivalNotice = kept ? "새 대본을 받았습니다. 보던 글은 목록에 그대로 있습니다." : "새 대본을 받았습니다."
         return .accepted
     }
 
-    /// Writes the document in the editor to the store and lists it.
-    private func parkActiveDocument() {
+    static let parkFailureNotice = "보던 글을 저장하지 못해 편집기에 그대로 두었습니다. 저장 공간을 확인한 뒤 다시 시도하세요."
+
+    /// Writes the document in the editor to the store, lists it and records it
+    /// as the document to reopen. Returns false when the write failed: the
+    /// editor is then the only complete copy, so callers must not replace it.
+    @discardableResult
+    private func parkActiveDocument() -> Bool {
         saveTask?.cancel(); saveTask = nil
-        guard shouldParkActiveDocument else { return }
+        guard shouldParkActiveDocument else { return true }
         let id = editorDocumentID, document = capturedDocument
-        // A failed write keeps the text in the editor's place in the list; the
-        // stored copy is then the older one.
-        _ = store.save(id, document)
+        guard store.save(id, document) else { return false }
         let row = DraftSummary(id: id, document: document)
         if let position = index.firstIndex(where: { $0.id == id }) { index[position] = row }
         else { index.append(row) }
+        // Manual documents reopen after a restart just like received ones.
+        store.activeID = id
+        return true
     }
 
     /// Makes what is on screen durable. Called shortly after edits and at quit.
@@ -203,7 +214,7 @@ final class ExplanationDraftWorkspace: ObservableObject {
 
     func selectDocument(_ id: String) {
         guard id != editorDocumentID, index.contains(where: { $0.id == id }), let next = store.load(id) else { return }
-        parkActiveDocument()
+        guard parkActiveDocument() else { arrivalNotice = Self.parkFailureNotice; return }
         activate(id, next)
     }
 
@@ -245,7 +256,7 @@ final class ExplanationDraftWorkspace: ObservableObject {
     @discardableResult
     func newDocument() -> Bool {
         guard shouldParkActiveDocument else { return true }
-        parkActiveDocument()
+        guard parkActiveDocument() else { arrivalNotice = Self.parkFailureNotice; return false }
         resetToBlank()
         return true
     }

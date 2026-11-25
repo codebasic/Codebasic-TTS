@@ -330,7 +330,37 @@ enum CodeExplanation { static let noChange = "변경 없음" }
         failing.editDisplay("쓰던 글")
         memory.failWrites = true
         precondition(failing.receiveDocument(titled) == .busy && failing.display == "쓰던 글" && failing.unseenArrivals == 0)
-        print("Draft history: title rules, title kept out of body and playback, key duplicate/conflict, fallback title, 154 documents, search-time arrival, restart restore, storage failure passed")
+
+        // Parking the editor fails: switching, a new document and an arrival keep the unsaved text.
+        let parkStore = MemoryDraftStore()
+        let parking = ExplanationDraftWorkspace(store: parkStore)
+        precondition(parking.receiveDocument(ExplanationDraft(id: "p1", display: "받은 글", speech: nil)!) == .accepted)
+        precondition(parking.newDocument())
+        parking.editDisplay("저장 안 된 글")
+        let unsavedID = parking.editorDocumentID
+        parkStore.failWritesFor = [unsavedID]
+        parking.selectDocument("p1")
+        precondition(parking.display == "저장 안 된 글" && parking.editorDocumentID == unsavedID && parking.arrivalNotice != nil)
+        precondition(!parking.newDocument() && parking.display == "저장 안 된 글")
+        precondition(parking.receiveDocument(ExplanationDraft(id: "p2", display: "실패 중 도착", speech: nil)!) == .accepted)
+        precondition(parking.display == "저장 안 된 글" && parking.editorDocumentID == unsavedID)
+        precondition(parking.documentTabs.contains { $0.id == "p2" && $0.unseen } && parkStore.load("p2") != nil)
+        // Once storage works again the same text is saved and the switch goes through.
+        parkStore.failWritesFor = []
+        parking.selectDocument("p1")
+        precondition(parking.display == "받은 글" && parkStore.load(unsavedID)?.display == "저장 안 된 글")
+
+        // A manual document being edited reopens after a restart.
+        let manualStore = MemoryDraftStore()
+        let manual = ExplanationDraftWorkspace(store: manualStore)
+        manual.editDisplay("직접 쓴 글")
+        let manualDocID = manual.editorDocumentID
+        manual.flush()
+        precondition(manualStore.activeID == manualDocID)
+        let reopened = ExplanationDraftWorkspace(store: manualStore)
+        precondition(reopened.display == "직접 쓴 글" && reopened.editorDocumentID == manualDocID)
+        precondition(reopened.newDocument() && manualStore.activeID == nil)
+        print("Draft history: title rules, title kept out of body and playback, key duplicate/conflict, fallback title, 154 documents, search-time arrival, restart restore, storage failure, failed park keeps editor, manual draft reopens passed")
     }
 
     /// Approval record rules, with real P-256 signatures and a controllable clock.

@@ -74,11 +74,13 @@ final class MemoryDraftStore: DraftStoring {
     private var order: [String] = []
     var activeID: String?
     var failWrites = false
+    /// Refuse writes for these ids only, to test one failing document.
+    var failWritesFor: Set<String> = []
 
     func summaries() -> [DraftSummary] { order.compactMap { id in documents[id].map { DraftSummary(id: id, document: $0) } } }
     func load(_ id: String) -> DraftDocument? { documents[id] }
     func save(_ id: String, _ document: DraftDocument) -> Bool {
-        guard !failWrites else { return false }
+        guard !failWrites, !failWritesFor.contains(id) else { return false }
         if documents[id] == nil { order.append(id) }
         documents[id] = document
         return true
