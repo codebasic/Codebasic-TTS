@@ -106,11 +106,11 @@ def build_hosts(root, env):
             "CFBundlePackageType": "APPL",
             "CFBundleVersion": "1",
         }
-        if registered:
-            info["CodebasicTTSDirectMCPHost"] = True
         with (bundle / "Contents/Info.plist").open("wb") as plist:
             plistlib.dump(info, plist)
-        sign(bundle, identifier)
+        # A certificate-signed app is identified by its signature; an ad-hoc signed
+        # one cannot be told apart from other apps, so its approval lasts one run.
+        sign(bundle, identifier, IDENTITY if registered else "-")
         hosts[name] = binary
     return hosts
 
@@ -263,7 +263,7 @@ def verify(root, hosts):
         expect_status(broker, "approval_required")
         assert broker.send("broker-restart", "공용 런처의 재실행 원고")["outcome"] == "rejected"
         broker.close()
-        check("lock cancels stale approvals and unregistered signed host requires approval for each run")
+        check("lock cancels stale approvals and an ad-hoc signed host requires approval for each run")
 
         assert server("disconnect " + client_a["id"]) == "ok"
         expect_status(a, "disabled")
