@@ -853,6 +853,12 @@ final class AppState: ObservableObject {
     // writers racing into `explanationText`). The streaming workers below stream
     // deltas straight into `explanationText` and finalize (strip + cache) at end.
 
+    private func recordExplanation(_ text: String, kind: ExplanationJournal.Kind, origin: ExplanationJournal.Origin) {
+        let directory = URL(fileURLWithPath: Secrets.appSupportDir).appendingPathComponent("explanation-journal", isDirectory: true)
+        do { try ExplanationJournal(directory: directory).record(text, kind: kind, origin: origin) }
+        catch { statusText = "해설은 생성됐지만 기록 저장에 실패했습니다" }
+    }
+
     func generateExplanation(force: Bool = false) {
         cancelActiveWork()
         explainTask = Task { [weak self] in _ = await self?.runExplain(force: force) }
@@ -913,7 +919,8 @@ final class AppState: ObservableObject {
                                                      temperature: explainer.temperature, reasoning: explainer.reasoningLevel.rawValue)
         if !force, let cached = normCache.script(forKey: nk) {
             guard !Task.isCancelled, explanationHistory.commit(request, output: cached) else { return nil }
-            explanationText = cached; lastExplainedCode = code; lastSegment = cached; return cached
+            explanationText = cached; lastExplainedCode = code; lastSegment = cached
+            recordExplanation(cached, kind: .full, origin: .cache); return cached
         }
         explanationText = ""
         statusText = "해설 생성 중…"
@@ -940,6 +947,7 @@ final class AppState: ObservableObject {
         lastExplainedCode = code       // baseline for "이어서 해설"
         lastSegment = out
         statusText = ""
+        recordExplanation(out, kind: .full, origin: .generated)
         return out
     }
 
@@ -962,7 +970,12 @@ final class AppState: ObservableObject {
                                                      model: explainer.model, temperature: explainer.temperature,
                                                      reasoning: explainer.reasoningLevel)
         if !force, let cached = normCache.script(forKey: nk) {
-            applyContinuation(cached, newBaseline: current); return cached
+            guard !Task.isCancelled else { return nil }
+            applyContinuation(cached, newBaseline: current)
+            if !cached.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix(CodeExplanation.noChange) {
+                recordExplanation(cached, kind: .continuation, origin: .cache)
+            }
+            return cached
         }
         explaining = true
         defer { explaining = false }
@@ -984,6 +997,7 @@ final class AppState: ObservableObject {
             statusText = "이어서 해설 오류: \(error.localizedDescription)"
             return nil
         }
+        guard !Task.isCancelled else { explanationText = original; return nil }
         let out = CodeExplanation.stripMarkdown(acc)
         if out.isEmpty || out.hasPrefix(CodeExplanation.noChange) {
             explanationText = original          // nothing to add → restore
@@ -996,6 +1010,7 @@ final class AppState: ObservableObject {
         lastSegment = out
         lastExplainedCode = current
         statusText = "이어서 해설 추가됨"
+        recordExplanation(out, kind: .continuation, origin: .generated)
         return out
     }
 
