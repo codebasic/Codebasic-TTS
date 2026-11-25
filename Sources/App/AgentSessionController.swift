@@ -633,6 +633,8 @@ import Security
     func enableReceive(current: @escaping @MainActor (String) -> AgentInstructionSnapshot?,
                        workspace: ExplanationDraftWorkspace) -> Bool {
         guard !locked, startPairing(), setAutoReceive(true) else { return false }
+        // Turning receipt back on by hand starts every client's allowance over.
+        rates.removeAll()
         configure(current: current, workspace: workspace)
         dropIfGone()
         for binding in bindings.values { _ = activateReceive(binding) }
@@ -711,6 +713,8 @@ import Security
             trusted = trust.clients
         }
         defer { refreshConnections() }
+        // Resuming this client by hand starts its allowance over.
+        rates[client] = nil
         guard let binding = bindings[client] else { return row.persistent }
         binding.receiptEnabled = true
         return activateReceive(binding)

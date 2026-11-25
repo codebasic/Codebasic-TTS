@@ -628,8 +628,12 @@ struct ClientKey {
         guard out >= 0 else { return nil }
         defer { unlink(temp.path) }
         let writer = FileHandle(fileDescriptor: out, closeOnDealloc: true)
+        // Publish with an exclusive rename, not link()+unlink(): a helper killed
+        // between those two calls would leave the key with st_nlink == 2, which
+        // the read path above rejects forever. rename keeps one link at every
+        // instant, and RENAME_EXCL never replaces a key that already exists.
         guard (try? writer.write(contentsOf: bytes)) != nil, (try? writer.synchronize()) != nil,
-              link(temp.path, url.path) == 0 else { return nil }
+              renamex_np(temp.path, url.path, UInt32(RENAME_EXCL)) == 0 else { return nil }
         return make(key, persistent: true)
     }
 
