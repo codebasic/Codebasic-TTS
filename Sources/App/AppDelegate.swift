@@ -20,8 +20,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         setUpMainMenu()
         setUpStatusItem()
-        registerServices()
-        registerHotKeys()
+        // V2 is a conversation app; no V1 Services or global hotkey registrations.
         observeState()
 
         // Review-only 해설 (auto-play off): surface the window so it can be checked.
@@ -29,7 +28,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.mainWindow.show()
             NSApp.activate(ignoringOtherApps: true)
         }
-        if appState.keyPresent { appState.refreshVoices() }
+        // ElevenLabs is contacted only by explicit playback or settings actions.
         mainWindow.show()                       // open the management window on launch
 
         Log.app.info("Codebasic TTS launched. Backend: \(self.appState.backendIdentity, privacy: .public)")

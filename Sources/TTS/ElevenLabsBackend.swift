@@ -68,6 +68,7 @@ struct ElevenLabsBackend: TTSBackend {
                         throw NSError(domain: "ElevenLabs", code: http.statusCode,
                                       userInfo: [NSLocalizedDescriptionKey: msg])
                     }
+                    V2Runtime.recordLiveEvidence("elevenlabs-response", ["http_status": http.statusCode, "input_characters": segment.count, "audio_bytes": buffer.count])
                     continuation.yield(buffer)
                     continuation.finish()
                 } catch {

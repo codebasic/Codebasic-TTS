@@ -224,9 +224,11 @@ final class AppState: ObservableObject {
     }
 
     func refreshAllModels() {
+        guard !V2Runtime.suppressDiscovery else { return }
         for e in endpoints where e.isEnabled { refreshEndpointModels(e) }
     }
     func refreshAllModelsIfNeeded() {
+        guard !V2Runtime.suppressDiscovery else { return }
         for e in endpoints
         where e.isEnabled && (endpointModels[e.id.uuidString] ?? []).isEmpty {
             // Fetching a keyed endpoint without a key just errors — wait for the key.
@@ -709,6 +711,7 @@ final class AppState: ObservableObject {
     /// gemini=`GET /models`, ollama=`GET /api/tags`) and swap it into the picker.
     /// Reuses the existing per-style helpers — no new network code.
     func refreshEndpointModels(_ endpoint: CustomEndpoint) {
+        guard !V2Runtime.suppressDiscovery else { return }
         let e = endpoint
         let id = e.id.uuidString
         if !e.usesPlan && (e.apiStyle == .gemini || e.apiStyle == .anthropic) && endpointKey(e).isEmpty {
@@ -1387,10 +1390,11 @@ final class AppState: ObservableObject {
         try? k.write(toFile: path, atomically: true, encoding: .utf8)
         keyPresent = !k.isEmpty
         connectionStatus = k.isEmpty ? "키 삭제됨" : "키 저장됨"
-        if !k.isEmpty { refreshVoices() }
+        // V2 saves credentials without contacting ElevenLabs.
     }
 
     func refreshVoices() {
+        guard !V2Runtime.suppressDiscovery else { return }
         refreshModels()
         guard let key = Secrets.elevenLabsKey else { connectionStatus = "키 없음"; return }
         connectionStatus = "연결 확인 중…"
@@ -1411,6 +1415,7 @@ final class AppState: ObservableObject {
 
     /// Keep the last successful catalog and selected model through all failures.
     func refreshModels() {
+        guard !V2Runtime.suppressDiscovery else { return }
         guard !refreshingModels else { return }
         guard let key = Secrets.elevenLabsKey else { modelStatus = "모델 조회: 키 없음"; return }
         refreshingModels = true
@@ -1631,13 +1636,12 @@ final class AppState: ObservableObject {
     private func seedEndpoints(from o: [String: Any]) {
         func str(_ key: String, _ def: String) -> String { o[key] as? String ?? def }
 
-        if let k = Secrets.geminiKey { Secrets.writeEndpointKey(CustomEndpoint.geminiSeedID, k) }
-        if let k = Secrets.zaiKey { Secrets.writeEndpointKey(CustomEndpoint.zaiSeedID, k) }
+        // V2 never migrates or copies credential files.
 
         let gemini = CustomEndpoint(id: CustomEndpoint.geminiSeedID, name: "Gemini",
                                     baseURL: str("geminiBaseURL", GeminiNormalizer.defaultBaseURL),
                                     apiStyle: .gemini,
-                                    defaultModel: str("geminiModel", "gemini-2.0-flash"))
+                                    defaultModel: str("geminiModel", "gemini-2.5-flash"))
         let zai = CustomEndpoint(id: CustomEndpoint.zaiSeedID, name: "Z.ai",
                                  baseURL: str("zaiBaseURL", ZAINormalizer.defaultBaseURL),
                                  apiStyle: .openAICompatible,
@@ -1656,7 +1660,7 @@ final class AppState: ObservableObject {
             let v = str("explainZAIModel", "")
             return v == ZAINormalizer.fallbackModels.first ? "" : v
         }()
-        let legacyExplainGemini = str("explainGeminiModel", gemini.defaultModel)
+        let legacyExplainGemini = str("explainGeminiModel", "gemini-flash-lite-latest")
         let legacyExplainOllama = str("explainOllamaModel", ollama.defaultModel)
         explainRoleModels = [
             gemini.id.uuidString: legacyExplainGemini == gemini.defaultModel ? "" : legacyExplainGemini,
@@ -1679,7 +1683,7 @@ final class AppState: ObservableObject {
             }
         }
         let ollamaID = CustomEndpoint.ollamaSeedID.uuidString
-        explainEndpointID = seedID(forLegacy: o["explainProvider"] as? String, ollamaID)
+        explainEndpointID = seedID(forLegacy: o["explainProvider"] as? String, gemini.id.uuidString)
         scriptEndpointID = seedID(forLegacy: o["scriptProvider"] as? String, ollamaID)
         visionEndpointID = seedID(forLegacy: o["visionProvider"] as? String, explainEndpointID)
     }

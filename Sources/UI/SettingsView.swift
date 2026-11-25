@@ -87,12 +87,12 @@ struct SettingsView: View {
             }
         }
         .sheet(isPresented: $showGlossary) { GlossaryEditorView() }
-        .sheet(item: $editingService) { endpoint in ServiceEditor(endpoint: endpoint).environmentObject(app) }
+        .sheet(item: $editingService) { endpoint in ServiceEditor(endpoint: endpoint).environmentObject(app).disabled(V2Runtime.offline) }
         .onAppear {
             keyInput = Secrets.elevenLabsKey ?? ""
             editingKey = !app.keyPresent
             app.refreshAllModelsIfNeeded()
-            if app.voices.isEmpty && app.keyPresent { app.refreshVoices() }
+            // V2 never contacts ElevenLabs on opening settings.
         }
         .onDisappear { preview.stop() }
         .onChange(of: category) { _, _ in preview.stop() }
@@ -113,7 +113,7 @@ struct SettingsView: View {
                     .font(.callout).foregroundStyle(.secondary)
                 if editingKey {
                     SecureField("API 키", text: $keyInput)
-                    Button("저장 및 연결 확인") {
+                    Button("저장") {
                         app.saveKey(keyInput)
                         editingKey = false
                     }.disabled(keyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
@@ -122,7 +122,7 @@ struct SettingsView: View {
                         Text("API 키  ••••••••").foregroundStyle(.secondary)
                         Spacer()
                         Button("변경") { editingKey = true }
-                        Button("연결 확인") { app.refreshVoices() }
+                        Text("재생 시 연결").font(.caption)
                     }
                 }
             } else {
@@ -139,7 +139,7 @@ struct SettingsView: View {
         if app.backendKind.hasVoiceList {
             Section("보이스 및 모델") {
                 if app.voices.isEmpty {
-                    Text("먼저 연결을 확인하면 보이스 목록이 표시됩니다.").foregroundStyle(.secondary)
+                    TextField("ElevenLabs 보이스 ID", text: saved(\.voiceId))
                 } else {
                     Picker("보이스", selection: Binding(get: { app.voiceId }, set: { id in
                         app.voiceId = id
@@ -161,8 +161,7 @@ struct SettingsView: View {
                 HStack {
                     Text(app.modelStatus).font(.caption).foregroundStyle(.secondary)
                     Spacer()
-                    Button("모델 새로고침") { app.refreshModels() }
-                        .disabled(!app.keyPresent || app.refreshingModels)
+                    TextField("합성 모델 ID", text: saved(\.modelId))
                 }
             }
         }

@@ -11,6 +11,7 @@ final class QueuePlayer {
     deinit { MemoryDiagnostics.end(diagnosticID) }
     private let player = AVQueuePlayer()
     var onFinish: (() -> Void)?
+    var onFailure: (() -> Void)?
 
     private var urls: [URL] = []          // every chunk URL, in order
     private var playIndex = 0             // index of the currently-playing chunk
@@ -52,6 +53,8 @@ final class QueuePlayer {
             forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main
         ) { [weak self] _ in self?.itemFinished() }
         observers.append(obs)
+        let failure = NotificationCenter.default.addObserver(forName: .AVPlayerItemFailedToPlayToEndTime, object: item, queue: .main) { [weak self] _ in self?.onFailure?() }
+        observers.append(failure)
         player.insert(item, after: nil)
     }
 
