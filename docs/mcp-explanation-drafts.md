@@ -62,6 +62,18 @@ Helpers/tts_mcp_client.py --helper "<앱>/Contents/Helpers/CodebasicAgentMCP" se
 
 제품과 프리뷰 모두 앱·도우미의 빌드 타깃과 `LSMinimumSystemVersion`이 macOS 14.0입니다(`build.sh`의 `MIN_OS`). 소스가 macOS 14의 SwiftUI `onChange(of:initial:_:)`를 쓰므로 13은 지원하지 않습니다.
 
+## 연결 로그로 확인
+
+앱은 연결 판단마다 `agent` 카테고리에 `[AGENT-CONN]` 한 줄을 남깁니다. 대본·지시·키는 기록하지 않습니다.
+
+```sh
+/usr/bin/log show --last 1h --style compact --predicate 'subsystem == "com.seongjoo.SelectedTextTTS" AND category == "agent"'
+```
+
+- `connect host=<앱 식별자|unverified> key=<키 ID 앞 12자> lookup=<trusted|unknown|revoked|host_changed> result=<상태>`: 재연결 때 앱을 알아봤는지와 결과. 승인한 앱이 재시작 후 `lookup=trusted result=ready`(또는 `receiving_only`)이면 재승인 없이 연결된 것입니다.
+- `approve host=… client=… scope=<persistent|this_run> result=ok|store_failed`: 승인. `this_run`은 앱을 식별할 수 없어 이번 실행에만 허용한 경우입니다.
+- `revoke host=… client=… result=ok|unsaved`: 승인 철회.
+
 ## 합성 데이터로 확인
 
 `TTS_REQUIRE_STABLE_SIGNING=1 ./build.sh build`는 앱과 도우미의 안정적인 서명과 강화 런타임을 확인합니다. `./build.sh test`는 저장 충돌과 소켓 재시작을 포함한 단위 테스트를 실행합니다.
