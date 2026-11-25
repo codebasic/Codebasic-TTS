@@ -367,17 +367,24 @@ enum CodeExplanation { static let noChange = "변경 없음" }
         clock += 120
         precondition(open().lookup(keyID: keyID, host: "h") == .expired)
         let renewed = try store.trust(publicKey: publicKey, label: "claude", host: "h")
-        precondition(renewed.id != client.id && store.clients.count == 1)
+        precondition(renewed.id == client.id && store.clients.count == 1)
 
-        // A new key under the same name from the same launcher supersedes the old record only.
-        _ = try store.trust(publicKey: P256.Signing.PrivateKey().publicKey.x963Representation, label: "codex", host: "h")
-        let replaced = try store.trust(publicKey: P256.Signing.PrivateKey().publicKey.x963Representation, label: "codex", host: "h")
-        precondition(store.clients.map(\.id) == [renewed.id, replaced.id])
+        // Independent hosts do not replace one another even with identical labels.
+        let duplicateLabel = try store.trust(publicKey: P256.Signing.PrivateKey().publicKey.x963Representation,
+                                             label: "claude", host: "separate-host")
+        precondition(store.clients.map(\.id) == [renewed.id, duplicateLabel.id])
+        precondition(store.setReceiptEnabled(false, for: renewed.id))
+        store = open()
+        precondition(store.autoReceive && store.clients.map(\.receiptEnabled) == [false, true])
+        do {
+            _ = try store.trust(publicKey: publicKey, label: "claude", host: "another-host")
+            preconditionFailure("a different host must not replace this key's approval")
+        } catch AgentTrustStore.Failure.hostChanged {}
         for index in 2..<AgentTrustStore.maxClients {
-            _ = try store.trust(publicKey: P256.Signing.PrivateKey().publicKey.x963Representation, label: "x\(index)", host: "h")
+            _ = try store.trust(publicKey: P256.Signing.PrivateKey().publicKey.x963Representation, label: "x\(index)", host: "host-\(index)")
         }
         do {
-            _ = try store.trust(publicKey: other.publicKey.x963Representation, label: "x", host: "h")
+            _ = try store.trust(publicKey: other.publicKey.x963Representation, label: "x", host: "extra-host")
             preconditionFailure("a ninth client must not evict an approved one")
         } catch AgentTrustStore.Failure.full {}
 
@@ -389,12 +396,31 @@ enum CodeExplanation { static let noChange = "변경 없음" }
             preconditionFailure("a forgotten key must not be approved again")
         } catch AgentTrustStore.Failure.revoked {}
 
+        let retryURL = directory.appendingPathComponent("agent-denial.json")
+        var writesFail = false
+        let retry = AgentTrustStore(url: retryURL, write: { data, url in
+            if writesFail { throw CocoaError(.fileWriteOutOfSpace) }
+            try AgentTrustStore.writePrivately(data, url)
+        })
+        let registeredHost = AgentPairing.registeredHostPrefix + "test"
+        let approved = try retry.trust(publicKey: publicKey, label: "same", host: registeredHost)
+        let rotated = try retry.trust(publicKey: other.publicKey.x963Representation, label: "same", host: registeredHost)
+        precondition(approved.id == rotated.id && retry.lookup(keyID: keyID, host: registeredHost) == .revoked)
+        precondition(retry.setAutoReceive(true))
+        writesFail = true
+        precondition(!retry.setReceiptEnabled(false, for: rotated.id) && !retry.clients[0].receiptEnabled)
+        precondition(!retry.setAutoReceive(false) && !retry.autoReceive)
+        writesFail = false
+        precondition(retry.setReceiptEnabled(false, for: rotated.id))
+        let restarted = AgentTrustStore(url: retryURL)
+        precondition(!restarted.autoReceive && restarted.clients.count == 1 && !restarted.clients[0].receiptEnabled)
+
         // Anything but our own private, intact file is no trust at all.
         precondition(chmod(url.path, 0o644) == 0 && open().clients.isEmpty && !open().autoReceive)
         precondition(chmod(url.path, 0o600) == 0 && !open().clients.isEmpty)
         try Data("{".utf8).write(to: url)
         precondition(chmod(url.path, 0o600) == 0 && open().clients.isEmpty)
-        print("Trust store: signature binding, restart, host change, sliding idle expiry, full, forget tombstone, and unreadable-file fail-closed passed")
+        print("Trust store: signature binding, restart, host change, expiry, app key rotation, capacity, revocation and failed-write denial passed")
     }
 
     static func childProcess(url: URL, mode: String, selector: String) throws -> (Process, FileHandle) {

@@ -1,3 +1,4 @@
+import CoreFoundation
 import CryptoKit
 import Darwin
 import Foundation
@@ -42,21 +43,65 @@ enum AgentPeerSigning {
                      identifier: identifier, leaf: leaf, expectedHash: expectedHash)
     }
 
-    /// "identifier:team" of a validly signed, team-identified running program.
-    /// Looked up by PID, so it narrows who may reuse an approved key but is not
-    /// by itself proof of identity; the key signature is.
-    static func teamSignedIdentity(pid: pid_t) -> String? {
+    /// Only a directly launching app whose signed bundle explicitly declares ownership
+    /// of the MCP transport can have durable approval. An unregistered launcher can
+    /// still ask for approval for one live helper.
+    static func registeredHost(pid: pid_t) -> String? {
+        guard let child = process(pid), child.pbi_ppid > 1 else { return nil }
+        let parentPID = pid_t(child.pbi_ppid)
+        guard let parent = process(parentPID), let runningPath = executablePath(parentPID) else { return nil }
+
         var guest: SecCode?
         var code: SecStaticCode?
         var info: CFDictionary?
-        guard SecCodeCopyGuestWithAttributes(nil, [kSecGuestAttributePid as String: pid] as CFDictionary, [], &guest) == errSecSuccess,
-              let guest, SecCodeCheckValidity(guest, [], nil) == errSecSuccess,
+        guard SecCodeCopyGuestWithAttributes(nil, [kSecGuestAttributePid as String: parentPID] as CFDictionary,
+                                              [], &guest) == errSecSuccess, let guest,
+              SecCodeCheckValidity(guest, [], nil) == errSecSuccess,
               SecCodeCopyStaticCode(guest, [], &code) == errSecSuccess, let code,
               SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
-              let details = info as? [String: Any],
+              let details = info as? [String: Any], hardened(details),
               let identifier = details[kSecCodeInfoIdentifier as String] as? String,
-              let team = details[kSecCodeInfoTeamIdentifier as String] as? String, !team.isEmpty else { return nil }
-        return identifier + ":" + team
+              !identifier.isEmpty, identifier.utf8.count <= 255,
+              let plist = details[kSecCodeInfoPList as String] as? [String: Any],
+              plist["CFBundlePackageType"] as? String == "APPL",
+              plist["CFBundleIdentifier"] as? String == identifier,
+              let optedIn = plist["CodebasicTTSDirectMCPHost"] as? NSNumber,
+              CFGetTypeID(optedIn) == CFBooleanGetTypeID(), optedIn.boolValue,
+              let main = (details[kSecCodeInfoMainExecutable as String] as? URL)?.resolvingSymlinksInPath(),
+              plist["CFBundleExecutable"] as? String == main.lastPathComponent,
+              main.path == runningPath,
+              main.deletingLastPathComponent().lastPathComponent == "MacOS",
+              main.deletingLastPathComponent().deletingLastPathComponent().lastPathComponent == "Contents",
+              main.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().pathExtension == "app",
+              let certificates = details[kSecCodeInfoCertificates as String] as? [SecCertificate],
+              let certificate = certificates.first,
+              let currentChild = process(pid), currentChild.pbi_ppid == child.pbi_ppid,
+              sameProcess(child, currentChild),
+              let currentParent = process(parentPID), sameProcess(parent, currentParent),
+              executablePath(parentPID) == runningPath,
+              SecCodeCheckValidity(guest, [], nil) == errSecSuccess else { return nil }
+        let signer = AgentBytes.hash(SecCertificateCopyData(certificate) as Data)
+        return AgentPairing.registeredHostPrefix + "\(signer):\(identifier)"
+    }
+
+    private static func process(_ pid: pid_t) -> proc_bsdinfo? {
+        var info = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+        guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size,
+              info.pbi_uid == geteuid(), info.pbi_ruid == getuid(), info.pbi_start_tvsec > 0 else { return nil }
+        return info
+    }
+
+    private static func sameProcess(_ lhs: proc_bsdinfo, _ rhs: proc_bsdinfo) -> Bool {
+        lhs.pbi_pid == rhs.pbi_pid && lhs.pbi_start_tvsec == rhs.pbi_start_tvsec
+            && lhs.pbi_start_tvusec == rhs.pbi_start_tvusec
+    }
+
+    private static func executablePath(_ pid: pid_t) -> String? {
+        var path = [CChar](repeating: 0, count: Int(MAXPATHLEN) * 4)
+        guard proc_pidpath(pid, &path, UInt32(path.count)) > 0,
+              let value = String(validatingUTF8: path) else { return nil }
+        return URL(fileURLWithPath: value).resolvingSymlinksInPath().path
     }
 
     private static func signedHash(_ code: SecStaticCode) -> Data? {
