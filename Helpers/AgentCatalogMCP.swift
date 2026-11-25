@@ -531,8 +531,9 @@ import Security
     }
 }
 
-/// A registered direct host gets a protected signing key in the login
-/// Keychain. All other hosts use a fresh key for the current helper process.
+/// A registered host (an identified agent app) gets a durable signing key in a
+/// private per-user file. All other hosts use a fresh key for the current
+/// helper process.
 struct ClientKey {
     let key: SecKey
     let publicKey: Data
@@ -543,16 +544,6 @@ struct ClientKey {
     private static let keyAttributes: [String: Any] = [
         kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom, kSecAttrKeySizeInBits as String: 256,
     ]
-
-    private static func tag(_ slot: String) -> Data {
-        Data("\(AgentPeerSigning.helperID).registered-client-v1.\(slot)".utf8)
-    }
-
-    private static func query(_ slot: String) -> [String: Any] {
-        [kSecClass as String: kSecClassKey, kSecAttrApplicationTag as String: tag(slot),
-                kSecAttrKeyClass as String: kSecAttrKeyClassPrivate,
-                kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom]
-    }
 
     /// Coordinate credential creation and explicit reset across helper processes.
     private static func withSlot<T>(_ host: String, _ run: (String) -> T?) -> T? {
@@ -572,73 +563,75 @@ struct ClientKey {
 
     static func load(host: String?) -> ClientKey? {
         if let host {
-            // A busy or inaccessible registered slot is retryable. Never replace an
-            // inaccessible key or silently issue an ephemeral one for this host.
-            return withSlot(host) { slot in
-                #if TTS_AGENT_FIXTURE_KEYS
-                return fixtureKey(slot)
-                #else
-                var lookup = query(slot)
-                lookup[kSecReturnRef as String] = true
-                var found: CFTypeRef?
-                let status = SecItemCopyMatching(lookup as CFDictionary, &found)
-                if status == errSecSuccess, let found, CFGetTypeID(found) == SecKeyGetTypeID() {
-                    let stored = make(found as! SecKey, persistent: true)
-                    return stored?.sign(Data("self-test".utf8)) == nil ? nil : stored
-                }
-                guard status == errSecItemNotFound else { return nil }
-                var attributes = keyAttributes
-                attributes[kSecPrivateKeyAttrs as String] = [
-                    kSecAttrIsExtractable as String: false,
-                    kSecAttrIsPermanent as String: true,
-                    kSecAttrApplicationTag as String: tag(slot),
-                    kSecAttrLabel as String: "\(TTSRuntime.displayName) registered agent client",
-                ]
-                let created = SecKeyCreateRandomKey(attributes as CFDictionary, nil)
-                return created.flatMap { make($0, persistent: true) }
-                #endif
-            }
+            // A busy or unreadable registered slot is retryable. Never replace an
+            // unreadable key or silently issue an ephemeral one for this host.
+            return withSlot(host) { slot in storedKey(slot) }
         }
         return SecKeyCreateRandomKey(keyAttributes as CFDictionary, nil).flatMap { make($0, persistent: false) }
     }
 
     static func delete(host: String) -> Bool {
         withSlot(host) { slot in
-            #if TTS_AGENT_FIXTURE_KEYS
-            guard let url = fixtureURL(slot) else { return false }
-            do { try FileManager.default.removeItem(at: url); return true }
-            catch { return false }
-            #else
-            let status = SecItemDelete(query(slot) as CFDictionary)
-            return status == errSecSuccess || status == errSecItemNotFound
-            #endif
+            guard let url = keyURL(slot) else { return false }
+            if unlink(url.path) == 0 || errno == ENOENT { return true }
+            return false
         } ?? false
     }
 
-    #if TTS_AGENT_FIXTURE_KEYS
-    // Integration fixtures use their own synthetic keys and never write to the
-    // user's Keychain. This code is omitted from all application builds.
-    private static func fixtureURL(_ slot: String) -> URL? {
-        ProcessInfo.processInfo.environment["TTS_AGENT_FIXTURE_KEY_DIR"].map {
-            URL(fileURLWithPath: $0, isDirectory: true).appendingPathComponent(slot)
-        }
+    /// Keys live in a private file rather than the login Keychain. A Keychain key
+    /// created by a self-signed helper (no Team ID) is bound to that build's
+    /// cdhash, so every rebuild or update of the app would lose access to it and
+    /// the approved app could never connect again. The approval itself is bound
+    /// to the launching app's code signature; this key only proves continuity of
+    /// one helper credential and is readable only by this user.
+    private static func keyDirectory() -> URL? {
+        #if TTS_AGENT_FIXTURE_KEYS
+        // Integration fixtures use their own synthetic key directory.
+        return ProcessInfo.processInfo.environment["TTS_AGENT_FIXTURE_KEY_DIR"].map { URL(fileURLWithPath: $0, isDirectory: true) }
+        #else
+        guard let entry = getpwuid(getuid()), let home = entry.pointee.pw_dir else { return nil }
+        return TTSRuntime.applicationSupport(home: URL(fileURLWithPath: String(cString: home), isDirectory: true))
+            .appendingPathComponent("agent-client-keys", isDirectory: true)
+        #endif
     }
 
-    private static func fixtureKey(_ slot: String) -> ClientKey? {
-        guard let url = fixtureURL(slot) else { return nil }
-        if FileManager.default.fileExists(atPath: url.path) {
-            var attributes = keyAttributes
-            attributes[kSecAttrKeyClass as String] = kSecAttrKeyClassPrivate
-            guard let bytes = try? Data(contentsOf: url),
+    private static func keyURL(_ slot: String) -> URL? {
+        guard let directory = keyDirectory() else { return nil }
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
+                                                 attributes: [.posixPermissions: 0o700])
+        var info = stat()
+        guard lstat(directory.path, &info) == 0, info.st_mode & S_IFMT == S_IFDIR, info.st_uid == getuid(),
+              info.st_mode & 0o077 == 0 else { return nil }
+        return directory.appendingPathComponent(slot + ".key")
+    }
+
+    private static func storedKey(_ slot: String) -> ClientKey? {
+        guard let url = keyURL(slot) else { return nil }
+        var attributes = keyAttributes
+        attributes[kSecAttrKeyClass as String] = kSecAttrKeyClassPrivate
+        let fd = open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        if fd >= 0 {
+            let reader = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+            var info = stat()
+            guard fstat(fd, &info) == 0, info.st_mode & S_IFMT == S_IFREG, info.st_uid == getuid(),
+                  info.st_mode & 0o777 == 0o600, info.st_nlink == 1, info.st_size > 0, info.st_size <= 4096,
+                  let bytes = try? reader.read(upToCount: 4096),
                   let key = SecKeyCreateWithData(bytes as CFData, attributes as CFDictionary, nil) else { return nil }
-            return make(key, persistent: true)
+            let stored = make(key, persistent: true)
+            return stored?.sign(Data("self-test".utf8)) == nil ? nil : stored
         }
-        guard let key = SecKeyCreateRandomKey(keyAttributes as CFDictionary, nil),
-              let bytes = SecKeyCopyExternalRepresentation(key, nil) as Data?,
-              (try? bytes.write(to: url, options: .withoutOverwriting)) != nil else { return nil }
+        guard errno == ENOENT,
+              let key = SecKeyCreateRandomKey(keyAttributes as CFDictionary, nil),
+              let bytes = SecKeyCopyExternalRepresentation(key, nil) as Data? else { return nil }
+        let temp = url.deletingLastPathComponent().appendingPathComponent("." + UUID().uuidString)
+        let out = open(temp.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard out >= 0 else { return nil }
+        defer { unlink(temp.path) }
+        let writer = FileHandle(fileDescriptor: out, closeOnDealloc: true)
+        guard (try? writer.write(contentsOf: bytes)) != nil, (try? writer.synchronize()) != nil,
+              link(temp.path, url.path) == 0 else { return nil }
         return make(key, persistent: true)
     }
-    #endif
 
     private static func make(_ key: SecKey, persistent: Bool) -> ClientKey? {
         guard let publicKey = SecKeyCopyPublicKey(key),
