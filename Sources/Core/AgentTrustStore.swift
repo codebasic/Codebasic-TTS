@@ -48,15 +48,15 @@ final class AgentTrustStore {
 
     enum Lookup: Equatable {
         case trusted(AgentTrustedClient)
-        case unknown, revoked, hostChanged, expired
+        case unknown, revoked, hostChanged
     }
 
     enum Failure: Error { case invalid, full, revoked, hostChanged, unwritable }
 
     static let maxClients = AgentPairing.slotCount
     static let maxRevoked = 64
-    /// Sliding: a client that has not reconnected for this long must be approved again.
-    static let idleLimit: TimeInterval = 30 * 24 * 3600
+    // Approval does not expire. An approved app stays approved until the user
+    // revokes it, its key changes, or it is launched by a different app.
 
     private let url: URL
     private let now: () -> Date
@@ -86,7 +86,6 @@ final class AgentTrustStore {
     func lookup(keyID: String, host: String) -> Lookup {
         if file.revoked.contains(keyID) { return .revoked }
         guard let client = file.clients.first(where: { $0.keyID == keyID }) else { return .unknown }
-        if now().timeIntervalSince(client.lastSeen) > Self.idleLimit { return .expired }
         return client.host == host ? .trusted(client) : .hostChanged
     }
 

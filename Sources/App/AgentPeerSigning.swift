@@ -43,9 +43,14 @@ enum AgentPeerSigning {
                      identifier: identifier, leaf: leaf, expectedHash: expectedHash)
     }
 
-    /// Only a directly launching app whose signed bundle explicitly declares ownership
-    /// of the MCP transport can have durable approval. An unregistered launcher can
-    /// still ask for approval for one live helper.
+    /// Identifies the agent app that launched the helper, so its approval can be
+    /// remembered. The direct parent must be a validly signed, hardened program
+    /// with a real signing certificate (not ad-hoc) that is not part of macOS
+    /// itself: shells and system interpreters are shared by many apps and so
+    /// cannot stand for one app. The identity is the signing team (or, without a
+    /// team, the leaf certificate) plus the code-signing identifier, so it
+    /// survives app updates and restarts but not a different signer or program.
+    /// Anything that cannot be identified this way gets a one-run approval.
     static func registeredHost(pid: pid_t) -> String? {
         guard let child = process(pid), child.pbi_ppid > 1 else { return nil }
         let parentPID = pid_t(child.pbi_ppid)
@@ -58,21 +63,13 @@ enum AgentPeerSigning {
                                               [], &guest) == errSecSuccess, let guest,
               SecCodeCheckValidity(guest, [], nil) == errSecSuccess,
               SecCodeCopyStaticCode(guest, [], &code) == errSecSuccess, let code,
+              !isPlatformCode(code),
               SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
-              let details = info as? [String: Any], hardened(details),
+              let details = info as? [String: Any], hostHardened(details),
               let identifier = details[kSecCodeInfoIdentifier as String] as? String,
-              !identifier.isEmpty, identifier.utf8.count <= 255,
-              let plist = details[kSecCodeInfoPList as String] as? [String: Any],
-              plist["CFBundlePackageType"] as? String == "APPL",
-              plist["CFBundleIdentifier"] as? String == identifier,
-              let optedIn = plist["CodebasicTTSDirectMCPHost"] as? NSNumber,
-              CFGetTypeID(optedIn) == CFBooleanGetTypeID(), optedIn.boolValue,
+              !identifier.isEmpty, identifier.utf8.count <= 255, !identifier.contains(":"),
               let main = (details[kSecCodeInfoMainExecutable as String] as? URL)?.resolvingSymlinksInPath(),
-              plist["CFBundleExecutable"] as? String == main.lastPathComponent,
               main.path == runningPath,
-              main.deletingLastPathComponent().lastPathComponent == "MacOS",
-              main.deletingLastPathComponent().deletingLastPathComponent().lastPathComponent == "Contents",
-              main.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().pathExtension == "app",
               let certificates = details[kSecCodeInfoCertificates as String] as? [SecCertificate],
               let certificate = certificates.first,
               let currentChild = process(pid), currentChild.pbi_ppid == child.pbi_ppid,
@@ -80,8 +77,25 @@ enum AgentPeerSigning {
               let currentParent = process(parentPID), sameProcess(parent, currentParent),
               executablePath(parentPID) == runningPath,
               SecCodeCheckValidity(guest, [], nil) == errSecSuccess else { return nil }
-        let signer = AgentBytes.hash(SecCertificateCopyData(certificate) as Data)
+        // A bundle must agree with its own signature about which app it is.
+        if let plist = details[kSecCodeInfoPList as String] as? [String: Any],
+           let bundleID = plist["CFBundleIdentifier"] as? String, bundleID != identifier { return nil }
+        let signer: String
+        if let team = details[kSecCodeInfoTeamIdentifier as String] as? String, !team.isEmpty,
+           team.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) }) {
+            signer = "team." + team
+        } else {
+            signer = AgentBytes.hash(SecCertificateCopyData(certificate) as Data)
+        }
         return AgentPairing.registeredHostPrefix + "\(signer):\(identifier)"
+    }
+
+    /// Code signed as part of macOS (shells, interpreters, system tools).
+    private static func isPlatformCode(_ code: SecStaticCode) -> Bool {
+        var requirement: SecRequirement?
+        guard SecRequirementCreateWithString("anchor apple" as CFString, [], &requirement) == errSecSuccess,
+              let requirement else { return true }
+        return SecStaticCodeCheckValidity(code, [], requirement) == errSecSuccess
     }
 
     private static func process(_ pid: pid_t) -> proc_bsdinfo? {
@@ -129,6 +143,20 @@ enum AgentPeerSigning {
               SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
               let details = info as? [String: Any], hardened(details) else { return false }
         return expectedHash == nil || details[kSecCodeInfoUnique as String] as? Data == expectedHash
+    }
+
+    /// Agent apps commonly carry entitlements (JIT, library validation for
+    /// plug-ins), so a host only has to use the hardened runtime and must not
+    /// let another process attach to it or inject code through the environment.
+    private static func hostHardened(_ details: [String: Any]) -> Bool {
+        guard let flags = details[kSecCodeInfoFlags as String] as? NSNumber,
+              flags.uint32Value & SecCodeSignatureFlags.runtime.rawValue != 0 else { return false }
+        guard let entitlements = details[kSecCodeInfoEntitlementsDict as String] else {
+            return details[kSecCodeInfoEntitlements as String] == nil
+        }
+        guard let parsed = entitlements as? [String: Any] else { return false }
+        let unsafe = ["com.apple.security.get-task-allow", "com.apple.security.cs.allow-dyld-environment-variables"]
+        return !unsafe.contains { (parsed[$0] as? Bool) == true }
     }
 
     /// Neither of these two bundled executables needs entitlements, including
