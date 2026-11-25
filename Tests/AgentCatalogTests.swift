@@ -360,12 +360,9 @@ enum CodeExplanation { static let noChange = "변경 없음" }
         precondition(store.autoReceive && store.lookup(keyID: keyID, host: "h") == .trusted(client))
         precondition(store.lookup(keyID: keyID, host: "elsewhere") == .hostChanged)
         precondition(store.lookup(keyID: AgentPairingProof.keyID(other.publicKey.x963Representation)!, host: "h") == .unknown)
-        clock += AgentTrustStore.idleLimit - 60
-        store.touch(client.id)
-        clock += AgentTrustStore.idleLimit - 60   // sliding: counted from the last reconnect
-        precondition(open().lookup(keyID: keyID, host: "h") != .expired)
-        clock += 120
-        precondition(open().lookup(keyID: keyID, host: "h") == .expired)
+        // An approval does not expire with idle time.
+        clock += 365 * 24 * 3600
+        precondition(open().lookup(keyID: keyID, host: "h") == .trusted(client))
         let renewed = try store.trust(publicKey: publicKey, label: "claude", host: "h")
         precondition(renewed.id == client.id && store.clients.count == 1)
 
