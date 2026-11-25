@@ -75,11 +75,14 @@ final class LocalApprovedSocket {
     private var path: String { directory + "/" + endpoint }
     private let queue: DispatchQueue
     private let lock = NSLock()
-    private let approvedPeer: LocalInstructionPeer
+    private let peerPolicy: PeerPolicy
     private let maxFrame: Int
     private let expires: DispatchTime
     private let handle: (Data, @escaping () -> Bool) -> (Data, ((Bool) -> Void)?)?
-    private let verifier: ((Int32) -> Bool)?
+    private enum PeerPolicy {
+        case approved(LocalInstructionPeer, ((Int32) -> Bool)?)
+        case pairing(String, (LocalInstructionPeer) -> Bool)
+    }
     private var source: DispatchSourceRead?
     private var inode: ino_t = 0
     private var revoked = false
@@ -101,19 +104,47 @@ final class LocalApprovedSocket {
          lifetime: DispatchTimeInterval, maxFrame: Int,
          verifier: ((Int32) -> Bool)?,
          respond: @escaping (Data, @escaping () -> Bool) -> (Data, ((Bool) -> Void)?)?) {
-        approvedPeer = peer
+        peerPolicy = .approved(peer, verifier)
         self.endpoint = endpoint
         self.directory = directory
         self.maxFrame = maxFrame
-        self.verifier = verifier
         handle = respond
         queue = DispatchQueue(label: "com.codebasic.tts.approved-ipc." + endpoint)
         expires = .now() + lifetime
     }
 
+    /// Pairing requests contain no data, carry no grant, and accept only a live signed bridge.
+    /// The app presents the discovered process for explicit user approval before any pairing.
+    init(pairingDirectory directory: String, leafSHA1: String,
+         onRequest: @escaping (LocalInstructionPeer) -> Bool) {
+        peerPolicy = .pairing(leafSHA1, onRequest)
+        self.endpoint = "pair.sock"
+        self.directory = directory
+        self.maxFrame = 64
+        self.handle = { _, _ in nil }
+        queue = DispatchQueue(label: "com.codebasic.tts.pairing-ipc")
+        expires = .now() + .seconds(120)
+    }
+
+    private func authenticatedPeer(_ fd: Int32) -> LocalInstructionPeer? {
+        guard let peer = LocalInstructionPeer.connected(fd) else { return nil }
+        switch peerPolicy {
+        case .approved(let approvedPeer, let verifier):
+            guard peer == approvedPeer, verifier?(fd) ?? true else { return nil }
+        case .pairing(let leafSHA1, _):
+            guard let signed = AgentPeerSignature.verifyConnectedPeer(
+                fd: fd, expectedUID: getuid(), identifier: AgentPeerSignature.bridgeIdentifier,
+                leafSHA1: leafSHA1
+            ), signed.pid == peer.pid else { return nil }
+        }
+        return peer
+    }
+
     /// Start/stop are owned by the AppDelegate's main actor. Requests are serialized separately.
     func start() -> Bool {
-        guard source == nil, LocalInstructionPeer.current(pid: approvedPeer.pid) == approvedPeer else { return false }
+        guard source == nil else { return false }
+        if case .approved(let approvedPeer, _) = peerPolicy,
+           LocalInstructionPeer.current(pid: approvedPeer.pid) != approvedPeer { return false }
         if mkdir(directory, 0o700) != 0 && errno != EEXIST { return false }
         var st = stat()
         guard lstat(directory, &st) == 0, (st.st_mode & S_IFMT) == S_IFDIR,
@@ -161,15 +192,21 @@ final class LocalApprovedSocket {
         guard fd >= 0 else { return }
         defer { close(fd) }
         var noSigPipe: Int32 = 1
-        guard LocalInstructionPeer.connected(fd) == approvedPeer,
-              verifier?(fd) ?? true,
+        guard let peer = authenticatedPeer(fd),
               setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size)) == 0,
               fcntl(fd, F_SETFL, O_NONBLOCK) == 0 else { return }
         let deadline = DispatchTime.now() + .milliseconds(600)
         guard let bytes = readFrame(fd, deadline: deadline),
-              LocalInstructionPeer.connected(fd) == approvedPeer,
-              active(),
-              let reply = handle(bytes, { [weak self] in self?.active() == true }) else { return }
+              authenticatedPeer(fd) == peer, active(peer) else { return }
+        let reply: (Data, ((Bool) -> Void)?)
+        switch peerPolicy {
+        case .approved:
+            guard let result = handle(bytes, { [weak self] in self?.active(peer) == true }) else { return }
+            reply = result
+        case .pairing(_, let onRequest):
+            guard bytes == Data(#"{"operation":"pair"}"#.utf8), onRequest(peer) else { return }
+            reply = (Data(#"{"status":"pairing_requested"}"#.utf8), nil)
+        }
         var out = reply.0
         out.append(10)
         var written = false
@@ -178,8 +215,7 @@ final class LocalApprovedSocket {
         lock.lock()
         defer { lock.unlock() }
         // Keep the lease checked across the write. Stop can wait only for the short send deadline.
-        guard !revoked, DispatchTime.now() < expires, LocalInstructionPeer.connected(fd) == approvedPeer,
-              verifier?(fd) ?? true else { return }
+        guard !revoked, DispatchTime.now() < expires, authenticatedPeer(fd) == peer else { return }
         let sendDeadline = DispatchTime.now() + .milliseconds(100)
         written = out.withUnsafeBytes { (view: UnsafeRawBufferPointer) -> Bool in
             guard let base = view.baseAddress else { return false }
@@ -194,10 +230,10 @@ final class LocalApprovedSocket {
         }
     }
 
-    private func active() -> Bool {
+    private func active(_ peer: LocalInstructionPeer) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        return !revoked && DispatchTime.now() < expires && LocalInstructionPeer.current(pid: approvedPeer.pid) == approvedPeer
+        return !revoked && DispatchTime.now() < expires && LocalInstructionPeer.current(pid: peer.pid) == peer
     }
 
     /// Require a single LF-terminated frame followed by client half-close.

@@ -16,6 +16,22 @@ import Security
 
 enum AgentPeerSignature {
     static let bridgeIdentifier = "com.codebasic.tts.agent-bridge"
+    #if TTS_FIXTURE
+    static let appIdentifier = "com.codebasic.tts.autopair-fixture"
+    #else
+    static let appIdentifier = "com.seongjoo.SelectedTextTTS"
+    #endif
+
+    /// Both processes derive the socket directory from the live app generation. A stale
+    /// endpoint from a crash is never reused. This path is not an authentication signal.
+    static func socketDirectory(appPID pid: pid_t) -> String? {
+        guard getuid() == geteuid(), pid > 1 else { return nil }
+        var info = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+        guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size,
+              info.pbi_uid == geteuid(), info.pbi_ruid == getuid(), info.pbi_start_tvsec > 0 else { return nil }
+        return "/private/tmp/cbtts-mcp2-\(getuid())-\(pid)-\(info.pbi_start_tvsec)-\(info.pbi_start_tvusec)"
+    }
 
     // <sys/un.h>: #define SOL_LOCAL 0, #define LOCAL_PEERTOKEN 0x006 (audit_token_t = 8 x UInt32).
     private static let solLocal: Int32 = 0
