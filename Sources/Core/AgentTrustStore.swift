@@ -16,6 +16,9 @@ struct AgentTrustedClient: Codable, Equatable, Identifiable {
     let host: String
     let created: Date
     var lastSeen: Date
+    // The first trust-file format had only the global receipt switch.
+    fileprivate var receivesDrafts: Bool? = nil
+    var receiptEnabled: Bool { receivesDrafts ?? true }
 }
 
 /// Wire format shared by the app's verification and the unit tests. The helper
@@ -45,20 +48,21 @@ final class AgentTrustStore {
 
     enum Lookup: Equatable {
         case trusted(AgentTrustedClient)
-        case unknown, revoked, hostChanged, expired
+        case unknown, revoked, hostChanged
     }
 
-    enum Failure: Error { case invalid, full, revoked, unwritable }
+    enum Failure: Error { case invalid, full, revoked, hostChanged, unwritable }
 
-    static let maxClients = 8
+    static let maxClients = AgentPairing.slotCount
     static let maxRevoked = 64
-    /// Sliding: a client that has not reconnected for this long must be approved again.
-    static let idleLimit: TimeInterval = 30 * 24 * 3600
+    // Approval does not expire. An approved app stays approved until the user
+    // revokes it, its key changes, or it is launched by a different app.
 
     private let url: URL
     private let now: () -> Date
     private let write: (Data, URL) throws -> Void
     private(set) var file = File()
+    private var hasUnsavedDenial = false
 
     init(url: URL, now: @escaping () -> Date = Date.init,
          write: @escaping (Data, URL) throws -> Void = AgentTrustStore.writePrivately) {
@@ -73,35 +77,52 @@ final class AgentTrustStore {
 
     @discardableResult
     func setAutoReceive(_ value: Bool) -> Bool {
-        guard file.autoReceive != value else { return true }
+        guard file.autoReceive != value || hasUnsavedDenial else { return true }
         var next = file
         next.autoReceive = value
-        return commit(next)
+        return value ? commit(next) : commitDenial(next)
     }
 
     func lookup(keyID: String, host: String) -> Lookup {
         if file.revoked.contains(keyID) { return .revoked }
         guard let client = file.clients.first(where: { $0.keyID == keyID }) else { return .unknown }
-        if now().timeIntervalSince(client.lastSeen) > Self.idleLimit { return .expired }
         return client.host == host ? .trusted(client) : .hostChanged
     }
 
-    /// Called only for an explicit approval in the app. Replaces the record for
-    /// the same key or the same named client; never evicts a different one.
+    /// Explicit approval can renew or rotate the credential for one registered
+    /// host. Other hosts keep their records even when the labels match.
     func trust(publicKey: Data, label: String, host: String) throws -> AgentTrustedClient {
         guard let keyID = AgentPairingProof.keyID(publicKey) else { throw Failure.invalid }
         guard !file.revoked.contains(keyID) else { throw Failure.revoked }
         var next = file
-        // A client that lost or replaced its key comes back under the same name from
-        // the same launcher; the user's new approval supersedes the old record.
-        next.clients.removeAll { $0.keyID == keyID || ($0.label == label && $0.host == host) }
-        guard next.clients.count < Self.maxClients else { throw Failure.full }
         let time = now()
-        let client = AgentTrustedClient(id: UUID(), keyID: keyID, publicKey: publicKey, label: label,
-                                        host: host, created: time, lastSeen: time)
-        next.clients.append(client)
+        let client: AgentTrustedClient
+        if let existing = next.clients.first(where: { $0.keyID == keyID }), existing.host != host {
+            throw Failure.hostChanged
+        }
+        if let index = next.clients.firstIndex(where: { $0.host == host }) {
+            let prior = next.clients[index]
+            if prior.keyID != keyID { Self.revoke(prior.keyID, in: &next) }
+            client = AgentTrustedClient(id: prior.id, keyID: keyID, publicKey: publicKey, label: label,
+                                        host: host, created: prior.created, lastSeen: time, receivesDrafts: true)
+            next.clients[index] = client
+        } else {
+            guard next.clients.count < Self.maxClients else { throw Failure.full }
+            client = AgentTrustedClient(id: UUID(), keyID: keyID, publicKey: publicKey, label: label,
+                                        host: host, created: time, lastSeen: time, receivesDrafts: true)
+            next.clients.append(client)
+        }
         guard commit(next) else { throw Failure.unwritable }
         return client
+    }
+
+    @discardableResult
+    func setReceiptEnabled(_ enabled: Bool, for id: UUID) -> Bool {
+        guard let index = file.clients.firstIndex(where: { $0.id == id }) else { return false }
+        guard file.clients[index].receiptEnabled != enabled || hasUnsavedDenial else { return true }
+        var next = file
+        next.clients[index].receivesDrafts = enabled
+        return enabled ? commit(next) : commitDenial(next)
     }
 
     /// A reconnect that cannot be recorded is still valid for this run.
@@ -120,16 +141,26 @@ final class AgentTrustStore {
         guard let client = file.clients.first(where: { $0.id == id }) else { return false }
         var next = file
         next.clients.removeAll { $0.id == id }
-        next.revoked.append(client.keyID)
-        if next.revoked.count > Self.maxRevoked { next.revoked.removeFirst(next.revoked.count - Self.maxRevoked) }
-        let saved = commit(next)
-        if !saved { file = next }
-        return saved
+        Self.revoke(client.keyID, in: &next)
+        return commitDenial(next)
+    }
+
+    private static func revoke(_ keyID: String, in file: inout File) {
+        file.revoked.append(keyID)
+        if file.revoked.count > maxRevoked { file.revoked.removeFirst(file.revoked.count - maxRevoked) }
+    }
+
+    private func commitDenial(_ next: File) -> Bool {
+        guard !commit(next) else { return true }
+        file = next
+        hasUnsavedDenial = true
+        return false
     }
 
     private func commit(_ next: File) -> Bool {
         guard let bytes = try? JSONEncoder().encode(next), (try? write(bytes, url)) != nil else { return false }
         file = next
+        hasUnsavedDenial = false
         return true
     }
 
@@ -145,7 +176,10 @@ final class AgentTrustStore {
               let loaded = try? JSONDecoder().decode(File.self, from: bytes), loaded.version == 1,
               loaded.clients.count <= maxClients,
               loaded.clients.allSatisfy({ AgentPairingProof.keyID($0.publicKey) == $0.keyID }),
-              Set(loaded.clients.map(\.keyID)).count == loaded.clients.count else { return nil }
+              Set(loaded.clients.map(\.keyID)).count == loaded.clients.count,
+              Set(loaded.clients.map(\.id)).count == loaded.clients.count else { return nil }
+        let registeredHosts = loaded.clients.map(\.host).filter { $0.hasPrefix(AgentPairing.registeredHostPrefix) }
+        guard Set(registeredHosts).count == registeredHosts.count else { return nil }
         return loaded
     }
 

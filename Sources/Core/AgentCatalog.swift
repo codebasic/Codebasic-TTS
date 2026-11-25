@@ -26,12 +26,20 @@ enum AgentLimits {
 /// Compiled into both ends. The helper signs these bytes with its client key;
 /// the app verifies them against the key the user approved.
 enum AgentPairing {
-    static let schema = 3
+    static let schema = 4
+    static let slotCount = 8
+    static let registeredHostPrefix = "registered-v1:"
+
+    // A bounded slot is routing only. The app still verifies the
+    // audit token, signer, bundled hash and approved peer on each data socket.
+    static func draftEndpoint(slot: Int) -> String { "d\(slot).sock" }
+    static func instructionEndpoint(slot: Int) -> String { "i\(slot).sock" }
+
     static func message(appID: String, nonce: String, keyID: String) -> Data {
         Data("codebasic-tts-pair-v1\n\(appID)\n\(nonce)\n\(keyID)".utf8)
     }
 
-    /// A display and key-slot name, never an authentication input.
+    /// Display text sent by the MCP client.
     static func clientName(_ input: String?) -> String {
         let allowed = Set("abcdefghijklmnopqrstuvwxyz0123456789._-".utf8)
         let name = String(decoding: (input ?? "").lowercased().utf8.filter(allowed.contains).prefix(48), as: UTF8.self)

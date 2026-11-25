@@ -217,6 +217,10 @@ case "${1:-install}" in
     swiftc -O "$HERE/Sources/Core/AgentCatalog.swift" "$HERE/Sources/Core/AgentInstructionEditing.swift" \
       "$HERE/Tests/AgentInstructionEditingTests.swift" -o "$BUILD_DIR/agent-instruction-editing-tests"
     "$BUILD_DIR/agent-instruction-editing-tests" "$editing_fixture"
+    trust_fixture="$(mktemp -d "$BUILD_DIR/trust-test.XXXXXX")"
+    swiftc -O "$HERE/Sources/Core/AgentCatalog.swift" "$HERE/Sources/Core/AgentTrustStore.swift" \
+      "$HERE/Tests/AgentTrustStoreTests.swift" -o "$BUILD_DIR/agent-trust-store-tests"
+    "$BUILD_DIR/agent-trust-store-tests" "$trust_fixture"
     socket_fixture="$(mktemp -d "$BUILD_DIR/socket-test.XXXXXX")"
     swiftc -O "$RUNTIME_SOURCE" "$HERE/Sources/App/LocalInstructionSocket.swift" \
       "$HERE/Tests/LocalApprovedSocketLifecycleTests.swift" -o "$BUILD_DIR/local-approved-socket-tests"

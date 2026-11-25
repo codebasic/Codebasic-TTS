@@ -30,15 +30,6 @@ struct LocalInstructionPeer: Equatable {
         return String(validatingUTF8: path)
     }
 
-    func parentPID() -> pid_t? {
-        var child = proc_bsdinfo()
-        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
-        guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &child, size) == size,
-              child.pbi_start_tvsec == startSeconds, child.pbi_start_tvusec == startMicroseconds,
-              child.pbi_ppid > 1 else { return nil }
-        return pid_t(child.pbi_ppid)
-    }
-
     static func connected(_ fd: Int32) -> Self? {
         var uid: uid_t = 0, gid: gid_t = 0, pid: pid_t = 0
         var size = socklen_t(MemoryLayout<pid_t>.size)
@@ -283,6 +274,10 @@ final class LocalApprovedSocket {
 /// recovered. An unmanaged/ambiguous old path is deliberately left untouched.
 private final class SocketPathLease {
     enum Readiness { case clear, unmanaged, busyOrUnsafe }
+
+    private static let endpoints = Set(["i.sock", "d.sock", "p.sock"] +
+        (0...9).flatMap { ["i\($0).sock", "d\($0).sock"] })
+
     private let directory: String
     private let endpoint: String
     private let directoryFD: Int32
@@ -291,7 +286,7 @@ private final class SocketPathLease {
     private let leaseStat: stat
 
     init?(directory: String, endpoint: String) {
-        guard ["i.sock", "d.sock", "p.sock"].contains(endpoint) else { return nil }
+        guard Self.endpoints.contains(endpoint) else { return nil }
         if mkdir(directory, 0o700) != 0 && errno != EEXIST { return nil }
         let dir = Darwin.open(directory, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard dir >= 0 else { return nil }

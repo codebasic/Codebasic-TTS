@@ -171,19 +171,17 @@ struct ExplainWorkspace: View {
 
     private var connectionState: String {
         if access.locked { return "화면 잠금으로 멈춤" }
-        if access.receiptBlockedBySelection { return "대본 받기 막힘" }
+        if !access.autoReceive { return "전체 받기 꺼짐" }
         if access.receiving { return "대본 받는 중" }
-        if access.waitingForReceiveHelper { return "새 에이전트 연결 대기 중" }
-        if access.autoReceive { return "기억한 에이전트 기다리는 중" }
-        return access.pair != nil ? "연결됨 · 대본 받기 꺼짐" : "연결 안 됨"
+        if !access.approvalRequests.isEmpty { return "앱 승인 대기 중" }
+        return "앱 연결 대기 중"
     }
 
     private var connection: some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack {
                 Text("에이전트 연결").font(.headline).accessibilityAddTraits(.isHeader)
-                Text(connectionState)
-                    .font(.caption).foregroundStyle(access.receiptBlockedBySelection ? Color.orange : Color.secondary)
+                Text(connectionState).font(.caption).foregroundStyle(.secondary)
                 Spacer(minLength: 8)
                 Button("지시문") { showInstructions.toggle() }
                     .accessibilityValue(showInstructions ? "열림" : "닫힘")
@@ -192,84 +190,110 @@ struct ExplainWorkspace: View {
             HStack(alignment: .top) {
                 mcpSetup
                 Spacer(minLength: 8)
-                if access.autoReceive, access.pair == nil, !access.waitingForReceiveHelper {
-                    Button("새 에이전트 허용") { access.allowNewAgent() }
-                        .disabled(access.locked)
-                        .help("아직 기억하지 않은 에이전트 한 곳이 잠시 동안 연결할 수 있게 합니다.")
-                }
-                Button(access.autoReceive || access.receiving ? "받기 끄기" : "연결 켜기") {
+                Button(access.autoReceive ? "전체 받기 끄기" : "전체 받기 켜기") {
                     AppDelegate.shared?.toggleDraftReceipt()
                 }
                 .disabled(!access.pairingSupported || (access.locked && !access.autoReceive))
-                .help(access.autoReceive || access.receiving
-                      ? "대본 받기와 지시 공유를 지금 끕니다. 다시 켤 때까지 기억한 에이전트도 연결되지 않습니다."
-                      : "에이전트가 대본을 보낼 수 있게 합니다. 기억한 에이전트는 바로 연결되고, 새 에이전트는 켠 뒤 처음 연결하는 한 곳만 기억합니다.")
             }
-            if let waiting = access.awaitingApproval, access.pair == nil, !access.waitingForReceiveHelper {
-                Label("‘\(waiting)’ 에이전트가 연결을 기다립니다. 허용하려면 \(access.autoReceive ? "‘새 에이전트 허용’" : "‘연결 켜기’")을 누르세요.",
-                      systemImage: "person.crop.circle.badge.questionmark")
-                    .font(.caption).foregroundStyle(.orange)
+            ForEach(access.approvalRequests) { request in
+                let host = request.host.map { Self.hostName($0) + " · PID \(request.helperPID)" }
+                    ?? Self.sessionOnlyDescription(request.launcher, pid: request.helperPID)
+                HStack {
+                    VStack(alignment: .leading) {
+                        Text(request.label)
+                        Text(host)
+                            .foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                    }
+                    Spacer(minLength: 8)
+                    Button("허용") { access.approve(request.id) }
+                        .accessibilityLabel("‘\(request.label)’ 허용")
+                        .accessibilityHint(host)
+                        .disabled(!access.autoReceive || access.locked)
+                }
+                .font(.caption)
             }
-            if let pair = access.pair {
-                // Supplementary only: the helper is verified, the program that launched it is not.
-                Text("연결 상대: \(pair.label) · \(pair.hostPath.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "알 수 없는 프로그램") · PID \(String(pair.peer.pid))\(pair.persistent ? "" : " · 이번 실행만")")
-                    .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
-                    .help(pair.hostPath ?? "MCP 도우미를 실행한 프로그램의 경로를 확인할 수 없습니다.")
-            }
+            if !access.connections.isEmpty { agentConnections }
             if access.receiptBlockedBySelection {
                 HStack(alignment: .firstTextBaseline) {
-                    Label("선택한 지시 ‘\(title(sharingSelection))’가 공유되고 있지 않아 대본을 받을 수 없습니다. 지시를 다시 선택하거나 ‘사용 안 함’으로 바꾸세요.",
+                    Label("선택한 지시를 공유할 수 없어 해당 앱의 대본을 기다리고 있습니다.",
                           systemImage: "exclamationmark.triangle")
                         .font(.caption).foregroundStyle(.orange)
                     Spacer(minLength: 8)
                     Button("지시문 열기") { showInstructions = true }.controlSize(.small)
                     Button("지시 없이 받기") { access.revokeSelection() }.controlSize(.small)
                 }
-            } else if let shared = access.shared {
-                Text("공유 중인 지시: \(title(shared.selector)) · 이 지시를 읽은 대본만 받습니다.")
-                    .font(.caption).foregroundStyle(.secondary)
-            } else if access.receiving {
-                Text("지시 없이 받는 중 · 에이전트가 보낸 대본이 바로 편집기에 열립니다.")
+            } else if let shared = access.shared,
+                      let client = access.connections.first(where: { $0.id == access.instructionClient }) {
+                Text("‘\(client.label)’에 공유 중: \(title(shared.selector))")
                     .font(.caption).foregroundStyle(.secondary)
             }
             if let notice = access.receiptNotice {
                 Label(notice, systemImage: "tray.and.arrow.down").font(.caption).foregroundStyle(.orange)
             }
             if !access.status.isEmpty { Text(access.status).font(.caption).foregroundStyle(.orange) }
-            if !access.trusted.isEmpty { trustedAgents }
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("agent-connection-section")
     }
 
-    /// Approved once, reconnects without asking. Forgetting is the only way an
-    /// approval ends early, so it sits next to each name.
-    private var trustedAgents: some View {
-        DisclosureGroup("기억한 에이전트 \(access.trusted.count)곳") {
-            VStack(alignment: .leading, spacing: 4) {
-                ForEach(access.trusted) { client in
-                    HStack {
-                        Text(client.label).font(.caption)
-                        Text("\(Self.hostName(client.host)) · 마지막 연결 \(client.lastSeen.formatted(date: .abbreviated, time: .shortened))")
-                            .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
-                        Spacer(minLength: 8)
-                        Button("잊기") { access.forget(client.id) }
-                            .controlSize(.small)
-                            .accessibilityLabel("\(client.label) 잊기")
-                            .help("이 에이전트를 지금 끊고, 다시 승인하기 전에는 연결하지 못하게 합니다.")
+    private var agentConnections: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(access.connections) { client in
+                let host = client.host.map(Self.hostName) ?? Self.sessionOnlyDescription(client.launcher, pid: client.helperPID)
+                HStack {
+                    VStack(alignment: .leading) {
+                        Text(client.label)
+                        Text(host)
+                            .foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                     }
+                    let needsInstruction = access.instructionClient == client.id && access.receiptBlockedBySelection
+                    Text(needsInstruction ? "지시 필요" : Self.connectionState(client.state))
+                        .foregroundStyle(needsInstruction ? Color.orange : Color.secondary)
+                    Spacer(minLength: 8)
+                    if client.state != .needsApproval {
+                        Button(client.receiptEnabled ? "이 앱 받기 끄기" : "이 앱 받기 켜기") {
+                            if client.receiptEnabled { _ = access.disconnect(client.id) }
+                            else { _ = access.resume(client.id) }
+                        }
+                        .disabled(!client.receiptEnabled && (!access.autoReceive || access.locked))
+                        .accessibilityLabel("‘\(client.label)’ 받기 \(client.receiptEnabled ? "끄기" : "켜기")")
+                        .accessibilityHint(host)
+                    }
+                    Button("승인 철회") { access.forget(client.id) }
+                        .accessibilityLabel("‘\(client.label)’ 승인 철회")
+                        .accessibilityHint(host)
                 }
-                Text("기억한 에이전트는 받기가 켜져 있으면 다시 묻지 않고 연결됩니다. 30일 동안 연결이 없으면 다시 승인해야 합니다.")
-                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                .controlSize(.small)
             }
         }
         .font(.caption)
         .accessibilityIdentifier("agent-trusted-clients")
     }
 
+    private static func connectionState(_ state: AgentSessionController.Connection.State) -> String {
+        switch state {
+        case .waiting: return "연결 대기"
+        case .receiving: return "받는 중"
+        case .paused: return "받기 꺼짐"
+        case .locked: return "화면 잠금"
+        case .needsApproval: return "재승인 필요"
+        }
+    }
+
+    private static func sessionOnlyDescription(_ launcher: String?, pid: Int32?) -> String {
+        let name = launcher.map { URL(fileURLWithPath: $0).lastPathComponent }
+        let detail = [name, pid.map { "PID \($0)" }].compactMap { $0 }.joined(separator: " · ")
+        return detail.isEmpty ? "호스트 미확인 · 이번 실행만" : "\(detail) · 호스트 미확인 · 이번 실행만"
+    }
+
     private static func hostName(_ host: String) -> String {
         if host.hasPrefix("path:") { return URL(fileURLWithPath: String(host.dropFirst(5))).lastPathComponent }
-        return host.split(separator: ":").dropFirst().first.map(String.init) ?? "알 수 없는 프로그램"
+        let fields = host.split(separator: ":", maxSplits: 2)
+        if fields.count == 3, fields[0] == "registered-v1" {
+            return "\(fields[2]) · 서명 \(fields[1].prefix(12))"
+        }
+        if fields.count == 3 { return String(fields[1]) }
+        return "호스트 미확인"
     }
 
     private var instruction: some View {
@@ -284,6 +308,17 @@ struct ExplainWorkspace: View {
             }
             Text("공유 지시를 선택하지 않아도 대본을 받을 수 있습니다. 공유하면 연결된 에이전트가 저장된 지시 전문을 읽으며, 원격 모델을 쓰는 에이전트는 그 내용을 모델 서비스로 보낼 수 있습니다. 비밀은 넣지 마세요.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            let recipients = access.connections.filter { $0.state != .needsApproval }
+            if recipients.count > 1 {
+                Picker("공유할 앱", selection: Binding(get: { access.instructionClient },
+                                                   set: { access.chooseInstructionClient($0) })) {
+                    Text("앱 선택").tag(UUID?.none)
+                    ForEach(recipients) { client in
+                        Text("\(client.label) · \(client.host.map(Self.hostName) ?? Self.sessionOnlyDescription(client.launcher, pid: client.helperPID))")
+                            .tag(Optional(client.id))
+                    }
+                }
+            }
             Text(access.shared.map { "공유 중: " + title($0.selector) } ?? access.selectionStatus.message)
                 .font(.caption).foregroundStyle(access.selectionStatus.isProblem ? Color.orange : Color.secondary)
             if let legacy = app.sharedInstructionProfile {
