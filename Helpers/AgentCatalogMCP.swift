@@ -1,3 +1,4 @@
+import CoreFoundation
 import Darwin
 import Foundation
 import Security
@@ -66,22 +67,26 @@ import Security
         var key: String { profile + ":" + revision }
     }
 
-    /// `--client <name>` names the key slot; otherwise the MCP client's own name does.
+    /// `--client <name>` supplies a display name only.
     static var clientOverride: String?
     static var clientName = "default"
     static var clientKey: ClientKey?
+    static let registeredHost = AgentPeerSigning.registeredHost(pid: getpid())
+    static var slot: Int?
 
     static func main() {
         // A keychain dialog raised by a background helper would block the agent's
-        // tool call. Fail instead; an unusable key is replaced and approved again.
+        // tool call. An inaccessible registered credential stays unavailable.
         SecKeychainSetUserInteractionAllowed(false)
         let arguments = Array(CommandLine.arguments.dropFirst())
         if let flag = arguments.firstIndex(of: "--client"), arguments.indices.contains(flag + 1) {
             clientOverride = AgentPairing.clientName(arguments[flag + 1])
         }
         if arguments.contains("--forget-key") {
-            // Lets the user discard this client's credential from the client side.
-            exit(ClientKey.delete(slot: clientOverride ?? "default") ? 0 : 1)
+            // Explicit reset from the same registered host. A revoked credential
+            // stays revoked until the host requests a reset and the user approves again.
+            guard let registeredHost else { exit(1) }
+            exit(ClientKey.delete(host: registeredHost) ? 0 : 1)
         }
         var initialized = false, ready = false
         var proofs: [Proof] = []
@@ -140,7 +145,7 @@ import Security
                     }
                     var request: [String: Any] = ["schema_version": 2]
                     if let requested { request["profile"] = requested }
-                    guard let reply = exchange(socket: "i.sock", request),
+                    guard let reply = exchange(socket: "i", request),
                           reply["schema_version"] as? Int == 2,
                           let selector = reply["profile"] as? String, validSelector(selector),
                           requested == nil || requested == selector,
@@ -170,7 +175,7 @@ import Security
                     }
                     var request = args
                     request["schema_version"] = 2
-                    reportReceipt(id, exchange(socket: "d.sock", request)?["status"] as? String)
+                    reportReceipt(id, exchange(socket: "d", request)?["status"] as? String)
                 case receiver:
                     guard validDraft(args, linked: true),
                           let profile = args["profile"] as? String, let revision = args["revision"] as? String else {
@@ -191,7 +196,7 @@ import Security
                         // Only the proof aged out. Read the same selection again through
                         // the normal channel; anything but the identical revision and
                         // body means the user changed it, and the agent must read it.
-                        guard let reply = exchange(socket: "i.sock", ["schema_version": 2, "profile": profile]),
+                        guard let reply = exchange(socket: "i", ["schema_version": 2, "profile": profile]),
                               reply["revision"] as? String == revision,
                               reply["body_sha256"] as? String == proofs[index].bodyHash,
                               let text = reply["instructions"] as? String,
@@ -208,7 +213,7 @@ import Security
                     request["schema_version"] = 2
                     request["body_sha256"] = proof.bodyHash
                     request["proof"] = proof.token
-                    reportReceipt(id, exchange(socket: "d.sock", request)?["status"] as? String)
+                    reportReceipt(id, exchange(socket: "d", request)?["status"] as? String)
                 default:
                     emit(error(id, -32602, "Unknown tool"))
                 }
@@ -307,7 +312,9 @@ import Security
         ("unconfirmed", "No answer for this request. It may or may not have been received. Resend once with the same key and identical fields; never with a new key."),
         ("instruction_required", "The user selected a saved instruction. Read it with \(reader) and use \(receiver), or ask the user to clear the selection. Do not work around it."),
         ("unproven", "The selected instruction changed or was not read by this helper. Read it again with \(reader), then resend with the returned profile and revision."),
-        ("approval_required", "The user has not approved this client or receipt is off. Ask the user; do not retry in a loop."),
+        ("approval_required", "Ask the user to approve this pending connection in the app. Do not retry in a loop."),
+        ("disabled", "Draft receipt is off for this app or globally. Ask the user to turn it on."),
+        ("revoked", "This app's approval was revoked. It requires a credential reset and new approval."),
         ("locked", "The Mac is locked. Retry after the user unlocks it."),
         ("too_large", "A field is over its limit. Nothing was opened or shortened. Shorten it, or split the body into separate drafts with their own keys."),
         ("invalid", "A field is missing, misnamed or malformed. Fix the arguments; resending unchanged will not help."),
@@ -363,48 +370,47 @@ import Security
     /// answers that an approval is required.
     static func pairingStatus() -> String {
         guard pin != nil else { return "signing_required" }
+        slot = nil
         let schema = AgentPairing.schema
-        guard let status = exchange(socket: "p.sock", ["schema_version": schema, "op": "status"])?["status"] as? String else {
+        guard let reply = exchange(socket: "p.sock", ["schema_version": schema, "op": "status"]) else {
             return "app_unavailable"
         }
+        let status = connectionState(reply)
         guard status == "identify" else { return status }
-        for attempt in 0..<2 {
-            if clientKey == nil { clientKey = ClientKey.load(slot: clientName) }
-            guard let key = clientKey else { return "unavailable" }
-            let hello: [String: Any] = ["schema_version": schema, "op": "hello", "client": clientName,
-                                        "public_key": key.publicKey.base64EncodedString(), "persistent": key.persistent]
-            guard let offer = exchange(socket: "p.sock", hello), let answer = offer["status"] as? String else { return "app_unavailable" }
-            if answer == "revoked", attempt == 0 {
-                // The user forgot this client. Its old credential is dead; a new
-                // one starts over as an unknown client that needs approval.
-                ClientKey.delete(slot: clientName)
-                clientKey = nil
-                continue
-            }
-            guard answer == "challenge", let nonce = offer["nonce"] as? String else { return answer }
-            let message = AgentPairing.message(appID: AgentPeerSigning.appID, nonce: nonce, keyID: AgentBytes.hash(key.publicKey))
-            guard let signature = key.sign(message) else {
-                // The stored key can no longer be used by this build of the helper.
-                ClientKey.delete(slot: clientName)
-                clientKey = nil
-                if attempt == 0 { continue }
-                return "unavailable"
-            }
-            let proof: [String: Any] = ["schema_version": schema, "op": "prove", "nonce": nonce,
-                                        "signature": signature.base64EncodedString()]
-            return exchange(socket: "p.sock", proof)?["status"] as? String ?? "app_unavailable"
+        if clientKey == nil { clientKey = ClientKey.load(host: registeredHost) }
+        guard let key = clientKey else { return "unavailable" }
+        let hello: [String: Any] = ["schema_version": schema, "op": "hello", "client": clientName,
+                                    "public_key": key.publicKey.base64EncodedString(), "persistent": key.persistent]
+        guard let offer = exchange(socket: "p.sock", hello),
+              let answer = offer["status"] as? String else { return "app_unavailable" }
+        guard answer == "challenge", let nonce = offer["nonce"] as? String else { return answer }
+        let message = AgentPairing.message(appID: AgentPeerSigning.appID, nonce: nonce, keyID: AgentBytes.hash(key.publicKey))
+        guard let signature = key.sign(message) else { return "unavailable" }
+        let proof: [String: Any] = ["schema_version": schema, "op": "prove", "nonce": nonce,
+                                    "signature": signature.base64EncodedString()]
+        guard let result = exchange(socket: "p.sock", proof) else { return "app_unavailable" }
+        return connectionState(result)
+    }
+
+    private static func connectionState(_ result: [String: Any]) -> String {
+        guard let status = result["status"] as? String else { return "app_unavailable" }
+        if ["ready", "receiving_only", "instruction_required", "reading_only"].contains(status) {
+            guard let raw = result["slot"] as? String, let index = Int(raw),
+                  (0..<AgentPairing.slotCount).contains(index), raw == String(index) else { return "upgrade_required" }
+            slot = index
         }
-        return "unavailable"
+        return status
     }
 
     static func describe(_ status: String) -> String {
         switch status {
         case "signing_required": return "Use the certificate-signed helper bundled with \(TTSRuntime.displayName)."
         case "app_unavailable": return "Open \(TTSRuntime.displayName) and try again. The running app must match this signed helper."
-        case "other_agent": return "Another MCP session is connected. Close it or disconnect it in \(TTSRuntime.displayName) → Agent (에이전트), then retry."
-        case "approval_required": return "Not approved yet, or receipt is off. Ask the user to turn on the connection in \(TTSRuntime.displayName) → Agent (에이전트), then check again. An approved client is not asked again."
+        case "other_agent": return "This agent app already has a connected MCP session. Close that session or disconnect it in \(TTSRuntime.displayName) → Agent (에이전트), then retry."
+        case "approval_required": return "Ask the user to approve this specific pending connection in \(TTSRuntime.displayName) → Agent (에이전트), then check again."
+        case "disabled": return "Draft receipt is off globally or for this agent app. Ask the user to enable it in \(TTSRuntime.displayName) → Agent (에이전트)."
         case "locked": return "The Mac's screen is locked, so nothing is received. Retry after the user unlocks it; no new approval is needed."
-        case "revoked": return "The user removed this client in \(TTSRuntime.displayName). Ask them to approve it again in Agent (에이전트)."
+        case "revoked": return "The user removed this client in \(TTSRuntime.displayName). An explicit host credential reset and a new approval are required for this registered agent."
         case "upgrade_required": return "The running app and this helper are different versions. Use the helper bundled with the running app."
         case "reading_only": return "Connected. One instruction revision is approved. Draft receipt is off."
         case "receiving_only": return "Connected. Send with submit_tts_draft; there is no selected instruction."
@@ -435,8 +441,19 @@ import Security
         }
     }
 
-    static func exchange(socket endpoint: String, _ request: [String: Any]) -> [String: Any]? {
-        guard let pin, ["p.sock", "i.sock", "d.sock"].contains(endpoint) else { return nil }
+    static func exchange(socket kind: String, _ request: [String: Any]) -> [String: Any]? {
+        guard let pin else { return nil }
+        let endpoint: String
+        switch kind {
+        case "p.sock": endpoint = kind
+        case "i":
+            guard let slot else { return nil }
+            endpoint = AgentPairing.instructionEndpoint(slot: slot)
+        case "d":
+            guard let slot else { return nil }
+            endpoint = AgentPairing.draftEndpoint(slot: slot)
+        default: return nil
+        }
         var st = stat()
         let path = directory + "/" + endpoint
         guard lstat(directory, &st) == 0, st.st_uid == getuid(), st.st_mode & S_IFMT == S_IFDIR, st.st_mode & 0o777 == 0o700,
@@ -476,7 +493,7 @@ import Security
             return true
         }
         guard sent, shutdown(fd, SHUT_WR) == 0 else { return nil }
-        let maximum = endpoint == "i.sock" ? 52 * 1024 : 256
+        let maximum = kind == "i" ? 52 * 1024 : 256
         var output = Data(), chunk = [UInt8](repeating: 0, count: 4096)
         let deadline = ContinuousClock.now.advanced(by: .seconds(2))
         var terminated = false
@@ -514,53 +531,114 @@ import Security
     }
 }
 
-/// This client's signing key. Kept in the login keychain, marked non-extractable,
-/// and usable without a prompt only by the helper build that created it. When the
-/// keychain cannot hold one, the key lives for this process only and the app is
-/// told so, which means the user approves each run.
+/// A registered direct host gets a protected signing key in the login
+/// Keychain. All other hosts use a fresh key for the current helper process.
 struct ClientKey {
     let key: SecKey
     let publicKey: Data
     let persistent: Bool
 
-    private static func tag(_ slot: String) -> Data { Data("\(AgentPeerSigning.helperID).client.\(slot)".utf8) }
+    private static func slot(_ host: String) -> String { AgentBytes.hash(Data(host.utf8)) }
+
+    private static let keyAttributes: [String: Any] = [
+        kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom, kSecAttrKeySizeInBits as String: 256,
+    ]
+
+    private static func tag(_ slot: String) -> Data {
+        Data("\(AgentPeerSigning.helperID).registered-client-v1.\(slot)".utf8)
+    }
 
     private static func query(_ slot: String) -> [String: Any] {
         [kSecClass as String: kSecClassKey, kSecAttrApplicationTag as String: tag(slot),
-         kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom]
+                kSecAttrKeyClass as String: kSecAttrKeyClassPrivate,
+                kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom]
     }
 
-    static func load(slot: String) -> ClientKey? {
-        var found: CFTypeRef?
-        var lookup = query(slot)
-        lookup[kSecReturnRef as String] = true
-        if SecItemCopyMatching(lookup as CFDictionary, &found) == errSecSuccess, let found,
-           CFGetTypeID(found) == SecKeyGetTypeID(), let existing = make(found as! SecKey, persistent: true),
-           existing.sign(Data("self-test".utf8)) != nil {
-            return existing
-        }
-        delete(slot: slot)
-        let stored: [String: Any] = [
-            kSecAttrIsExtractable as String: false,
-            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom, kSecAttrKeySizeInBits as String: 256,
-            kSecPrivateKeyAttrs as String: [
-                kSecAttrIsPermanent as String: true, kSecAttrApplicationTag as String: tag(slot),
-                kSecAttrLabel as String: "\(TTSRuntime.displayName) agent client (\(slot))"] as [String: Any]]
-        if let created = SecKeyCreateRandomKey(stored as CFDictionary, nil), let key = make(created, persistent: true),
-           key.sign(Data("self-test".utf8)) != nil {
-            return key
-        }
-        delete(slot: slot)
-        let temporary: [String: Any] = [kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
-                                        kSecAttrKeySizeInBits as String: 256]
-        return SecKeyCreateRandomKey(temporary as CFDictionary, nil).flatMap { make($0, persistent: false) }
+    /// Coordinate credential creation and explicit reset across helper processes.
+    private static func withSlot<T>(_ host: String, _ run: (String) -> T?) -> T? {
+        let slot = slot(host)
+        let directory = open(TTSRuntime.socketDirectory, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard directory >= 0 else { return nil }
+        defer { close(directory) }
+        var info = stat()
+        guard fstat(directory, &info) == 0, info.st_uid == getuid(), info.st_mode & 0o777 == 0o700 else { return nil }
+        let fd = openat(directory, ".client-keys.lock", O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK, 0o600)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+        guard fstat(fd, &info) == 0, info.st_uid == getuid(), info.st_mode & S_IFMT == S_IFREG,
+              info.st_mode & 0o777 == 0o600, info.st_nlink == 1, flock(fd, LOCK_EX | LOCK_NB) == 0 else { return nil }
+        return run(slot)
     }
 
-    @discardableResult
-    static func delete(slot: String) -> Bool {
-        let status = SecItemDelete(query(slot) as CFDictionary)
-        return status == errSecSuccess || status == errSecItemNotFound
+    static func load(host: String?) -> ClientKey? {
+        if let host {
+            // A busy or inaccessible registered slot is retryable. Never replace an
+            // inaccessible key or silently issue an ephemeral one for this host.
+            return withSlot(host) { slot in
+                #if TTS_AGENT_FIXTURE_KEYS
+                return fixtureKey(slot)
+                #else
+                var lookup = query(slot)
+                lookup[kSecReturnRef as String] = true
+                var found: CFTypeRef?
+                let status = SecItemCopyMatching(lookup as CFDictionary, &found)
+                if status == errSecSuccess, let found, CFGetTypeID(found) == SecKeyGetTypeID() {
+                    let stored = make(found as! SecKey, persistent: true)
+                    return stored?.sign(Data("self-test".utf8)) == nil ? nil : stored
+                }
+                guard status == errSecItemNotFound else { return nil }
+                var attributes = keyAttributes
+                attributes[kSecPrivateKeyAttrs as String] = [
+                    kSecAttrIsExtractable as String: false,
+                    kSecAttrIsPermanent as String: true,
+                    kSecAttrApplicationTag as String: tag(slot),
+                    kSecAttrLabel as String: "\(TTSRuntime.displayName) registered agent client",
+                ]
+                let created = SecKeyCreateRandomKey(attributes as CFDictionary, nil)
+                return created.flatMap { make($0, persistent: true) }
+                #endif
+            }
+        }
+        return SecKeyCreateRandomKey(keyAttributes as CFDictionary, nil).flatMap { make($0, persistent: false) }
     }
+
+    static func delete(host: String) -> Bool {
+        withSlot(host) { slot in
+            #if TTS_AGENT_FIXTURE_KEYS
+            guard let url = fixtureURL(slot) else { return false }
+            do { try FileManager.default.removeItem(at: url); return true }
+            catch { return false }
+            #else
+            let status = SecItemDelete(query(slot) as CFDictionary)
+            return status == errSecSuccess || status == errSecItemNotFound
+            #endif
+        } ?? false
+    }
+
+    #if TTS_AGENT_FIXTURE_KEYS
+    // Integration fixtures use their own synthetic keys and never write to the
+    // user's Keychain. This code is omitted from all application builds.
+    private static func fixtureURL(_ slot: String) -> URL? {
+        ProcessInfo.processInfo.environment["TTS_AGENT_FIXTURE_KEY_DIR"].map {
+            URL(fileURLWithPath: $0, isDirectory: true).appendingPathComponent(slot)
+        }
+    }
+
+    private static func fixtureKey(_ slot: String) -> ClientKey? {
+        guard let url = fixtureURL(slot) else { return nil }
+        if FileManager.default.fileExists(atPath: url.path) {
+            var attributes = keyAttributes
+            attributes[kSecAttrKeyClass as String] = kSecAttrKeyClassPrivate
+            guard let bytes = try? Data(contentsOf: url),
+                  let key = SecKeyCreateWithData(bytes as CFData, attributes as CFDictionary, nil) else { return nil }
+            return make(key, persistent: true)
+        }
+        guard let key = SecKeyCreateRandomKey(keyAttributes as CFDictionary, nil),
+              let bytes = SecKeyCopyExternalRepresentation(key, nil) as Data?,
+              (try? bytes.write(to: url, options: .withoutOverwriting)) != nil else { return nil }
+        return make(key, persistent: true)
+    }
+    #endif
 
     private static func make(_ key: SecKey, persistent: Bool) -> ClientKey? {
         guard let publicKey = SecKeyCopyPublicKey(key),

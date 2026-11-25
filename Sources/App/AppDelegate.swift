@@ -205,7 +205,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func toggleDraftReceipt() {
         let access = appState.agentAccess
-        if access.autoReceive || access.receiving || access.waitingForReceiveHelper {
+        if access.autoReceive {
             access.disableReceive()
         } else {
             _ = access.enableReceive(current: { [weak self] in self?.currentAgentSnapshot($0) },
@@ -254,7 +254,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appState.agentCatalog.didChange = { [weak self] selector, deleted in
             self?.appState.agentAccess.invalidate(selector, deleted: deleted)
         }
-        appState.agentAccess.$receiving.sink { [weak self] in self?.draftReceiptMenu?.state = $0 ? .on : .off }
+        appState.agentAccess.$autoReceive.sink { [weak self] in self?.draftReceiptMenu?.state = $0 ? .on : .off }
             .store(in: &cancellables)
         appState.$phase
             .receive(on: RunLoop.main)
@@ -325,7 +325,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             instructions.target = self
             localInstructionMenu = instructions
         }
-        let draftReceipt = appMenu.addItem(withTitle: "외부 대본 받기 허용 (이번 실행)",
+        let draftReceipt = appMenu.addItem(withTitle: "외부 대본 전체 받기",
                                            action: #selector(toggleDraftReceipt), keyEquivalent: "")
         draftReceipt.target = self
         draftReceiptMenu = draftReceipt

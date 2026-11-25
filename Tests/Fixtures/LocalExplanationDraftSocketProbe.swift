@@ -37,18 +37,39 @@ enum CodeExplanation { static let noChange = "변경 없음" }
         let pieces = line.split(separator: " ")
         switch pieces.first {
         case "pair": report(access.startPairing() ? "ok" : "no")
-        case "disconnect": access.disconnect(); report("ok")
+        case "clients":
+            let rows: [[String: Any]] = access.connections.map { client in
+                ["id": client.id.uuidString, "label": client.label, "state": client.state.rawValue,
+                 "persistent": client.persistent, "host": client.host ?? "", "receiptEnabled": client.receiptEnabled]
+            }
+            report(String(decoding: try! JSONSerialization.data(withJSONObject: rows), as: UTF8.self))
+        case "requests":
+            let rows = access.approvalRequests.map { request in
+                ["id": request.id.uuidString, "label": request.label, "host": request.host ?? "",
+                 "launcher": request.launcher ?? ""]
+            }
+            report(String(decoding: try! JSONSerialization.data(withJSONObject: rows), as: UTF8.self))
+        case "approve", "disconnect", "resume", "forget":
+            let explicit = pieces.dropFirst().first.flatMap { UUID(uuidString: String($0)) }
+            let fallback = access.connections.count == 1 ? access.connections.first?.id : nil
+            guard let id = explicit ?? (pieces.count == 1 && pieces.first != "approve" ? fallback : nil) else {
+                report("no"); return
+            }
+            let success: Bool
+            switch pieces[0] {
+            case "approve": success = access.approve(id)
+            case "disconnect": success = access.disconnect(id)
+            case "resume": success = access.resume(id)
+            default: success = access.forget(id)
+            }
+            report(success ? "ok" : "no")
         case "enable":
             report(access.enableReceive(current: { [weak self] in self?.resolve($0) }, workspace: drafts) ? "ok" : "no")
         case "disable": access.disableReceive(); report("ok")
         // What the app does at launch, with no click.
         case "configure": access.configure(current: { [weak self] in self?.resolve($0) }, workspace: drafts); report("ok")
-        case "allow-new": access.allowNewAgent(); report("ok")
         case "lock": access.setLocked(true); report("ok")
         case "unlock": access.setLocked(false); report("ok")
-        case "forget":
-            guard let client = access.pair?.client ?? access.trusted.last?.id else { report("no"); return }
-            access.forget(client); report("ok")
         case "reset-documents":
             for _ in 0..<16 {
                 guard let tab = drafts.documentTabs.first else { break }
@@ -63,6 +84,10 @@ enum CodeExplanation { static let noChange = "변경 없음" }
             }
             report(all.joined(separator: " "))
         case "select", "select-alternate":
+            if pieces.count == 2 {
+                guard let client = UUID(uuidString: String(pieces[1])) else { report("no"); return }
+                access.chooseInstructionClient(client)
+            }
             let selection = pieces.first == "select-alternate" ? alternate : current
             report(selection.map { chosen in
                 access.select(chosen, current: { [weak self] in self?.resolve($0) })
@@ -119,14 +144,15 @@ enum CodeExplanation { static let noChange = "변경 없음" }
                          text: verb == "revert" ? original : "합성 지시 다른 버전\n")
             report("ok")
         case "snapshot":
+            let live = access.connections.filter { $0.helperPID != nil }
             let body: [String: Any] = [
                 "selection": access.selectionStatus.rawValue, "diagnostics": access.selectionDiagnostics.map(\.rawValue),
-                "paired": access.pair != nil, "editor": drafts.display, "speech": drafts.speech,
+                "paired": !live.isEmpty, "editor": drafts.display, "speech": drafts.speech,
                 "editorID": drafts.editorDocumentID, "shared": access.shared != nil, "scope": access.instructionScope ?? "",
-                "receiving": access.receiving, "waiting": access.waitingForReceiveHelper,
+                "receiving": access.receiving, "waiting": access.autoReceive && !access.receiving && access.approvalRequests.isEmpty,
                 "auto": access.autoReceive, "locked": access.locked, "trusted": access.trusted.map(\.label),
-                "hosts": access.trusted.map(\.host), "persistent": access.pair?.persistent ?? false,
-                "awaiting": access.awaitingApproval ?? "", "status": access.status,
+                "hosts": access.trusted.map(\.host), "persistent": live.contains(where: \.persistent),
+                "awaiting": access.approvalRequests.first?.label ?? "", "status": access.status,
                 "tabs": drafts.documentTabs.map(\.title), "dirty": drafts.documentTabs.map(\.dirty),
                 "unseen": drafts.documentTabs.map(\.unseen), "activeTitle": drafts.activeOriginal?.title ?? "",
                 "canRevert": drafts.canRevertReceived, "original": drafts.activeOriginal?.display ?? "",
