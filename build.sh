@@ -117,6 +117,9 @@ case "${1:-install}" in
   test)
     echo "==> Compiling + running unit tests"
     mkdir -p "$BUILD_DIR"
+    swiftc -O "$HERE/Sources/Core/ExplanationJournal.swift" "$HERE/Tests/ExplanationJournalTests.swift" -o "$BUILD_DIR/journal-tests"
+    "$BUILD_DIR/journal-tests"
+    mkdir -p "$BUILD_DIR"
     swiftc -O "$HERE/Sources/Core/TextSplitter.swift" "$HERE/Sources/Core/CrawlLayout.swift" \
       "$HERE/Sources/App/Endpoints.swift" "$HERE/Tests/main.swift" -o "$BUILD_DIR/tests"
     "$BUILD_DIR/tests"
