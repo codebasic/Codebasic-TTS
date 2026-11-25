@@ -17,4 +17,8 @@ enum Log {
     static let service = Logger(subsystem: subsystem, category: "service")
     static let app = Logger(subsystem: subsystem, category: "app")
     static let tts = Logger(subsystem: subsystem, category: "tts")
+    /// `[AGENT-CONN]` agent app connection and approval decisions. Never logs
+    /// draft text, instructions or key material; app identity is the code
+    /// signature (team/certificate + signing identifier), not user data.
+    static let agent = Logger(subsystem: subsystem, category: "agent")
 }

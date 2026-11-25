@@ -1,5 +1,6 @@
 import Combine
 import CryptoKit
+import os
 import CoreFoundation
 import Darwin
 import Foundation
@@ -338,21 +339,40 @@ import Security
         if locked { return ["status": "locked"] }
         if blockedPeers.contains(peer) { return ["status": "revoked"] }
         if let binding = binding(for: peer) { return bound(binding) }
-        switch trust.lookup(keyID: claim.keyID, host: claim.host ?? "") {
-        case .revoked: return ["status": "revoked"]
+        let lookup = trust.lookup(keyID: claim.keyID, host: claim.host ?? "")
+        let outcome: [String: Any]
+        switch lookup {
+        case .revoked: outcome = ["status": "revoked"]
         case .trusted(let record) where claim.host != nil:
-            guard autoReceive, record.receiptEnabled else { return ["status": "disabled"] }
-            guard bindings[record.id] == nil else { return ["status": "other_agent"] }
-            guard let binding = bind(claim, client: record.id, label: record.label, leaf: leaf, helperHash: helperHash) else {
-                return ["status": "unavailable"]
-            }
-            trust.touch(record.id)
-            trusted = trust.clients
-            refreshConnections()
-            return bound(binding)
+            if !autoReceive || !record.receiptEnabled { outcome = ["status": "disabled"] }
+            else if bindings[record.id] != nil { outcome = ["status": "other_agent"] }
+            else if let binding = bind(claim, client: record.id, label: record.label, leaf: leaf, helperHash: helperHash) {
+                trust.touch(record.id)
+                trusted = trust.clients
+                refreshConnections()
+                outcome = bound(binding)
+            } else { outcome = ["status": "unavailable"] }
         default:
-            return ["status": requestApproval(claim, leaf: leaf, helperHash: helperHash)]
+            outcome = ["status": requestApproval(claim, leaf: leaf, helperHash: helperHash)]
         }
+        Self.logConnect(claim: claim, lookup: lookup, result: outcome["status"] as? String ?? "?")
+        return outcome
+    }
+
+    private static func describe(_ lookup: AgentTrustStore.Lookup) -> String {
+        switch lookup {
+        case .trusted: return "trusted"
+        case .unknown: return "unknown"
+        case .revoked: return "revoked"
+        case .hostChanged: return "host_changed"
+        }
+    }
+
+    /// One line per reconnect: whether the app was recognized and what it got.
+    private static func logConnect(claim: Challenge, lookup: AgentTrustStore.Lookup, result: String) {
+        let host = claim.host ?? "unverified"
+        let key = String(claim.keyID.prefix(12))
+        Log.agent.info("[AGENT-CONN] connect host=\(host, privacy: .public) key=\(key, privacy: .public) lookup=\(describe(lookup), privacy: .public) result=\(result, privacy: .public)")
     }
 
     private static func sameHost(as claim: Challenge) -> Bool {
@@ -423,6 +443,7 @@ import Security
                     clearApprovals(for: record)
                 } catch {
                     status = "이 에이전트의 승인을 저장하지 못했습니다. 기억한 연결과 저장 공간을 확인하세요."
+                    Log.agent.error("[AGENT-CONN] approve host=\(host, privacy: .public) result=store_failed error=\(String(describing: error), privacy: .public)")
                     return false
                 }
             }
@@ -440,6 +461,8 @@ import Security
             return false
         }
         if claim.host == nil { status = "호스트를 확인할 수 없어 이번 실행 동안만 허용했습니다." }
+        let scope = claim.host == nil ? "this_run" : "persistent"
+        Log.agent.info("[AGENT-CONN] approve host=\(claim.host ?? "unverified", privacy: .public) client=\(client.uuidString, privacy: .public) scope=\(scope, privacy: .public) result=ok")
         return true
     }
 
@@ -710,9 +733,11 @@ import Security
         guard connections.contains(where: { $0.id == client }) else { return false }
         if let record = trust.clients.first(where: { $0.id == client }) {
             clearApprovals(for: record)
-            if !trust.forget(client) {
+            let saved = trust.forget(client)
+            if !saved {
                 status = "잊은 내용을 저장하지 못했습니다. 앱을 다시 열면 이 에이전트가 다시 보일 수 있습니다."
             }
+            Log.agent.info("[AGENT-CONN] revoke host=\(record.host, privacy: .public) client=\(client.uuidString, privacy: .public) result=\(saved ? "ok" : "unsaved", privacy: .public)")
             trusted = trust.clients
         }
         if let peer = bindings[client]?.pair.peer {
