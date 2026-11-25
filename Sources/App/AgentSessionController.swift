@@ -340,7 +340,7 @@ import Security
         if blockedPeers.contains(peer) { return ["status": "revoked"] }
         if let binding = binding(for: peer) { return bound(binding) }
         let lookup = trust.lookup(keyID: claim.keyID, host: claim.host ?? "")
-        let outcome: [String: Any]
+        let outcome: [String: String]
         switch lookup {
         case .revoked: outcome = ["status": "revoked"]
         case .trusted(let record) where claim.host != nil:
@@ -355,7 +355,7 @@ import Security
         default:
             outcome = ["status": requestApproval(claim, leaf: leaf, helperHash: helperHash)]
         }
-        Self.logConnect(claim: claim, lookup: lookup, result: outcome["status"] as? String ?? "?")
+        Self.logConnect(claim: claim, lookup: lookup, result: outcome["status"] ?? "?")
         return outcome
     }
 
