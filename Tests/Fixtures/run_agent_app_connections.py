@@ -58,6 +58,7 @@ def build(root):
     receiver = [
         SOURCES / "App/LocalInstructionSocket.swift",
         SOURCES / "App/AgentSessionController.swift",
+        SOURCES / "Core/Logging.swift",
         SOURCES / "Core/AgentTrustStore.swift",
         SOURCES / "Core/AgentDeliveryProofs.swift",
         SOURCES / "Core/ExplanationDraftWorkspace.swift",
