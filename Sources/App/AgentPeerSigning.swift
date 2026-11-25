@@ -55,6 +55,38 @@ enum AgentPeerSigning {
         guard let child = process(pid), child.pbi_ppid > 1 else { return nil }
         let parentPID = pid_t(child.pbi_ppid)
         guard let parent = process(parentPID), let runningPath = executablePath(parentPID) else { return nil }
+        // Validating a large agent binary takes about a second, and every request
+        // re-checks its host. The answer is fixed for one running parent process,
+        // so it is computed once per process instance.
+        let cacheKey = "\(parentPID):\(parent.pbi_start_tvsec):\(parent.pbi_start_tvusec):\(runningPath)"
+        if let cached = hostCache.value(cacheKey) { return cached }
+        let host = validateHost(pid: pid, child: child, parentPID: parentPID, parent: parent, runningPath: runningPath)
+        // Only cache when the same processes are still in place afterwards.
+        if let currentChild = process(pid), sameProcess(child, currentChild),
+           let currentParent = process(parentPID), sameProcess(parent, currentParent) {
+            hostCache.store(cacheKey, host)
+        }
+        return host
+    }
+
+    private final class HostCache: @unchecked Sendable {
+        private let lock = NSLock()
+        private var entries: [(key: String, host: String?)] = []
+        func value(_ key: String) -> String?? {
+            lock.lock(); defer { lock.unlock() }
+            return entries.first(where: { $0.key == key }).map { $0.host }
+        }
+        func store(_ key: String, _ host: String?) {
+            lock.lock(); defer { lock.unlock() }
+            entries.removeAll { $0.key == key }
+            entries.append((key, host))
+            if entries.count > 32 { entries.removeFirst(entries.count - 32) }
+        }
+    }
+    private static let hostCache = HostCache()
+
+    private static func validateHost(pid: pid_t, child: proc_bsdinfo, parentPID: pid_t, parent: proc_bsdinfo,
+                                     runningPath: String) -> String? {
 
         var guest: SecCode?
         var code: SecStaticCode?
@@ -75,8 +107,7 @@ enum AgentPeerSigning {
               let currentChild = process(pid), currentChild.pbi_ppid == child.pbi_ppid,
               sameProcess(child, currentChild),
               let currentParent = process(parentPID), sameProcess(parent, currentParent),
-              executablePath(parentPID) == runningPath,
-              SecCodeCheckValidity(guest, [], nil) == errSecSuccess else { return nil }
+              executablePath(parentPID) == runningPath else { return nil }
         // A bundle must agree with its own signature about which app it is.
         if let plist = details[kSecCodeInfoPList as String] as? [String: Any],
            let bundleID = plist["CFBundleIdentifier"] as? String, bundleID != identifier { return nil }
