@@ -200,6 +200,10 @@ import Security
             guard let request = Self.decode(bytes) else { return Self.reply("invalid") }
             guard Self.isSchema(request["schema_version"], AgentPairing.schema) else { return Self.reply("upgrade_required") }
             let keys = Set(request.keys)
+            // Identify the launching app here, off the main thread: validating a large
+            // agent binary can take longer than the main-thread deadline below. The
+            // main-thread checks then reuse the cached result.
+            _ = AgentPeerSigning.registeredHost(pid: peer.pid)
             let response = Reply()
             let signal = DispatchSemaphore(value: 0)
             let deadline = DispatchTime.now() + .milliseconds(750)
@@ -223,7 +227,11 @@ import Security
                 default: response.set("invalid")
                 }
             }
-            guard signal.wait(timeout: deadline) == .success else { return Self.reply("unavailable") }
+            guard signal.wait(timeout: deadline) == .success else {
+                let op = request["op"] as? String ?? "?"
+                Log.agent.error("[AGENT-CONN] pairing op=\(op, privacy: .public) pid=\(peer.pid, privacy: .public) result=unavailable reason=main_deadline")
+                return Self.reply("unavailable")
+            }
             return response.data()
         }
         guard socket.start() else {
