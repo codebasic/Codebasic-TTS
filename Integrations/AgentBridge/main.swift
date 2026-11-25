@@ -6,9 +6,13 @@
 //   codesign --force --options runtime --identifier com.codebasic.tts.agent-bridge \
 //       --sign "<the user-selected signing identity>" build/codebasic-tts-agent-bridge
 //
-// Required environment (both non-secret, both mandatory, no defaults, no fallbacks):
-//   CODEBASIC_TTS_APP_BUNDLE_ID   exact expected signing identifier of the app
-//   CODEBASIC_TTS_SIGNER_SHA1     40 hex digits, SHA-1 of the trusted public leaf certificate
+// Configuration: none. No environment variable, argument or file is read. The app is identified by
+// the compiled-in AgentPeerSignature.appIdentifier and by this helper's OWN leaf certificate (same-
+// certificate design); an unsigned or ad hoc helper therefore never talks to anything.
+//
+// Discovery: the running app owns a private generation directory named from its PID and start time
+// (AgentBridgeEndpoint.swift, compiled into both sides). The fixed hello on c.sock carries no user
+// data and only asks whether the owner approved this exact helper process.
 //
 // Behaviour: no listener, no network, no files other than lstat/open of the fixed private socket
 // directory, no logs, no stderr output, no app launch, no speech, no credentials. Every command uses a
@@ -241,19 +245,49 @@ struct BridgeConfig {
     let signerSHA1: String
 }
 
+/// One discovered app generation: its private directory and the exact process it must belong to.
+struct AppEndpoint {
+    let directory: String
+    let generation: AgentBridgeEndpoint.Generation
+}
+
+#if AGENT_BRIDGE_TEST_SEAM
+// SYNTHETIC FIXTURE BUILD ONLY (./build.sh test passes -D AGENT_BRIDGE_TEST_SEAM; build() never does).
+// The signature check is replaced by the kernel peer identity so an offline test can play the app
+// inside a private temporary root. Without the flag none of this code exists in the binary.
 func environmentValue(_ name: String) -> String? {
     guard let raw = getenv(name) else { return nil }
     return String(cString: raw)
 }
 
+let socketRoot = environmentValue("AGENT_BRIDGE_TEST_ROOT") ?? ""
+
 func loadConfig() -> BridgeConfig? {
-    guard let identifier = environmentValue("CODEBASIC_TTS_APP_BUNDLE_ID"),
-          AgentPeerSignature.isValidIdentifier(identifier),
-          identifier != AgentPeerSignature.bridgeIdentifier,
-          let rawPin = environmentValue("CODEBASIC_TTS_SIGNER_SHA1"),
-          let pin = AgentPeerSignature.normalizedSHA1(rawPin) else { return nil }
-    return BridgeConfig(appIdentifier: identifier, signerSHA1: pin)
+    guard socketRoot.utf8.first == 0x2F else { return nil }
+    return BridgeConfig(appIdentifier: AgentPeerSignature.appIdentifier, signerSHA1: String(repeating: "0", count: 40))
 }
+
+func verifyApp(_ fd: Int32, _ uid: uid_t, _ cfg: BridgeConfig) -> AgentPeerSignature.Peer? {
+    guard let peer = AgentPeerSignature.peer(ofConnectedSocket: fd), peer.effectiveUID == uid,
+          peer.realUID == uid, peer.pid != getpid() else { return nil }
+    return peer
+}
+#else
+let socketRoot = AgentBridgeEndpoint.root(uid: geteuid())
+
+/// No environment, no arguments, no files: the app identifier is compiled in and the pin is the public
+/// leaf certificate of this helper's own valid signature. Unsigned or ad hoc helpers get no config.
+func loadConfig() -> BridgeConfig? {
+    guard let pin = AgentPeerSignature.ownSignerSHA1() else { return nil }
+    return BridgeConfig(appIdentifier: AgentPeerSignature.appIdentifier, signerSHA1: pin)
+}
+
+/// The security decision for a connected socket: UID, kernel audit token, identifier and leaf pin.
+func verifyApp(_ fd: Int32, _ uid: uid_t, _ cfg: BridgeConfig) -> AgentPeerSignature.Peer? {
+    AgentPeerSignature.verifyConnectedPeer(fd: fd, expectedUID: uid, identifier: cfg.appIdentifier,
+                                           leafSHA1: cfg.signerSHA1)
+}
+#endif
 
 let maxFrameBytes = 102_400
 let maxTextBytes = 8192
@@ -289,12 +323,13 @@ func matches(_ st: stat, type: mode_t, mode: mode_t, uid: uid_t) -> Bool {
     (st.st_mode & S_IFMT) == type && (st.st_mode & 0o7777) == mode && st.st_uid == uid
 }
 
-func exchange(_ socketName: String, _ payload: [UInt8], _ cfg: BridgeConfig) -> Exchange {
+func exchange(_ app: AppEndpoint, _ socketName: String, _ payload: [UInt8], _ cfg: BridgeConfig) -> Exchange {
     guard !payload.isEmpty, payload.count <= maxFrameBytes else { return .unavailable }
     let uid = geteuid()
     guard getuid() == uid else { return .unavailable }
     let deadline = nowNanos() + exchangeTimeoutNanos
-    let directory = "/private/tmp/codebasic-tts-mcp-" + String(uid)
+    // Always the private directory of one discovered app generation, never the legacy fixed path.
+    let directory = app.directory
     let path = directory + "/" + socketName
 
     // Private directory: real directory (no symlink), ours, exactly 0700; socket: ours, exactly 0600.
@@ -345,8 +380,9 @@ func exchange(_ socketName: String, _ payload: [UInt8], _ cfg: BridgeConfig) -> 
     }
 
     // The security decision. Nothing has been written yet.
-    guard AgentPeerSignature.verifyConnectedPeer(fd: fd, expectedUID: uid, identifier: cfg.appIdentifier,
-                                                 leafSHA1: cfg.signerSHA1) != nil,
+    // Kernel audit token of the live peer, and it must be exactly the process (PID + start time)
+    // the generation directory is named for.
+    guard let peer = verifyApp(fd, uid, cfg), peer.pid == app.generation.pid, app.generation.isLive,
           nowNanos() < deadline else { return .unavailable }
 
     var sent = 0
@@ -437,11 +473,95 @@ func toolResult(_ payload: JSON, isError: Bool) -> JSON {
     return ["content": [["type": "text", "text": .string(text)]], "isError": .bool(isError)]
 }
 
-func failure(_ status: String) -> JSON {
-    let help = "Nothing is confirmed as delivered or played. Ask the app owner to check that the app is running and to pair local helper pid "
-        + String(helperPID)
-        + " in the app's agent pairing UI. This helper also requires CODEBASIC_TTS_APP_BUNDLE_ID and CODEBASIC_TTS_SIGNER_SHA1 to name the app identifier and its trusted signer certificate SHA-1. If the status is unconfirmed, retry only with the same idempotency_key."
-    return toolResult(["status": .string(status), "helper_pid": .number(String(helperPID)), "help": .string(help)], isError: true)
+/// Machine-readable `reason` next to the unchanged `status` values that existing clients rely on.
+func helpText(_ reason: String) -> String {
+    switch reason {
+    case "bridge_not_signed":
+        return "This helper is not signed with a stable certificate, so it cannot authenticate the app. Use the helper bundled inside the signed app."
+    case "app_not_running":
+        return "The Codebasic TTS app is not running for this user, or it is an older version. Ask the owner to open the app, then call the tool again."
+    case "multiple_apps":
+        return "More than one running Codebasic TTS app was found. Ask the owner to quit all but one; this helper never picks one silently."
+    case "approval_pending":
+        return "The app is open and now lists this helper as a connection request. Ask the owner to approve it in the Agent tab, then call the tool again."
+    case "approval_denied":
+        return "The owner declined this connection request. Do not retry unless the owner asks for it."
+    case "approval_busy":
+        return "Too many connection requests are waiting in the app. Ask the owner to review them in the Agent tab."
+    case "nothing_shared":
+        return "This helper is approved, but no instruction is shared right now. Ask the owner to share one instruction in the Agent tab."
+    case "receipt_not_allowed":
+        return "This helper is approved, but draft receipt is not allowed right now. Ask the owner to allow draft receipt in the Agent tab."
+    default:
+        return "The app did not confirm the request."
+    }
+}
+
+func failure(_ status: String, _ reason: String) -> JSON {
+    let help = "Nothing is confirmed as delivered or played. " + helpText(reason)
+        + " Helper process " + String(helperPID)
+        + ". If the status is unconfirmed, retry only with the same idempotency_key."
+    return toolResult(["status": .string(status), "reason": .string(reason),
+                       "helper_pid": .number(String(helperPID)), "help": .string(help)], isError: true)
+}
+
+// MARK: - Discovery and consent rendezvous
+
+enum Admission {
+    case unavailable(String)    // reason; no user data was transmitted
+    case approved(AppEndpoint)
+}
+
+/// Sends the fixed hello (no user data) to one generation's c.sock and returns the app's answer.
+func knock(_ app: AppEndpoint, _ cfg: BridgeConfig) -> String? {
+    let version = String(AgentBridgeEndpoint.protocolVersion)
+    var request = [UInt8]()
+    encode(["operation": "hello", "protocol": .number(version)], into: &request)
+    request.append(0x0A)
+    guard case .frame(let frame) = exchange(app, AgentBridgeEndpoint.rendezvousName, request, cfg),
+          case .object(let o)? = JSONParser.parse(frame), o.count == 2,
+          o["protocol"] == .number(version),
+          case .string(let status)? = o["status"],
+          ["pending", "approved", "denied", "busy"].contains(status) else { return nil }
+    return status
+}
+
+/// Finds the single live, verified app of this user. Directory names are only hints: each one must
+/// name a live PID + start time, and exchange() then checks the kernel audit token of the peer.
+func admit(_ cfg: BridgeConfig) -> Admission {
+    let uid = geteuid()
+    var ls = stat()
+    guard getuid() == uid, lstat(socketRoot, &ls) == 0, matches(ls, type: S_IFDIR, mode: 0o700, uid: uid),
+          let dir = opendir(socketRoot) else { return .unavailable("app_not_running") }
+    var live = [AppEndpoint]()
+    var scanned = 0
+    while scanned < 4096, live.count <= AgentBridgeEndpoint.maxGenerationsScanned, let entry = readdir(dir) {
+        scanned += 1
+        let length = Int(entry.pointee.d_namlen)
+        let name = withUnsafePointer(to: &entry.pointee.d_name) {
+            $0.withMemoryRebound(to: UInt8.self, capacity: length) {
+                String(decoding: UnsafeBufferPointer(start: $0, count: length), as: UTF8.self)
+            }
+        }
+        guard let generation = AgentBridgeEndpoint.Generation(name: name), generation.pid != getpid(),
+              generation.isLive else { continue }
+        live.append(AppEndpoint(directory: socketRoot + "/" + name, generation: generation))
+    }
+    closedir(dir)
+    guard live.count <= AgentBridgeEndpoint.maxGenerationsScanned else { return .unavailable("multiple_apps") }
+    var answers = [(AppEndpoint, String)]()
+    for app in live {
+        if let status = knock(app, cfg) { answers.append((app, status)) }
+    }
+    // Several verified apps: deny instead of picking one silently.
+    guard answers.count <= 1 else { return .unavailable("multiple_apps") }
+    guard let (app, status) = answers.first else { return .unavailable("app_not_running") }
+    switch status {
+    case "approved": return .approved(app)
+    case "denied": return .unavailable("approval_denied")
+    case "busy": return .unavailable("approval_busy")
+    default: return .unavailable("approval_pending")
+    }
 }
 
 func invalidArguments(_ help: String) -> JSON {
@@ -453,8 +573,13 @@ func getInstructions(_ args: [String: JSON]) -> JSON {
     var request = [UInt8]()
     encode(["operation": "get"], into: &request)
     request.append(0x0A)
-    guard let cfg = config,
-          case .frame(let frame) = exchange("ai.sock", request, cfg),
+    guard let cfg = config else { return failure("unavailable", "bridge_not_signed") }
+    let app: AppEndpoint
+    switch admit(cfg) {
+    case .unavailable(let reason): return failure("unavailable", reason)
+    case .approved(let found): app = found
+    }
+    guard case .frame(let frame) = exchange(app, "ai.sock", request, cfg),
           case .object(let o)? = JSONParser.parse(frame),
           o.count == 4,
           o["schema_version"] == .number("2"),
@@ -462,7 +587,7 @@ func getInstructions(_ args: [String: JSON]) -> JSON {
           case .string(let revision)? = o["revision"], validRevision(revision),
           case .string(let instructions)? = o["instructions"],
           instructions.utf8.count <= maxTextBytes, !instructions.utf8.contains(0)
-    else { return failure("unavailable") }
+    else { return failure("unavailable", "nothing_shared") }
     return toolResult(.object(o), isError: false)
 }
 
@@ -490,21 +615,26 @@ func submitDraft(_ args: [String: JSON]) -> JSON {
     var request = [UInt8]()
     encode(.object(wire), into: &request)
     request.append(0x0A)
-    guard request.count <= maxFrameBytes, let cfg = config else { return failure("unavailable") }
-    switch exchange("ad.sock", request, cfg) {
+    guard request.count <= maxFrameBytes, let cfg = config else { return failure("unavailable", "bridge_not_signed") }
+    let app: AppEndpoint
+    switch admit(cfg) {
+    case .unavailable(let reason): return failure("unavailable", reason)
+    case .approved(let found): app = found
+    }
+    switch exchange(app, "ad.sock", request, cfg) {
     case .unavailable:
-        return failure("unavailable")
+        return failure("unavailable", "receipt_not_allowed")
     case .unconfirmed:
-        return failure("unconfirmed")
+        return failure("unconfirmed", "outcome_unknown")
     case .frame(let frame):
         guard case .object(let o)? = JSONParser.parse(frame), o.count == 1,
               case .string(let status)? = o["status"], knownDraftStatuses.contains(status) else {
-            return failure("unconfirmed")
+            return failure("unconfirmed", "outcome_unknown")
         }
         if status == "accepted" { return toolResult(["status": "accepted"], isError: false) }
         // The same content was already queued earlier: idempotent success, no new draft was created.
         if status == "duplicate" { return toolResult(["status": "duplicate"], isError: false) }
-        return failure(status)
+        return failure(status, status)
     }
 }
 

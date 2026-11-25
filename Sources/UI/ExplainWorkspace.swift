@@ -18,11 +18,10 @@ private enum CatalogConfirm: Equatable {
 struct ExplainWorkspace: View {
     @EnvironmentObject private var app: AppState
     @ObservedObject private var agent: AgentWorkspaceController
+    @ObservedObject private var rendezvous: AgentBridgeRendezvous
     @ObservedObject private var catalog: AgentInstructionCatalog
     @ObservedObject private var drafts: ExplanationDraftWorkspace
     @State private var query = ""
-    @State private var pidText = ""
-    @State private var labelText = ""
     @State private var editTarget: InstructionEditTarget?
     @State private var catalogConfirm: CatalogConfirm?
     @State private var showCatalogConfirm = false
@@ -38,6 +37,7 @@ struct ExplainWorkspace: View {
     @MainActor
     init(agent: AgentWorkspaceController) {
         _agent = ObservedObject(wrappedValue: agent)
+        _rendezvous = ObservedObject(wrappedValue: agent.rendezvous)
         _catalog = ObservedObject(wrappedValue: agent.catalog)
         _drafts = ObservedObject(wrappedValue: agent.drafts)
     }
@@ -114,29 +114,45 @@ struct ExplainWorkspace: View {
                 Text("연결은 이 Mac에서 같은 인증서로 서명된 이 브리지 프로세스 하나에만 적용됩니다. 연결을 해제하거나 앱 또는 브리지가 종료되면 읽기·받기 허용이 모두 끝납니다.")
                     .font(.caption).foregroundStyle(.secondary)
             } else {
-                HStack {
-                    TextField("브리지 PID", text: $pidText).frame(width: 110)
-                    TextField("내가 붙이는 이름 (예: 코딩 에이전트)", text: $labelText)
-                    Button("연결") {
-                        if agent.pair(pidText: pidText, label: labelText) { pidText = "" }
-                    }
-                    .disabled(agent.ownSignerSHA1 == nil || pidText.isEmpty
-                              || labelText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-                .textFieldStyle(.roundedBorder)
-                Text("이 Mac에서 같은 인증서로 서명된 브리지 프로세스(PID) 하나만 지정합니다. 이름은 내가 알아보기 위한 표시일 뿐이며, 원격 에이전트의 이름이나 신원을 확인하지 않습니다. 연결만으로는 아무것도 공유되지 않습니다.")
-                    .font(.caption).foregroundStyle(.secondary)
-                if let summary = agent.setupSummary {
-                    Text(verbatim: "MCP 설정값  " + summary)
-                        .font(.caption.monospaced()).foregroundStyle(.secondary)
-                        .textSelection(.enabled).lineLimit(2)
-                } else {
-                    Text("이 앱은 안정적인 서명 인증서 없이 빌드되어 브리지를 연결할 수 없습니다. 지시 복사와 대본 붙여넣기는 그대로 사용할 수 있습니다.")
-                        .font(.caption).foregroundStyle(.orange)
-                }
+                pendingBridges
             }
             if let notice = agent.notice {
                 Text(verbatim: notice).font(.caption).foregroundStyle(.orange)
+            }
+        }
+    }
+
+    /// One approval per bridge process. Every value shown comes from the kernel and the code
+    /// signature check of the live peer; there is nothing to type in.
+    @ViewBuilder private var pendingBridges: some View {
+        switch rendezvous.availability {
+        case .unsigned:
+            Text("이 앱은 안정적인 서명 인증서 없이 빌드되어 브리지를 연결할 수 없습니다. 지시 복사와 대본 붙여넣기는 그대로 사용할 수 있습니다.")
+                .font(.caption).foregroundStyle(.orange)
+        case .identifierMismatch, .endpointUnavailable, .stopped:
+            Text("이 실행에서는 브리지 연결을 받을 수 없습니다. 앱을 다시 시작해 보세요. 지시 복사와 대본 붙여넣기는 그대로 사용할 수 있습니다.")
+                .font(.caption).foregroundStyle(.orange)
+        case .listening:
+            if rendezvous.candidates.isEmpty {
+                Text("연결 요청 없음 · MCP 클라이언트의 에이전트가 도구를 호출하면 여기에 요청이 나타납니다. 입력할 값은 없으며, 승인 전에는 아무것도 공유되지 않습니다.")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                if rendezvous.candidates.count > 1 {
+                    Text("여러 브리지가 연결을 요청했습니다. 연결할 하나를 직접 고르세요.")
+                        .font(.caption).foregroundStyle(.orange)
+                }
+                ForEach(rendezvous.candidates) { candidate in
+                    HStack {
+                        (Text(verbatim: "서명 확인된 브리지 · PID \(candidate.identity.pid) · 시작 ")
+                            + Text(Date(timeIntervalSince1970: TimeInterval(candidate.identity.startSeconds)), style: .time))
+                            .font(.callout)
+                        Spacer()
+                        Button("연결 승인") { agent.approve(candidate) }
+                        Button("거절") { agent.decline(candidate) }
+                    }
+                }
+                Text("승인은 이 Mac에서 이 앱과 같은 인증서로 서명된 이 브리지 프로세스 하나에만, 이번 실행 동안만 적용됩니다. 승인만으로는 아무것도 공유되지 않습니다.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
         }
     }
