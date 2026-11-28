@@ -196,6 +196,8 @@ final class AppState: ObservableObject {
         !lastSegment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
     @Published var selectedTab = 0               // RootView TabView selection
+    /// The management window is on screen (not closed, minimized, hidden or covered).
+    @Published var mainWindowVisible = false
 
     // Per-role endpoint reference + model memory. A role points at an endpoint
     // (id) and remembers the model last picked for it; an unset role model

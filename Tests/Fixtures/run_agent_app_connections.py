@@ -8,6 +8,7 @@ or synthesis providers involved. Run on macOS with the repo's signing identity.
 
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, closing
+import ctypes
 import json
 import os
 from pathlib import Path
@@ -17,6 +18,7 @@ import signal
 import sqlite3
 import subprocess
 import tempfile
+import time
 
 from run_persistent_pairing import BUILD, HERE, IDENTITY, REPO, SOURCES, Server, Session
 
@@ -325,11 +327,140 @@ def verify(root, hosts):
         check("same-signer wrong helper build and ad-hoc helper cannot pair")
 
 
+def wait_for(probe, timeout=6.0, interval=0.1):
+    """Polls app-side state only: no MCP tool call is made while waiting."""
+    deadline = time.monotonic() + timeout
+    while True:
+        value = probe()
+        if value or time.monotonic() >= deadline:
+            return value
+        time.sleep(interval)
+
+
+def state_of(server, client_id):
+    return next((client["state"] for client in clients(server) if client["id"] == client_id), None)
+
+
+def post_ready_flood(count):
+    libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+    libc.notify_post.argtypes = [ctypes.c_char_p]
+    name = (APP_ID + ".agent.ready").encode()
+    for _ in range(count):
+        assert libc.notify_post(name) == 0
+
+
+def verify_auto_connect(root, hosts):
+    """#31: with the Agent tab open, approved apps connect without a click or tool call."""
+    database = root / "auto-drafts.sqlite"
+    trust = root / "auto-agent-clients.json"
+    keys = root / "auto-keys"
+    keys.mkdir(mode=0o700)
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(root), "TMPDIR": str(root)}
+
+    with ExitStack() as resources:
+        def app(trust_file=trust):
+            server = Server(root, env, "codebasic-tts-mcp", trust_file, database=database)
+            resources.callback(server.end)
+            assert server("pair") == "ok" and server("configure") == "ok"
+            return server
+
+        def connect(host):
+            session = Session(str(root / "helper"), name="auto-agent", launcher=[hosts[host]], cwd=root,
+                              env={**env, "TTS_AGENT_FIXTURE_KEY_DIR": str(keys)}, start_new_session=True)
+            resources.callback(session.close)
+            return session
+
+        def connect_state(server):
+            return json.loads(server("connect-state"))
+
+        server = app()
+        assert connect_state(server)["choice"] == "auto" and not connect_state(server)["auto"]
+        a = connect("A")
+        assert server("presence on") == "ok"
+        state = connect_state(server)
+        assert state["auto"] and state["choice"] == "auto" and state["open"], state
+        request_a, = wait_for(lambda: requests(server))
+        assert server("approve " + request_a["id"]) == "ok"
+        client_a, = clients(server)
+        assert client_a["state"] == "receiving"
+        check("first launch: opening the Agent tab turns receipt on; a new app still needs one approval")
+
+        assert server("presence off") == "ok"
+        assert state_of(server, client_a["id"]) == "receiving"
+        expect_status(a, "receiving_only")
+        check("closing the Agent tab keeps the approved app connected")
+
+        server.end()
+        server = app()
+        assert wait_for(lambda: state_of(server, client_a["id"]) == "receiving"), clients(server)
+        check("after an app restart the live helper reattaches on the ready signal, without a tool call")
+
+        assert server("lock") == "ok"
+        assert state_of(server, client_a["id"]) == "locked"
+        assert server("unlock") == "ok"
+        assert wait_for(lambda: state_of(server, client_a["id"]) == "receiving"), clients(server)
+        check("unlock reconnects the approved app without a tool call")
+
+        assert server("disable") == "ok"
+        server.end()
+        server = app()
+        assert server("presence on") == "ok"
+        state = connect_state(server)
+        assert state["choice"] == "off" and not state["auto"] and not state["legacy"], state
+        time.sleep(1.5)
+        assert state_of(server, client_a["id"]) == "paused" and requests(server) == []
+        assert server("enable") == "ok"
+        assert wait_for(lambda: state_of(server, client_a["id"]) == "receiving"), clients(server)
+        check("receipt the user turned off stays off when the tab opens; turning it on reconnects at once")
+
+        server.end()
+        b = connect("B")
+        time.sleep(0.5)
+        server = app()
+        assert server("presence on") == "ok"
+        assert wait_for(lambda: state_of(server, client_a["id"]) == "receiving"), clients(server)
+        request_b, = wait_for(lambda: requests(server))
+        check("a helper started before the app connects when the app comes up (approved) or asks once (new)")
+
+        for _ in range(3):
+            assert server("presence off") == "ok" and server("presence on") == "ok"
+        post_ready_flood(100)
+        time.sleep(2.5)
+        assert [request["id"] for request in requests(server)] == [request_b["id"]]
+        assert state_of(server, client_a["id"]) == "receiving"
+        assert server("snapshot")
+        check("repeated tab opens and a flood of forged ready signals add no approval requests")
+
+        assert server("forget " + client_a["id"]) == "ok"
+        post_ready_flood(3)
+        time.sleep(2.5)
+        assert [request["id"] for request in requests(server)] == [request_b["id"]]
+        assert all(client["id"] != client_a["id"] for client in clients(server))
+        expect_status(a, "revoked")
+        b.close()
+        check("a revoked app does not come back on ready signals")
+
+        legacy = root / "legacy-agent-clients.json"
+        legacy.write_text(json.dumps({"version": 1, "autoReceive": False, "clients": [], "revoked": []}))
+        os.chmod(legacy, 0o600)
+        server.end()
+        server = app(legacy)
+        assert server("presence on") == "ok"
+        state = connect_state(server)
+        assert state["choice"] == "off" and state["legacy"] and not state["auto"], state
+        assert server("enable") == "ok"
+        state = connect_state(server)
+        assert state["choice"] == "auto" and not state["legacy"] and state["auto"], state
+        check("receipt saved off by an older version stays off with a notice until the user turns it on")
+
+
 def main():
     BUILD.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="agent-apps-", dir=BUILD) as temp:
         root = Path(temp)
-        verify(root, build(root))
+        hosts = build(root)
+        verify(root, hosts)
+        verify_auto_connect(root, hosts)
 
 
 if __name__ == "__main__":

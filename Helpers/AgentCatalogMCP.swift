@@ -1,6 +1,7 @@
 import CoreFoundation
 import Darwin
 import Foundation
+import os
 import Security
 
 /// One native signed helper per MCP session. This executable owns both local
@@ -74,6 +75,84 @@ import Security
     static let registeredHost = AgentPeerSigning.registeredHost(pid: getpid())
     static var slot: Int?
 
+    // MARK: Reconnecting without a tool call
+    //
+    // The MCP loop and background attempts share `slot`, `clientKey` and the socket
+    // exchange; `stateLock` serializes them. The reconnect bookkeeping below is
+    // touched only on `pairingQueue`. Background attempts never write to stdout.
+    static let stateLock = NSLock()
+    static let pairingQueue = DispatchQueue(label: "codebasic-tts.agent-helper.pairing")
+    static let log = Logger(subsystem: TTSRuntime.appID, category: "agent")
+    static var readyToken: Int32 = 0
+    static var attempt = 0
+    static var retryGeneration = 0
+    static var stopped = false
+    static var lastSignal: ContinuousClock.Instant?
+    static var signalPending = false
+
+    /// After the session's first pairing: listen for the app's ready signal and
+    /// retry while the app is unreachable.
+    static func startReconnecting(after status: String) {
+        let name = AgentPairing.readyNotification(appID: AgentPeerSigning.appID)
+        let registered = notify_register_dispatch(name, &readyToken, pairingQueue) { _ in onReadySignal() }
+        if registered != 0 { log.error("[AGENT-CONN] helper listen result=\(registered, privacy: .public)") }
+        pairingQueue.async { schedule(after: status) }
+    }
+
+    /// Folds bursts of signals (or someone else posting the name in a loop)
+    /// into at most one attempt per `AgentReconnect.signalInterval`.
+    static func onReadySignal() {
+        let now = ContinuousClock.now
+        let interval = Duration.milliseconds(Int64(AgentReconnect.signalInterval * 1000))
+        if let last = lastSignal, now - last < interval {
+            guard !signalPending else { return }
+            signalPending = true
+            pairingQueue.asyncAfter(deadline: .now() + AgentReconnect.signalInterval) {
+                signalPending = false
+                lastSignal = .now
+                attempt = 0
+                backgroundAttempt("ready")
+            }
+            return
+        }
+        lastSignal = now
+        attempt = 0
+        backgroundAttempt("ready")
+    }
+
+    static func backgroundAttempt(_ trigger: String) {
+        guard !stopped else { return }
+        stateLock.lock()
+        let status = pairingStatus()
+        let key = clientKey.map { String(AgentBytes.hash($0.publicKey).prefix(12)) } ?? "none"
+        stateLock.unlock()
+        log.info("[AGENT-CONN] helper attempt trigger=\(trigger, privacy: .public) key=\(key, privacy: .public) result=\(status, privacy: .public)")
+        schedule(after: status)
+    }
+
+    static func schedule(after status: String) {
+        retryGeneration += 1
+        switch AgentReconnect.next(after: status, attempt: attempt) {
+        case .done:
+            attempt = 0
+        case .waitForSignal:
+            attempt = 0
+            log.info("[AGENT-CONN] helper wait reason=\(status, privacy: .public)")
+        case .stop:
+            stopped = true
+            log.info("[AGENT-CONN] helper wait reason=terminal:\(status, privacy: .public)")
+        case .retry(let base):
+            let delay = AgentReconnect.jittered(base, unit: Double.random(in: 0...1))
+            attempt += 1
+            let generation = retryGeneration
+            log.info("[AGENT-CONN] helper retry attempt=\(attempt, privacy: .public) delay_ms=\(Int(delay * 1000), privacy: .public) reason=\(status, privacy: .public)")
+            pairingQueue.asyncAfter(deadline: .now() + delay) {
+                guard generation == retryGeneration else { return }
+                backgroundAttempt("retry")
+            }
+        }
+    }
+
     static func main() {
         // A keychain dialog raised by a background helper would block the agent's
         // tool call. An inaccessible registered credential stays unavailable.
@@ -91,6 +170,8 @@ import Security
         var initialized = false, ready = false
         var proofs: [Proof] = []
         while let input = readFrame() {
+            stateLock.lock()
+            defer { stateLock.unlock() }
             if input.isEmpty { emit(error(nil, -32700, "Malformed or oversized frame")); continue }
             guard let frame = decode(input), frame["jsonrpc"] as? String == "2.0",
                   let method = frame["method"] as? String else {
@@ -99,7 +180,10 @@ import Security
             guard let id = frame["id"] else {
                 if method == "notifications/initialized", initialized, !ready {
                     ready = true
-                    _ = pairingStatus()
+                    let status = pairingStatus()
+                    let key = clientKey.map { String(AgentBytes.hash($0.publicKey).prefix(12)) } ?? "none"
+                    log.info("[AGENT-CONN] helper attempt trigger=initialized key=\(key, privacy: .public) result=\(status, privacy: .public)")
+                    startReconnecting(after: status)
                 }
                 continue
             }

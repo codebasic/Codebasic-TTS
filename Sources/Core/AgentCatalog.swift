@@ -39,11 +39,58 @@ enum AgentPairing {
         Data("codebasic-tts-pair-v1\n\(appID)\n\(nonce)\n\(keyID)".utf8)
     }
 
+    /// A content-free wake-up the app posts whenever it can accept connections
+    /// (launch, Agent tab opened, unlock, receipt turned on). Any local process can
+    /// post it; it only makes live helpers run the normal status/hello/prove
+    /// exchange again, so it never grants anything by itself.
+    static func readyNotification(appID: String) -> String { appID + ".agent.ready" }
+
     /// Display text sent by the MCP client.
     static func clientName(_ input: String?) -> String {
         let allowed = Set("abcdefghijklmnopqrstuvwxyz0123456789._-".utf8)
         let name = String(decoding: (input ?? "").lowercased().utf8.filter(allowed.contains).prefix(48), as: UTF8.self)
         return name.isEmpty ? "default" : name
+    }
+}
+
+/// What a live helper does after a pairing attempt that it started on its own
+/// (session start, the app's ready signal, or a scheduled retry). Compiled into
+/// the helper and the unit tests.
+enum AgentReconnect {
+    enum Next: Equatable {
+        /// Bound to the app; the app watches the helper process from here on.
+        case done
+        /// Only the app can change this (lock, receipt off, approval, other session);
+        /// it posts the ready signal when it does.
+        case waitForSignal
+        /// The app was not reachable; try again after this many seconds.
+        case retry(after: Double)
+        /// Nothing changes until the helper restarts.
+        case stop
+    }
+
+    static let firstDelay = 2.0
+    static let maxDelay = 300.0
+    /// Ready signals closer together than this are folded into one attempt.
+    static let signalInterval = 1.0
+
+    static func next(after status: String, attempt: Int) -> Next {
+        switch status {
+        case "ready", "receiving_only", "instruction_required", "reading_only": return .done
+        case "revoked", "signing_required", "upgrade_required": return .stop
+        case "app_unavailable", "unavailable": return .retry(after: delay(attempt: attempt))
+        default: return .waitForSignal
+        }
+    }
+
+    /// 2, 4, 8 ... seconds, capped at five minutes.
+    static func delay(attempt: Int) -> Double {
+        min(maxDelay, firstDelay * Double(1 << min(max(attempt, 0), 16)))
+    }
+
+    /// Spreads helpers of several sessions apart: `unit` in 0...1 maps to ±20 %.
+    static func jittered(_ seconds: Double, unit: Double) -> Double {
+        seconds * (0.8 + 0.4 * min(max(unit, 0), 1))
     }
 }
 

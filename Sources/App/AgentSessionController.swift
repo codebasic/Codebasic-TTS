@@ -149,6 +149,26 @@ import Security
     @Published private(set) var trusted: [AgentTrustedClient] = []
     @Published private(set) var autoReceive = false
     @Published private(set) var locked = false
+    /// `off` only after the user turned receipt off; opening the Agent tab then
+    /// leaves it off.
+    @Published private(set) var receiptChoice: AgentReceiptChoice = .auto
+    /// Receipt was saved as off by a version that could not tell why. Shown once.
+    @Published private(set) var legacyReceiptOff = false
+    @Published private(set) var pairingActive = false
+    /// The Agent tab is selected and its window is on screen.
+    @Published private(set) var presenceOpen = false
+    /// The tab has been open for a while and no helper has shown up.
+    @Published private(set) var noAgentSession = false
+
+    struct Attempt {
+        let at: Date
+        let result: String
+    }
+    /// The latest reconnect result per remembered app, as the app saw it. Memory only.
+    @Published private(set) var lastAttempts: [UUID: Attempt] = [:]
+    private var readySequence = 0
+    private var noSessionTask: Task<Void, Never>?
+    private let noSessionDelay: Duration
     private let trust: AgentTrustStore
     private var context: ReceiveContext?
     private var challenges: [Challenge] = []
@@ -170,14 +190,18 @@ import Security
     init(directory: String = LocalApprovedSocket.defaultDirectory,
          bundledHelper: @escaping () -> Data? = AgentPeerSigning.bundledHelperHash,
          selectionWaiting: Duration = .seconds(90),
+         noSessionDelay: Duration = .seconds(5),
          trust: AgentTrustStore = AgentTrustStore(
             url: TTSRuntime.applicationSupport().appendingPathComponent("agent-clients.json"))) {
         self.directory = directory
         self.bundledHelper = bundledHelper
         self.selectionWaiting = selectionWaiting
+        self.noSessionDelay = noSessionDelay
         self.trust = trust
         trusted = trust.clients
         autoReceive = trust.autoReceive
+        receiptChoice = trust.receiptChoice
+        legacyReceiptOff = trust.legacyReceiptOff
         refreshConnections()
     }
 
@@ -185,7 +209,9 @@ import Security
     /// without a click, so the app sets it at launch.
     func configure(current: @escaping @MainActor (String) -> AgentInstructionSnapshot?,
                    workspace: ExplanationDraftWorkspace) {
+        let first = context == nil
         context = ReceiveContext(current: current, workspace: workspace)
+        if first { postReady("configure") }
     }
 
     @discardableResult
@@ -239,12 +265,16 @@ import Security
             return false
         }
         pairingSocket = socket
+        pairingActive = true
+        if status == LocalApprovedSocket.unknownPathMessage || status.hasPrefix("다른 앱 인스턴스") { status = "" }
+        postReady("launch")
         return true
     }
 
     /// Quitting drops live leases while preserving the user's saved choices.
     func stopPairing() {
         pairingSocket?.stop(); pairingSocket = nil
+        pairingActive = false
         clearApprovals()
         for client in Array(bindings.keys) { dropBinding(client, keepSelection: false) }
     }
@@ -253,6 +283,7 @@ import Security
         let receivingPairs = bindings.values.filter { $0.receipt != nil }
         let hasReceipt = !receivingPairs.isEmpty
         if receiving != hasReceipt { receiving = hasReceipt }
+        if noAgentSession, !bindings.isEmpty { noAgentSession = false }
         context?.workspace.setReceiver(receivingPairs.first?.pair.peer.pid)
         let remembered = trusted.map { record in
             let live = bindings[record.id]
@@ -364,6 +395,9 @@ import Security
             outcome = ["status": requestApproval(claim, leaf: leaf, helperHash: helperHash)]
         }
         Self.logConnect(claim: claim, lookup: lookup, result: outcome["status"] ?? "?")
+        if case .trusted(let record) = lookup {
+            lastAttempts[record.id] = Attempt(at: Date(), result: outcome["status"] ?? "?")
+        }
         return outcome
     }
 
@@ -485,6 +519,8 @@ import Security
         watcher.setEventHandler { [weak self] in
             guard let self, self.bindings[client]?.pair.id == next.id else { return }
             self.dropBinding(client, keepSelection: next.persistent)
+            // Another session of the same app may have been told other_agent.
+            self.postReady("binding_drop")
         }
         let binding = Binding(pair: next, watch: watcher)
         bindings[client] = binding
@@ -632,21 +668,71 @@ import Security
     @discardableResult
     func enableReceive(current: @escaping @MainActor (String) -> AgentInstructionSnapshot?,
                        workspace: ExplanationDraftWorkspace) -> Bool {
-        guard !locked, startPairing(), setAutoReceive(true) else { return false }
+        configure(current: current, workspace: workspace)
+        guard turnOnReceive(byUser: true, reason: "user") else { return false }
         // Turning receipt back on by hand starts every client's allowance over.
         rates.removeAll()
-        configure(current: current, workspace: workspace)
-        dropIfGone()
-        for binding in bindings.values { _ = activateReceive(binding) }
-        refreshConnections()
         return true
     }
 
-    private func setAutoReceive(_ value: Bool) -> Bool {
-        let saved = trust.setAutoReceive(value)
+    private func turnOnReceive(byUser: Bool, reason: String) -> Bool {
+        guard !locked, startPairing(), setAutoReceive(true, byUser: byUser) else { return false }
+        Log.agent.info("[AGENT-CONN] receipt choice=\(self.receiptChoice.rawValue, privacy: .public) set=on reason=\(reason, privacy: .public)")
+        dropIfGone()
+        for binding in bindings.values { _ = activateReceive(binding) }
+        refreshConnections()
+        postReady(byUser ? "receipt_on" : reason)
+        return true
+    }
+
+    private func setAutoReceive(_ value: Bool, byUser: Bool = true) -> Bool {
+        let saved = trust.setAutoReceive(value, byUser: byUser)
         if !saved { status = "대본 받기 설정을 저장하지 못했습니다." }
         if saved || !value { autoReceive = value }
+        receiptChoice = trust.receiptChoice
+        legacyReceiptOff = trust.legacyReceiptOff
         return saved
+    }
+
+    /// The Agent tab opened or closed. Opening it is the user's sign to be
+    /// connected: receipt turns on unless the user turned it off, and live helpers
+    /// are asked to prove themselves again. Closing it changes nothing; approved
+    /// apps keep sending while the window is closed.
+    func setPresence(_ open: Bool, detail: String = "") {
+        guard presenceOpen != open else { return }
+        presenceOpen = open
+        Log.agent.info("[AGENT-CONN] presence state=\(open ? "open" : "closed", privacy: .public) \(detail, privacy: .public)")
+        noSessionTask?.cancel(); noSessionTask = nil
+        noAgentSession = false
+        guard open else { return }
+        if pairingSocket == nil { _ = startPairing() }
+        if !autoReceive {
+            if locked {
+                Log.agent.info("[AGENT-CONN] receipt choice=\(self.receiptChoice.rawValue, privacy: .public) skip reason=locked")
+            } else if receiptChoice == .off {
+                Log.agent.info("[AGENT-CONN] receipt choice=off skip reason=\(self.legacyReceiptOff ? "migration" : "user_off", privacy: .public)")
+            } else if context != nil {
+                _ = turnOnReceive(byUser: false, reason: "tab_open")
+            }
+        }
+        postReady("tab_open")
+        let delay = noSessionDelay
+        noSessionTask = Task { [weak self] in
+            do { try await ContinuousClock().sleep(for: delay) } catch { return }
+            guard let self, self.presenceOpen else { return }
+            self.noAgentSession = self.bindings.isEmpty && self.approvalRequests.isEmpty
+            if self.noAgentSession { Log.agent.info("[AGENT-CONN] presence no_session after_ms=\(delay.components.seconds * 1000, privacy: .public)") }
+        }
+    }
+
+    /// Wakes every live helper of this app. Only sent when a helper could
+    /// actually connect now.
+    private func postReady(_ reason: String) {
+        guard pairingSocket != nil, context != nil, autoReceive, !locked else { return }
+        readySequence += 1
+        let name = AgentPairing.readyNotification(appID: AgentPeerSigning.appID)
+        let result = notify_post(name)
+        Log.agent.info("[AGENT-CONN] ready post reason=\(reason, privacy: .public) seq=\(self.readySequence, privacy: .public) result=\(result == 0 ? "ok" : String(result), privacy: .public)")
     }
 
     @discardableResult
@@ -662,6 +748,7 @@ import Security
         clearApprovals()
         status = ""
         _ = setAutoReceive(false)
+        Log.agent.info("[AGENT-CONN] receipt choice=off set=off reason=user")
         for binding in bindings.values { stopReceipt(binding) }
         clearSelection()
         instructionScope = nil
@@ -675,7 +762,7 @@ import Security
         guard locked != value else { return }
         locked = value
         defer { refreshConnections() }
-        guard value else { status = ""; return }
+        guard value else { status = ""; postReady("unlock"); return }
         clearApprovals()
         for (client, binding) in Array(bindings) { dropBinding(client, keepSelection: binding.pair.persistent) }
         status = "화면이 잠겨 대본 받기를 멈췄습니다."
@@ -715,7 +802,10 @@ import Security
         defer { refreshConnections() }
         // Resuming this client by hand starts its allowance over.
         rates[client] = nil
-        guard let binding = bindings[client] else { return row.persistent }
+        guard let binding = bindings[client] else {
+            if row.persistent { postReady("resume") }
+            return row.persistent
+        }
         binding.receiptEnabled = true
         return activateReceive(binding)
     }

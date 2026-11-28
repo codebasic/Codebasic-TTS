@@ -20,7 +20,7 @@ enum CodeExplanation { static let noChange = "변경 없음" }
         drafts = ExplanationDraftWorkspace(store: database.flatMap { SQLiteDraftStore(url: URL(fileURLWithPath: $0)) } ?? MemoryDraftStore())
         access = AgentSessionController(directory: directory, bundledHelper: {
             AgentPeerSigning.signedHash(at: URL(fileURLWithPath: expectedHelper))
-        }, selectionWaiting: wait, trust: AgentTrustStore(url: URL(fileURLWithPath: trust)))
+        }, selectionWaiting: wait, noSessionDelay: .milliseconds(500), trust: AgentTrustStore(url: URL(fileURLWithPath: trust)))
         current = AgentInstructionSnapshot(selector: selector, generation: UUID(), text: original)
         catalog.didChange = { [weak self] selector, deleted in self?.access.invalidate(selector, deleted: deleted) }
     }
@@ -68,6 +68,16 @@ enum CodeExplanation { static let noChange = "변경 없음" }
         case "disable": access.disableReceive(); report("ok")
         // What the app does at launch, with no click.
         case "configure": access.configure(current: { [weak self] in self?.resolve($0) }, workspace: drafts); report("ok")
+        // What the app does when the Agent tab becomes visible or goes away.
+        case "presence":
+            access.setPresence(pieces.last == "on", detail: "fixture")
+            report("ok")
+        case "connect-state":
+            let body: [String: Any] = ["choice": access.receiptChoice.rawValue, "legacy": access.legacyReceiptOff,
+                                       "auto": access.autoReceive, "pairing": access.pairingActive,
+                                       "open": access.presenceOpen, "noSession": access.noAgentSession,
+                                       "attempts": Dictionary(uniqueKeysWithValues: access.lastAttempts.map { ($0.key.uuidString, $0.value.result) })]
+            report(String(decoding: try! JSONSerialization.data(withJSONObject: body), as: UTF8.self))
         case "lock": access.setLocked(true); report("ok")
         case "unlock": access.setLocked(false); report("ok")
         case "reset-documents":

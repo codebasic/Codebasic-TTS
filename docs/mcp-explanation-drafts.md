@@ -74,6 +74,23 @@ Helpers/tts_mcp_client.py --helper "<앱>/Contents/Helpers/CodebasicAgentMCP" se
 - `approve host=… client=… scope=<persistent|this_run> result=ok|store_failed`: 승인. `this_run`은 앱을 식별할 수 없어 이번 실행에만 허용한 경우입니다.
 - `revoke host=… client=… result=ok|unsaved`: 승인 철회.
 
+### 에이전트 탭 자동 연결 (#31)
+
+에이전트 탭이 선택되어 있고 관리 창이 화면에 보이면 "탭이 열린" 상태입니다. 탭이 열리면 앱은 사용자가 끄지 않은 한 전체 받기를 켜고, 실행 중인 도우미에게 내용 없는 준비 신호(Darwin 알림 `<앱 ID>.agent.ready`)를 보냅니다. 도우미는 신호를 받으면 평소의 status → hello → prove를 다시 수행하므로, 이미 승인한 앱은 도구 호출이나 클릭 없이 연결됩니다. 신호는 아무 프로세스나 보낼 수 있지만 검증을 건너뛰게 하지는 못하며, 도우미는 1초 안의 신호를 한 번으로 합칩니다. 처음 보는 앱은 여전히 승인을 한 번 받아야 합니다. 탭을 닫거나 창을 숨겨도 연결은 유지됩니다.
+
+앱은 탭 열림 외에 앱 시작(받기 켜짐일 때), 화면 잠금 해제, 전체·앱별 받기 켜기, 도우미 프로세스 종료 때도 신호를 보냅니다. 앱에 닿지 못한 도우미(`app_unavailable`, `unavailable`)는 2초부터 두 배씩 최대 5분 간격(±20%)으로 다시 시도하고, `locked`·`disabled`·`other_agent`·`approval_required`는 다음 신호를 기다리며, `revoked`·`signing_required`·`upgrade_required`에서는 도우미를 다시 시작할 때까지 멈춥니다.
+
+사용자가 `전체 받기 끄기`를 누르면 그 선택(`receiptChoice=off`)이 저장되어, 탭을 열어도 다시 켜지지 않습니다. 이 기능 이전 버전에서 받기가 꺼진 채 저장된 파일도 같은 이유로 꺼진 채 두고 탭에 한 번 안내합니다.
+
+앱과 도우미는 같은 subsystem에 다음 줄을 남깁니다(도우미 줄도 같은 명령으로 모입니다).
+
+- `presence state=open|closed tab=<n> window=visible|hidden`: 탭 열림 상태.
+- `receipt choice=auto|off set=on|off reason=tab_open|user`, `receipt choice=… skip reason=user_off|migration|locked`: 받기를 켰거나 켜지 않은 이유.
+- `ready post reason=launch|configure|tab_open|unlock|receipt_on|resume|binding_drop seq=<n> result=ok`: 준비 신호.
+- `presence no_session after_ms=<ms>`: 탭을 연 뒤 접속한 도우미가 없음.
+- `helper attempt trigger=initialized|ready|retry key=<키 ID 앞 12자> result=<상태>`: 도우미가 스스로 시도한 결과. 이어서 `connect … lookup=trusted result=receiving_only`가 같은 키로 찍히면 클릭 없이 연결된 것입니다.
+- `helper retry attempt=<n> delay_ms=<ms> reason=<상태>`, `helper wait reason=<상태|terminal:상태>`: 도우미의 다음 행동.
+
 ## 합성 데이터로 확인
 
 `TTS_REQUIRE_STABLE_SIGNING=1 ./build.sh build`는 앱과 도우미의 안정적인 서명과 강화 런타임을 확인합니다. `./build.sh test`는 저장 충돌과 소켓 재시작을 포함한 단위 테스트를 실행합니다.

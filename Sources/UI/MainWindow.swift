@@ -23,9 +23,28 @@ final class MainWindow {
             w.isReleasedWhenClosed = false
             w.contentView = NSHostingView(rootView: RootView(app: appState).environmentObject(appState))
             window = w
+            observeVisibility(w)
         }
         NSApp.activate(ignoringOtherApps: true)
         if window?.isMiniaturized == true { window?.deminiaturize(nil) }
         window?.makeKeyAndOrderFront(nil)
+    }
+
+    /// Feeds the Agent tab's "open" state. Focus does not matter; a window that
+    /// is closed, minimized, hidden with the app or fully covered is not open.
+    private func observeVisibility(_ window: NSWindow) {
+        let center = NotificationCenter.default
+        let names: [Notification.Name] = [NSWindow.didChangeOcclusionStateNotification, NSWindow.willCloseNotification,
+                                          NSWindow.didMiniaturizeNotification, NSWindow.didDeminiaturizeNotification]
+        for name in names {
+            center.addObserver(forName: name, object: window, queue: .main) { [weak self, weak window] note in
+                MainActor.assumeIsolated {
+                    guard let self, let window else { return }
+                    let visible = note.name != NSWindow.willCloseNotification
+                        && window.isVisible && !window.isMiniaturized && window.occlusionState.contains(.visible)
+                    if self.appState.mainWindowVisible != visible { self.appState.mainWindowVisible = visible }
+                }
+            }
+        }
     }
 }

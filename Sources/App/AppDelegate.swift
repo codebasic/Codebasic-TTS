@@ -256,6 +256,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         appState.agentAccess.$autoReceive.sink { [weak self] in self?.draftReceiptMenu?.state = $0 ? .on : .off }
             .store(in: &cancellables)
+        // The Agent tab is "open" while it is selected and its window is on screen.
+        // Opening it connects approved agent apps; closing it keeps them connected.
+        Publishers.CombineLatest(appState.$selectedTab, appState.$mainWindowVisible)
+            .map { (tab: $0, visible: $1) }
+            .removeDuplicates { ($0.tab == 1 && $0.visible) == ($1.tab == 1 && $1.visible) }
+            .sink { [weak self] state in
+                self?.appState.agentAccess.setPresence(state.tab == 1 && state.visible,
+                                                      detail: "tab=\(state.tab) window=\(state.visible ? "visible" : "hidden")")
+            }
+            .store(in: &cancellables)
         appState.$phase
             .receive(on: RunLoop.main)
             .sink { [weak self] phase in

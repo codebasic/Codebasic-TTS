@@ -36,12 +36,20 @@ enum AgentPairingProof {
     }
 }
 
+/// Whether draft receipt may turn itself on when the Agent tab opens. `off` is
+/// only ever set by the user turning receipt off, and it outlives restarts.
+enum AgentReceiptChoice: String, Codable {
+    case auto, off
+}
+
 /// Persisted next to the app's other data, mode 0600. An unreadable or foreign
 /// file is treated as no trust at all, so the worst case is a new approval.
 final class AgentTrustStore {
     struct File: Codable {
         var version = 1
         var autoReceive = false
+        /// Absent in files written before the Agent tab could connect by itself.
+        var receiptChoice: AgentReceiptChoice? = nil
         var clients: [AgentTrustedClient] = []
         var revoked: [String] = []
     }
@@ -63,23 +71,45 @@ final class AgentTrustStore {
     private let write: (Data, URL) throws -> Void
     private(set) var file = File()
     private var hasUnsavedDenial = false
+    /// The file existed and was ours when the app started.
+    private let loadedExisting: Bool
 
     init(url: URL, now: @escaping () -> Date = Date.init,
          write: @escaping (Data, URL) throws -> Void = AgentTrustStore.writePrivately) {
         self.url = url
         self.now = now
         self.write = write
-        file = Self.read(url) ?? File()
+        if let loaded = Self.read(url) {
+            file = loaded
+            loadedExisting = true
+        } else {
+            file = File()
+            loadedExisting = false
+            // A first launch may connect by itself. A file that exists but is not
+            // ours is no trust and no choice, so receipt stays off until asked.
+            if !FileManager.default.fileExists(atPath: url.path) { file.receiptChoice = .auto }
+        }
     }
 
     var clients: [AgentTrustedClient] { file.clients }
     var autoReceive: Bool { file.autoReceive }
 
+    /// An older file only says whether receipt was on. If it was off, nobody can
+    /// tell whether the user turned it off, so it stays off and the app says so once.
+    var receiptChoice: AgentReceiptChoice { file.receiptChoice ?? (file.autoReceive ? .auto : .off) }
+
+    /// True until the user turns receipt on or off once in this version.
+    var legacyReceiptOff: Bool { loadedExisting && file.receiptChoice == nil && !file.autoReceive }
+
+    /// `byUser: false` is the Agent tab turning receipt on by itself; it keeps the
+    /// user's choice. A user's on/off also records the choice.
     @discardableResult
-    func setAutoReceive(_ value: Bool) -> Bool {
-        guard file.autoReceive != value || hasUnsavedDenial else { return true }
+    func setAutoReceive(_ value: Bool, byUser: Bool = true) -> Bool {
+        let choice: AgentReceiptChoice = byUser ? (value ? .auto : .off) : receiptChoice
+        guard file.autoReceive != value || file.receiptChoice != choice || hasUnsavedDenial else { return true }
         var next = file
         next.autoReceive = value
+        next.receiptChoice = choice
         return value ? commit(next) : commitDenial(next)
     }
 
