@@ -90,9 +90,10 @@ platforms: [macos]
    하나도 없어야 업로드 진행. 완료 기준: 파일 목록에 번들 리소스만 있음.
 ### 승인 후 공개
 
-1. [AGENTS.md의 운영 반영 승인](../../AGENTS.md#검증-병합-후보와-승인)을 받은
-   릴리스 버전과 ZIP으로 `gh release create vX.Y.Z build/Codebasic-TTS.app.zip
-   --title ... --notes ...`를 실행한다.
+1. 사용자가 승인된 릴리스 소스를 원격 `main`에 병합했는지 확인한다.
+   [AGENTS.md의 별도 운영 반영 승인](../../AGENTS.md#검증-병합-후보와-승인)을 받은
+   뒤 해당 소스에서 검증한 버전과 ZIP으로
+   `gh release create vX.Y.Z build/Codebasic-TTS.app.zip --title ... --notes ...`를 실행한다.
 2. 검증: `gh release view vX.Y.Z --json assets`로 에셋 확인 + 익명
    `curl -sIL <asset url>` 200 확인.
 
