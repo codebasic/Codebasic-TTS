@@ -2,6 +2,10 @@
 
 작업 범위와 완료 기준은 기존 이슈에서 확인한다. 파일을 변경할 때는 해당 프로젝트의 작업별 브랜치·워크트리·PR 절차를 따른다. Codebasic TTS의 통합 경로, 승인과 종료 조건은 [AGENTS.md](../AGENTS.md)에 있다.
 
+## 배정
+
+검토 자리는 [독립 리뷰 스킬](../skills/coordinate-independent-review/SKILL.md)의 배정표를 따른다. 실제 구현 책임자 계열이 아닌 두 계열이 각각 독립 검토를 하고, 구현 책임자 계열의 상위 모델이 구현과 분리된 세션에서 추가 검토를 한다. 세 자리의 충족 여부를 각각 기록한다. 구현 책임자 계열이 바뀌면 다음 회차에 다시 배정하고, 대화 UI만 바뀌면 유지한다. 승인·가용성이 없는 자리는 미충족으로 기록하고 자동 대체하지 않는다. 브리프와 증거는 [중립 브리프](../skills/coordinate-independent-review/references/review-brief.md)와 [검토 증거](../skills/coordinate-independent-review/references/evidence.md) 양식에 쓴다.
+
 ## 첫 검토
 
 1. **구현 담당**은 작업 이슈와 변경을 연결한다. **독립 검토자**는 고정된 범위를 읽고 지적을 기록한다. **통합 판단 담당**은 첫 의견이 확정된 뒤 검토와 실행 증거를 대조해 이슈에 결정을 남긴다.
@@ -25,17 +29,21 @@
 ## 재검토와 증거
 
 - 첫 라운드는 전체 변경을 검토한다. HEAD나 기준 SHA가 바뀌면 새 조합에서 검증한다. 이후 라운드는 이전 검토 이후의 변경과 기존 지적의 해결 여부를 확인한다. 기준 변경으로 새로 포함된 범위나 기존 근거가 더는 유효하지 않은 부분까지 확인한다. 같은 검토자의 세션을 재개할 때는 그 검토자 자신의 결과만 이어받는다.
-- 각 보고서에 역할, 확인된 모델·하네스, 확인 범위와 한계를 남긴다. 중요 판단마다 대상 SHA와 `파일:줄` 또는 정확한 증거 위치를 붙인다. 실행을 근거로 삼으면 실행 주체·환경, 명령 또는 관찰 절차, 결과, 원본 기록을 명시한다. 기존 기록은 원래 검증의 SHA와 환경에 귀속한다.
+- 첫 회차, 기준 SHA 변경, 이력이 이어지지 않거나 불명확한 경우, 구현 책임자 계열 변경에는 전체 diff를 검토한다. 증분 재검토는 같은 기준에서 이력이 이어지고 직전 회차에 같은 역할로 검토를 마친 동일 검토자에게만 허용하며, 이전 첫 보고서와 새 조합의 증분 보고서를 함께 인용한다.
+- 각 보고서에 역할, 요청한 모델과 관찰된 모델·하네스, 확인 범위와 한계를 남긴다. 중요 판단마다 대상 SHA와 `파일:줄` 또는 정확한 증거 위치를 붙인다. 실행을 근거로 삼으면 실행 주체·환경, 명령 또는 관찰 절차, 결과, 원본 기록을 명시한다. 기존 기록은 원래 검증의 SHA와 환경에 귀속한다.
 - **직접 실행**은 해당 검증에서 관찰한 결과다. **정적 추론**은 소스·diff 또는 기존 자료로부터 판단한 동작이다. **미확인**에는 증거가 부족한 항목과 확인에 필요한 자료를 적는다.
 - 통합 판단 담당은 첫 보고서가 고정된 뒤 지적을 원인별로 묶는다. 서로 다른 의견과 근거는 보존하고, 채택·보류·기각과 이유, 반영 후 검증을 이슈에 남긴다.
 - GitHub 자동 리뷰는 검토한 커밋을 먼저 확인한다. 최신 HEAD의 결과를 참고 증거로 쓰고 중복 지적과 처리 근거도 남긴다. 독립 검토·실행 시험·승인은 각각의 근거와 절차가 필요하다.
 
-## 검토판과 릴리스 판단
+## PR 등록, 검토판과 릴리스 판단
+
+작업 PR(초안 포함)은 같은 후보 HEAD·대상 브랜치 기준 SHA의 필수 독립 첫 보고서, 별도 실행 검증, 지적 처리 결과가 이슈에 기록되고, 구현과 분리된 통합 판단 담당이 PR 등록 준비도를 통과(`pass`)로 기록한 뒤에 연다. 실행 실패나 미해결 차단 지적은 차단(`blocked`), 필수 증거 부족은 미확인(`unverified`)이며 이때는 이슈에 원인과 필요한 근거를 남긴다. 배정된 검토자가 없거나 응답하지 않을 때의 진행 조건은 [AGENTS.md](../AGENTS.md)의 "합의 대신 증거로 진행"을 따른다.
 
 검토판과 릴리스의 준비도를 각각 통과·차단·미확인으로 기록한다. 검토판은 격리 환경과 예정한 사용 흐름을 보고, 릴리스는 배포 환경·서명·운영 검증 등 해당 릴리스의 근거도 확인한다. 판단마다 근거와 남은 조건을 적는다. 검토판은 해당 통합 브랜치에서 검증하고, 프로젝트의 승인 조건을 충족한 최종 `main` 후보 하나만 사용자에게 제시한다. `main` 승격과 배포는 각각 프로젝트의 승인 절차를 따른다.
 
 ## 출처
 
+- 공통 배정표, PR 등록 조건, 브리프·증거 양식. [multi-agent-dev `56d2268`](https://github.com/codebasic/multi-agent-dev/tree/56d2268c33cabe017d62d9eff8f9b215ad1aac2a), [설계 이슈 #1](https://github.com/codebasic/multi-agent-dev/issues/1)
 - Codebasic TTS의 작업 절차와 6시간 교착 방지 결정. [이슈 #4](https://github.com/codebasic/Codebasic-TTS/issues/4), [PR #14 기준](https://github.com/codebasic/Codebasic-TTS/blob/ed057d4728240f17be8b53f98304df1aa1fe8dc0/AGENTS.md), [6시간 결정](https://github.com/codebasic/Codebasic-TTS/issues/4#issuecomment-7154862192)
 - Discord Relay의 고정 브리프, 읽기 전용 검토, 증분 재검토. [AGENTS.md](https://github.com/codebasic/discord-relay/blob/31871967bc20c79b3050fa9b5f2babcd6685214f/AGENTS.md), [review_prefix.md](https://github.com/codebasic/discord-relay/blob/31871967bc20c79b3050fa9b5f2babcd6685214f/review_prefix.md), [review_run.py](https://github.com/codebasic/discord-relay/blob/31871967bc20c79b3050fa9b5f2babcd6685214f/review_run.py), [이슈 #77 검증 기록](https://github.com/codebasic/discord-relay/issues/77#issuecomment-7166983650)
 - Discord Relay의 자동 리뷰 참고 범위와 프로젝트 고유 검토 조합. [이슈 #91 자동 리뷰 결정](https://github.com/codebasic/discord-relay/issues/91#issuecomment-7233386125), [이슈 #91 검토 조합 유지 결정](https://github.com/codebasic/discord-relay/issues/91#issuecomment-7233493888)
