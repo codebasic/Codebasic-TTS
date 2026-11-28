@@ -64,7 +64,7 @@ import Foundation
         precondition(AgentReconnect.next(after: "unavailable", attempt: 2) == .retry(after: 8))
         precondition(AgentReconnect.delay(attempt: 7) == 256 && AgentReconnect.delay(attempt: 8) == 300
                      && AgentReconnect.delay(attempt: 1000) == 300)
-        precondition(AgentReconnect.jittered(10, unit: 0) == 8 && AgentReconnect.jittered(10, unit: 1) == 12)
+        precondition(abs(AgentReconnect.jittered(10, unit: 0) - 8) < 1e-9 && abs(AgentReconnect.jittered(10, unit: 1) - 12) < 1e-9)
         precondition(AgentPairing.readyNotification(appID: "com.example.app") == "com.example.app.agent.ready")
         print("agent trust store tests passed")
     }
