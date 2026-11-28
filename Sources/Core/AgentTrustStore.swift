@@ -73,6 +73,7 @@ final class AgentTrustStore {
     private var hasUnsavedDenial = false
     /// The file existed and was ours when the app started.
     private let loadedExisting: Bool
+    private var diskStamp: [Int64]?
 
     init(url: URL, now: @escaping () -> Date = Date.init,
          write: @escaping (Data, URL) throws -> Void = AgentTrustStore.writePrivately) {
@@ -82,6 +83,7 @@ final class AgentTrustStore {
         if let loaded = Self.read(url) {
             file = loaded
             loadedExisting = true
+            diskStamp = Self.stamp(url)
         } else {
             file = File()
             loadedExisting = false
@@ -92,20 +94,48 @@ final class AgentTrustStore {
         }
     }
 
-    /// Only the instance that holds the pairing socket writes this file. When a
-    /// standby instance takes the socket over, it reads what the previous holder
-    /// saved. If the file cannot be read, nothing is trusted and receipt is off;
-    /// an unsaved denial of this instance stays in force.
-    func reloadForTakeover() {
+    /// Only the instance that holds the pairing socket writes this file. It
+    /// adopts the file again when it takes the socket over, and whenever the file
+    /// changed since its own last read or write (an older app version running
+    /// beside it does not check ownership). Missing or unreadable after this
+    /// instance knew approvals: nothing is trusted and receipt is off. Keys this
+    /// instance revoked stay revoked, and an unsaved denial is kept on top.
+    func adoptDisk() {
+        defer { diskStamp = Self.stamp(url) }
         if let loaded = Self.read(url) {
-            guard !hasUnsavedDenial else { return }
-            file = loaded
-        } else if !hasUnsavedDenial {
-            var meta = stat()
-            let missing = lstat(url.path, &meta) != 0 && errno == ENOENT
-            // A missing file keeps a first launch's in-memory choice; anything else fails closed.
-            if !missing { file = File(); file.receiptChoice = .off }
+            guard hasUnsavedDenial else { file = loaded; return }
+            var merged = loaded
+            merged.revoked = loaded.revoked + file.revoked.filter { !loaded.revoked.contains($0) }
+            merged.clients = loaded.clients.compactMap { disk in
+                guard !merged.revoked.contains(disk.keyID),
+                      let mine = file.clients.first(where: { $0.id == disk.id }) else { return nil }
+                var client = disk
+                client.receivesDrafts = disk.receiptEnabled && mine.receiptEnabled
+                return client
+            }
+            merged.autoReceive = loaded.autoReceive && file.autoReceive
+            if !file.autoReceive { merged.receiptChoice = .off }
+            file = merged
+            return
         }
+        var meta = stat()
+        let missing = lstat(url.path, &meta) != 0 && errno == ENOENT
+        // A first launch that never had a file keeps its in-memory choice.
+        guard !missing || loadedExisting || diskStamp != nil || !file.clients.isEmpty else { return }
+        var closed = File()
+        closed.receiptChoice = .off
+        closed.revoked = file.revoked
+        file = closed
+        hasUnsavedDenial = true
+    }
+
+    /// The file is not what this instance last read or wrote.
+    var changedOnDisk: Bool { Self.stamp(url) != diskStamp }
+
+    private static func stamp(_ url: URL) -> [Int64]? {
+        var meta = stat()
+        guard lstat(url.path, &meta) == 0 else { return nil }
+        return [Int64(meta.st_ino), Int64(meta.st_mtimespec.tv_sec), Int64(meta.st_mtimespec.tv_nsec), Int64(meta.st_size)]
     }
 
     var clients: [AgentTrustedClient] { file.clients }
@@ -115,7 +145,7 @@ final class AgentTrustStore {
     /// tell whether the user turned it off, so it stays off and the app says so once.
     var receiptChoice: AgentReceiptChoice { file.receiptChoice ?? (file.autoReceive ? .auto : .off) }
 
-    /// True until the user turns receipt on or off once in this version.
+    /// Shown until the user turns receipt on or off in this version.
     var legacyReceiptOff: Bool { loadedExisting && file.receiptChoice == nil && !file.autoReceive }
 
     /// `byUser: false` is the Agent tab turning receipt on by itself; it keeps the
@@ -210,6 +240,7 @@ final class AgentTrustStore {
         guard let bytes = try? JSONEncoder().encode(next), (try? write(bytes, url)) != nil else { return false }
         file = next
         hasUnsavedDenial = false
+        diskStamp = Self.stamp(url)
         return true
     }
 

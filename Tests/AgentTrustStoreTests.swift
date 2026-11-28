@@ -60,13 +60,23 @@ import Foundation
         let sharedClient = try holder.trust(publicKey: sharedKey, label: "Agent", host: hostA)
         precondition(holder.setAutoReceive(true))
         precondition(holder.forget(sharedClient.id) && holder.setAutoReceive(false))
-        standby.reloadForTakeover()
+        standby.adoptDisk()
         precondition(standby.clients.isEmpty && !standby.autoReceive && standby.receiptChoice == .off)
         precondition(standby.lookup(keyID: AgentPairingProof.keyID(sharedKey)!, host: hostA) == .revoked)
         precondition(!standby.setAutoReceive(true, byUser: false) && !standby.autoReceive)
         let onBadFile = AgentTrustStore(url: directory.appendingPathComponent("fresh.json"))
+        // An older app writing beside the holder is noticed; a deleted file after
+        // approvals were known means no trust, with the revocation kept.
+        let readd = try holder.trust(publicKey: P256.Signing.PrivateKey().publicKey.x963Representation, label: "B", host: hostB)
+        precondition(!holder.changedOnDisk && standby.changedOnDisk)
+        standby.adoptDisk()
+        precondition(standby.clients.map(\.id) == [readd.id] && !standby.changedOnDisk)
+        precondition(unlink(sharedURL.path) == 0 && standby.changedOnDisk)
+        standby.adoptDisk()
+        precondition(standby.clients.isEmpty && standby.receiptChoice == .off && !standby.autoReceive)
+        precondition(standby.lookup(keyID: AgentPairingProof.keyID(sharedKey)!, host: hostA) == .revoked)
         precondition(chmod(directory.appendingPathComponent("fresh.json").path, 0o644) == 0)
-        onBadFile.reloadForTakeover()
+        onBadFile.adoptDisk()
         precondition(onBadFile.clients.isEmpty && onBadFile.receiptChoice == .off && !onBadFile.autoReceive)
 
         // Reconnect policy shared with the helper.

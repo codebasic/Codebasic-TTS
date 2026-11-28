@@ -170,6 +170,7 @@ import Security
     /// The latest reconnect result per remembered app, as the app saw it. Memory only.
     @Published private(set) var lastAttempts: [UUID: Attempt] = [:]
     private var readySequence = 0
+    private var lockReasons: Set<String> = []
     private var noSessionTask: Task<Void, Never>?
     private let noSessionDelay: Duration
     private let trust: AgentTrustStore
@@ -271,7 +272,8 @@ import Security
         pairingActive = true
         // Another instance may have held the socket until now and changed approvals.
         adoptStoreAfterTakeover()
-        if status == LocalApprovedSocket.unknownPathMessage || status.hasPrefix("다른 앱 인스턴스") { status = "" }
+        if status == LocalApprovedSocket.unknownPathMessage || status.hasPrefix("다른 앱 인스턴스")
+            || status.hasPrefix("다른 Codebasic TTS가") { status = "" }
         postReady("launch")
         return true
     }
@@ -387,6 +389,8 @@ import Security
         if locked { return ["status": "locked"] }
         if blockedPeers.contains(peer) { return ["status": "revoked"] }
         if let binding = binding(for: peer) { return bound(binding) }
+        adoptIfChanged()
+        if blockedPeers.contains(peer) { return ["status": "revoked"] }
         let lookup = trust.lookup(keyID: claim.keyID, host: claim.host ?? "")
         let outcome: [String: String]
         switch lookup {
@@ -686,7 +690,9 @@ import Security
     }
 
     private func turnOnReceive(byUser: Bool, reason: String) -> Bool {
-        guard !locked, startPairing(), setAutoReceive(true, byUser: byUser) else { return false }
+        guard !locked, startPairing() else { return false }
+        adoptIfChanged()
+        guard setAutoReceive(true, byUser: byUser) else { return false }
         Log.agent.info("[AGENT-CONN] receipt choice=\(self.receiptChoice.rawValue, privacy: .public) set=on reason=\(reason, privacy: .public)")
         dropIfGone()
         for binding in bindings.values { _ = activateReceive(binding) }
@@ -716,6 +722,11 @@ import Security
         noAgentSession = false
         guard open else { return }
         connectForPresence()
+        scheduleNoSessionCheck()
+    }
+
+    private func scheduleNoSessionCheck() {
+        noSessionTask?.cancel()
         let delay = noSessionDelay
         noSessionTask = Task { [weak self] in
             do { try await ContinuousClock().sleep(for: delay) } catch { return }
@@ -748,24 +759,37 @@ import Security
     func retryPairing() {
         guard startPairing() else { return }
         noAgentSession = false
-        if presenceOpen { connectForPresence() }
+        if presenceOpen {
+            connectForPresence()
+            scheduleNoSessionCheck()
+        }
     }
 
     /// Only the instance holding the pairing socket changes approvals or receipt.
     /// A second instance shows them but cannot write over the holder's file.
     private func ownsPolicy() -> Bool {
+        // The previous holder may have quit since; take the socket over if free.
+        if pairingSocket == nil { _ = startPairing() }
         guard pairingSocket != nil else {
             status = "다른 Codebasic TTS가 에이전트 연결을 관리하고 있어 이 창에서는 바꿀 수 없습니다."
             Log.agent.info("[AGENT-CONN] policy change refused reason=not_socket_owner")
             return false
         }
+        adoptIfChanged()
         return true
+    }
+
+    /// Something other than this instance wrote the approvals file.
+    private func adoptIfChanged() {
+        guard trust.changedOnDisk else { return }
+        Log.agent.info("[AGENT-CONN] policy adopt reason=external_change")
+        adoptStoreAfterTakeover()
     }
 
     /// Adopts what the previous socket holder saved: a revoked or forgotten app
     /// loses any live lease, and receipt turned off there stays off here.
     private func adoptStoreAfterTakeover() {
-        trust.reloadForTakeover()
+        trust.adoptDisk()
         let wasOn = autoReceive
         trusted = trust.clients
         autoReceive = trust.autoReceive
@@ -830,7 +854,11 @@ import Security
     }
 
     /// Unlocking leaves each receipt stopped until the remembered peer proves its key.
-    func setLocked(_ value: Bool) {
+    /// Screen lock and an inactive console session are separate reasons; receipt
+    /// resumes only when neither holds.
+    func setLocked(_ value: Bool, reason: String = "screen") {
+        if value { lockReasons.insert(reason) } else { lockReasons.remove(reason) }
+        let value = !lockReasons.isEmpty
         guard locked != value else { return }
         locked = value
         defer { refreshConnections() }

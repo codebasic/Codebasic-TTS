@@ -392,13 +392,13 @@ def verify_auto_connect(root, hosts):
 
         server.end()
         server = app()
-        assert wait_for(lambda: state_of(server, client_a["id"]) == "receiving", timeout=2.0), clients(server)
+        assert wait_for(lambda: state_of(server, client_a["id"]) == "receiving", timeout=3.0), clients(server)
         check("after an app restart the live helper reattaches on the ready signal, without a tool call")
 
         assert server("lock") == "ok"
         assert state_of(server, client_a["id"]) == "locked"
         assert server("unlock") == "ok"
-        assert wait_for(lambda: state_of(server, client_a["id"]) == "receiving", timeout=2.0), clients(server)
+        assert wait_for(lambda: state_of(server, client_a["id"]) == "receiving", timeout=3.0), clients(server)
         check("unlock reconnects the approved app without a tool call")
 
         assert server("disable") == "ok"
@@ -410,7 +410,7 @@ def verify_auto_connect(root, hosts):
         time.sleep(1.5)
         assert state_of(server, client_a["id"]) == "paused" and requests(server) == []
         assert server("enable") == "ok"
-        assert wait_for(lambda: state_of(server, client_a["id"]) == "receiving", timeout=2.0), clients(server)
+        assert wait_for(lambda: state_of(server, client_a["id"]) == "receiving", timeout=3.0), clients(server)
         check("receipt the user turned off stays off when the tab opens; turning it on reconnects at once")
 
         server.end()

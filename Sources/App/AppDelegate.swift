@@ -187,18 +187,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func observeSessionLock() {
         let access = appState.agentAccess
         if let session = CGSessionCopyCurrentDictionary() as? [String: Any],
-           (session["CGSSessionScreenIsLocked"] as? Bool) == true { access.setLocked(true) }
+           (session["CGSSessionScreenIsLocked"] as? Bool) == true { access.setLocked(true, reason: "screen") }
         let distributed = DistributedNotificationCenter.default()
         for (name, value) in [("com.apple.screenIsLocked", true), ("com.apple.screenIsUnlocked", false)] {
             distributed.addObserver(forName: Notification.Name(name), object: nil, queue: .main) { _ in
-                MainActor.assumeIsolated { access.setLocked(value) }
+                MainActor.assumeIsolated { access.setLocked(value, reason: "screen") }
             }
         }
         let workspace = NSWorkspace.shared.notificationCenter
         for (name, value) in [(NSWorkspace.sessionDidResignActiveNotification, true),
                               (NSWorkspace.sessionDidBecomeActiveNotification, false)] {
             workspace.addObserver(forName: name, object: nil, queue: .main) { _ in
-                MainActor.assumeIsolated { access.setLocked(value) }
+                MainActor.assumeIsolated { access.setLocked(value, reason: "session") }
             }
         }
     }
