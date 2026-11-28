@@ -103,10 +103,20 @@ final class AgentTrustStore {
     func adoptDisk() {
         defer { diskStamp = Self.stamp(url) }
         if let loaded = Self.read(url) {
-            guard hasUnsavedDenial else { file = loaded; return }
+            // A key this instance revoked stays revoked, even if an older writer
+            // saved a list that predates the revocation.
             var merged = loaded
-            merged.revoked = loaded.revoked + file.revoked.filter { !loaded.revoked.contains($0) }
-            merged.clients = loaded.clients.compactMap { disk in
+            let localOnly = file.revoked.filter { !loaded.revoked.contains($0) }
+            merged.revoked = loaded.revoked + localOnly
+            if merged.revoked.count > Self.maxRevoked { merged.revoked.removeFirst(merged.revoked.count - Self.maxRevoked) }
+            merged.clients.removeAll { merged.revoked.contains($0.keyID) || file.revoked.contains($0.keyID) }
+            guard hasUnsavedDenial else {
+                file = merged
+                // Write the tombstones back so the older writer's list does not stand.
+                if !localOnly.isEmpty { _ = commit(merged) }
+                return
+            }
+            merged.clients = merged.clients.compactMap { disk in
                 guard !merged.revoked.contains(disk.keyID),
                       let mine = file.clients.first(where: { $0.id == disk.id }) else { return nil }
                 var client = disk
