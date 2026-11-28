@@ -270,7 +270,7 @@ import Security
         pairingSocket = socket
         pairingActive = true
         // Another instance may have held the socket until now and changed approvals.
-        syncFromStore()
+        adoptStoreAfterTakeover()
         if status == LocalApprovedSocket.unknownPathMessage || status.hasPrefix("다른 앱 인스턴스") { status = "" }
         postReady("launch")
         return true
@@ -387,9 +387,6 @@ import Security
         if locked { return ["status": "locked"] }
         if blockedPeers.contains(peer) { return ["status": "revoked"] }
         if let binding = binding(for: peer) { return bound(binding) }
-        syncFromStore()
-        if locked { return ["status": "locked"] }
-        if blockedPeers.contains(peer) { return ["status": "revoked"] }
         let lookup = trust.lookup(keyID: claim.keyID, host: claim.host ?? "")
         let outcome: [String: String]
         switch lookup {
@@ -467,7 +464,7 @@ import Security
 
     @discardableResult
     func approve(_ id: UUID) -> Bool {
-        syncFromStore()
+        guard ownsPolicy() else { return false }
         dropIfGone()
         guard let request = approvalRequests.first(where: { $0.id == id }),
               autoReceive, !locked, context != nil else { return false }
@@ -732,8 +729,8 @@ import Security
 
     /// What opening the tab does; also run by the tab's retry button.
     private func connectForPresence() {
+        let before = readySequence
         if pairingSocket == nil { _ = startPairing() }
-        syncFromStore()
         if !autoReceive {
             if locked {
                 Log.agent.info("[AGENT-CONN] receipt choice=\(self.receiptChoice.rawValue, privacy: .public) skip reason=locked")
@@ -743,19 +740,32 @@ import Security
                 return   // already posted the ready signal
             }
         }
-        postReady("tab_open")
+        // Taking the socket over just now already woke every helper.
+        if readySequence == before { postReady("tab_open") }
     }
 
     /// The tab's "다시 시도" after the pairing socket could not start.
     func retryPairing() {
         guard startPairing() else { return }
+        noAgentSession = false
         if presenceOpen { connectForPresence() }
     }
 
-    /// Adopts what another instance may have saved: a revoked or forgotten app
-    /// loses its live lease, and receipt turned off there stops here too.
-    private func syncFromStore() {
-        trust.reload()
+    /// Only the instance holding the pairing socket changes approvals or receipt.
+    /// A second instance shows them but cannot write over the holder's file.
+    private func ownsPolicy() -> Bool {
+        guard pairingSocket != nil else {
+            status = "다른 Codebasic TTS가 에이전트 연결을 관리하고 있어 이 창에서는 바꿀 수 없습니다."
+            Log.agent.info("[AGENT-CONN] policy change refused reason=not_socket_owner")
+            return false
+        }
+        return true
+    }
+
+    /// Adopts what the previous socket holder saved: a revoked or forgotten app
+    /// loses any live lease, and receipt turned off there stays off here.
+    private func adoptStoreAfterTakeover() {
+        trust.reloadForTakeover()
         let wasOn = autoReceive
         trusted = trust.clients
         autoReceive = trust.autoReceive
@@ -768,14 +778,18 @@ import Security
                 dropBinding(client, keepSelection: false)
                 continue
             }
-            if !record.receiptEnabled, binding.receipt != nil {
+            if !record.receiptEnabled {
                 binding.receiptEnabled = false
+                clearSelection(for: client, keepSelection: false)
                 stopReceipt(binding)
             }
         }
         if wasOn, !autoReceive {
             clearApprovals()
             for binding in bindings.values { stopReceipt(binding) }
+            clearSelection()
+            instructionScope = nil
+            note(.notSelected)
         } else if !wasOn, autoReceive {
             for binding in bindings.values { _ = activateReceive(binding) }
         }
@@ -802,6 +816,7 @@ import Security
     }
 
     func disableReceive() {
+        guard ownsPolicy() else { return }
         clearApprovals()
         status = ""
         _ = setAutoReceive(false)
@@ -819,7 +834,12 @@ import Security
         guard locked != value else { return }
         locked = value
         defer { refreshConnections() }
-        guard value else { status = ""; postReady("unlock"); return }
+        guard value else {
+            status = ""
+            // A tab left open while locked connects on return just as opening it does.
+            if presenceOpen { connectForPresence() } else { postReady("unlock") }
+            return
+        }
         clearApprovals()
         for (client, binding) in Array(bindings) { dropBinding(client, keepSelection: binding.pair.persistent) }
         status = "화면이 잠겨 대본 받기를 멈췄습니다."
@@ -827,6 +847,7 @@ import Security
 
     @discardableResult
     func disconnect(_ client: UUID) -> Bool {
+        guard ownsPolicy() else { return false }
         guard connections.contains(where: { $0.id == client }) else { return false }
         if let record = trust.clients.first(where: { $0.id == client }) {
             clearApprovals(for: record)
@@ -847,6 +868,7 @@ import Security
 
     @discardableResult
     func resume(_ client: UUID) -> Bool {
+        guard ownsPolicy() else { return false }
         guard !locked, autoReceive, let row = connections.first(where: { $0.id == client }),
               row.state != .needsApproval else { return false }
         if row.persistent {
@@ -889,6 +911,7 @@ import Security
 
     @discardableResult
     func forget(_ client: UUID) -> Bool {
+        guard ownsPolicy() else { return false }
         guard connections.contains(where: { $0.id == client }) else { return false }
         if let record = trust.clients.first(where: { $0.id == client }) {
             clearApprovals(for: record)

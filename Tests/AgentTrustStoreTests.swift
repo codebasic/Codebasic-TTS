@@ -52,18 +52,22 @@ import Foundation
         try AgentTrustStore.writePrivately(Data(#"{"version":1,"autoReceive":true,"clients":[],"revoked":[]}"#.utf8), legacyURL)
         precondition(AgentTrustStore(url: legacyURL).receiptChoice == .auto)
 
-        // Two app instances on one file: a revocation or receipt-off saved by one
-        // is not undone by the other's stale copy.
+        // A standby instance that takes the socket over adopts what the previous
+        // holder saved; an unreadable file then means no trust and receipt off.
         let sharedURL = directory.appendingPathComponent("shared.json")
-        let first2 = AgentTrustStore(url: sharedURL), second2 = AgentTrustStore(url: sharedURL)
+        let holder = AgentTrustStore(url: sharedURL), standby = AgentTrustStore(url: sharedURL)
         let sharedKey = P256.Signing.PrivateKey().publicKey.x963Representation
-        let sharedClient = try first2.trust(publicKey: sharedKey, label: "Agent", host: hostA)
-        precondition(first2.setAutoReceive(true))
-        second2.reload()
-        precondition(second2.forget(sharedClient.id) && second2.setAutoReceive(false))
-        first2.touch(sharedClient.id)
-        precondition(first2.clients.isEmpty && !first2.autoReceive && first2.receiptChoice == .off)
-        precondition(AgentTrustStore(url: sharedURL).lookup(keyID: AgentPairingProof.keyID(sharedKey)!, host: hostA) == .revoked)
+        let sharedClient = try holder.trust(publicKey: sharedKey, label: "Agent", host: hostA)
+        precondition(holder.setAutoReceive(true))
+        precondition(holder.forget(sharedClient.id) && holder.setAutoReceive(false))
+        standby.reloadForTakeover()
+        precondition(standby.clients.isEmpty && !standby.autoReceive && standby.receiptChoice == .off)
+        precondition(standby.lookup(keyID: AgentPairingProof.keyID(sharedKey)!, host: hostA) == .revoked)
+        precondition(!standby.setAutoReceive(true, byUser: false) && !standby.autoReceive)
+        let onBadFile = AgentTrustStore(url: directory.appendingPathComponent("fresh.json"))
+        precondition(chmod(directory.appendingPathComponent("fresh.json").path, 0o644) == 0)
+        onBadFile.reloadForTakeover()
+        precondition(onBadFile.clients.isEmpty && onBadFile.receiptChoice == .off && !onBadFile.autoReceive)
 
         // Reconnect policy shared with the helper.
         precondition(AgentReconnect.next(after: "receiving_only", attempt: 3) == .done)
@@ -78,7 +82,7 @@ import Foundation
         precondition(AgentReconnect.delay(attempt: 7) == 256 && AgentReconnect.delay(attempt: 8) == 300
                      && AgentReconnect.delay(attempt: 1000) == 300)
         precondition(abs(AgentReconnect.jittered(10, unit: 0) - 8) < 1e-9 && abs(AgentReconnect.jittered(10, unit: 1) - 12) < 1e-9)
-        precondition(AgentPairing.readyNotification(appID: "com.example.app") == "com.example.app.agent.ready")
+        precondition(AgentPairing.readyNotification(appID: "com.example.app", uid: 501) == "com.example.app.agent.ready.501")
         print("agent trust store tests passed")
     }
 }

@@ -91,20 +91,27 @@ import Security
     static var stopped = false
     static var nextSignalAttempt = DispatchTime(uptimeNanoseconds: 0)
     static var signalPending = false
+    static var signalAgain = false
+    /// Bumped by every attempt the helper starts on its own.
+    static var backgroundRuns = 0
 
     /// Called before the session's first pairing, so a ready signal sent while
     /// that pairing runs is not lost (its attempt simply waits for the lock).
     static func listenForReady() {
         guard !listening else { return }
-        listening = true
         let name = AgentPairing.readyNotification(appID: AgentPeerSigning.appID)
         let registered = notify_register_dispatch(name, &readyToken, pairingQueue) { _ in onReadySignal() }
-        if registered != 0 { log.error("[AGENT-CONN] helper listen result=\(registered, privacy: .public)") }
+        if registered == 0 { listening = true }
+        else { log.error("[AGENT-CONN] helper listen result=\(registered, privacy: .public)") }
     }
 
     /// After the session's first pairing: retry while the app is unreachable.
     static func startReconnecting(after status: String) {
-        pairingQueue.async { schedule(after: status) }
+        pairingQueue.async {
+            // A signal-driven attempt that already ran has the newer answer.
+            guard backgroundRuns == 0 else { return }
+            schedule(after: status)
+        }
     }
 
     /// At most one signal-driven attempt per `AgentReconnect.signalInterval`,
@@ -112,21 +119,30 @@ import Security
     /// do not reach the app at the same instant. A burst of signals (or someone
     /// posting the name in a loop) collapses into one pending attempt.
     static func onReadySignal() {
-        guard !stopped, !signalPending else { return }
+        guard !stopped else { return }
+        // A signal during a pending or running attempt gets one more attempt after it.
+        guard !signalPending else { signalAgain = true; return }
         signalPending = true
         let now = DispatchTime.now()
         let start = max(now, nextSignalAttempt) + Double.random(in: 0...0.25)
         pairingQueue.asyncAfter(deadline: start) {
-            signalPending = false
-            nextSignalAttempt = .now() + AgentReconnect.signalInterval
             // A real ready signal means the app can be reached now.
             attempt = 0
             backgroundAttempt("ready")
+            // Measured from the end of this attempt, so attempts never overlap
+            // and start at least the interval apart.
+            nextSignalAttempt = .now() + AgentReconnect.signalInterval
+            signalPending = false
+            if signalAgain {
+                signalAgain = false
+                onReadySignal()
+            }
         }
     }
 
     static func backgroundAttempt(_ trigger: String) {
         guard !stopped else { return }
+        backgroundRuns += 1
         stateLock.lock()
         let status = pairingStatus()
         let key = clientKey.map { String(AgentBytes.hash($0.publicKey).prefix(12)) } ?? "none"

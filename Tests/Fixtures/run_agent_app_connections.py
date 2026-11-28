@@ -344,7 +344,7 @@ def state_of(server, client_id):
 def post_ready_flood(count):
     libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
     libc.notify_post.argtypes = [ctypes.c_char_p]
-    name = (APP_ID + ".agent.ready").encode()
+    name = f"{APP_ID}.agent.ready.{os.getuid()}".encode()
     for _ in range(count):
         assert libc.notify_post(name) == 0
 
@@ -392,13 +392,13 @@ def verify_auto_connect(root, hosts):
 
         server.end()
         server = app()
-        assert wait_for(lambda: state_of(server, client_a["id"]) == "receiving"), clients(server)
+        assert wait_for(lambda: state_of(server, client_a["id"]) == "receiving", timeout=2.0), clients(server)
         check("after an app restart the live helper reattaches on the ready signal, without a tool call")
 
         assert server("lock") == "ok"
         assert state_of(server, client_a["id"]) == "locked"
         assert server("unlock") == "ok"
-        assert wait_for(lambda: state_of(server, client_a["id"]) == "receiving"), clients(server)
+        assert wait_for(lambda: state_of(server, client_a["id"]) == "receiving", timeout=2.0), clients(server)
         check("unlock reconnects the approved app without a tool call")
 
         assert server("disable") == "ok"
@@ -410,7 +410,7 @@ def verify_auto_connect(root, hosts):
         time.sleep(1.5)
         assert state_of(server, client_a["id"]) == "paused" and requests(server) == []
         assert server("enable") == "ok"
-        assert wait_for(lambda: state_of(server, client_a["id"]) == "receiving"), clients(server)
+        assert wait_for(lambda: state_of(server, client_a["id"]) == "receiving", timeout=2.0), clients(server)
         check("receipt the user turned off stays off when the tab opens; turning it on reconnects at once")
 
         server.end()

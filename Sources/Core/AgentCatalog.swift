@@ -43,7 +43,8 @@ enum AgentPairing {
     /// (launch, Agent tab opened, unlock, receipt turned on). Any local process can
     /// post it; it only makes live helpers run the normal status/hello/prove
     /// exchange again, so it never grants anything by itself.
-    static func readyNotification(appID: String) -> String { appID + ".agent.ready" }
+    /// Scoped to this user, so another account's processes do not share it.
+    static func readyNotification(appID: String, uid: uid_t = getuid()) -> String { "\(appID).agent.ready.\(uid)" }
 
     /// Display text sent by the MCP client.
     static func clientName(_ input: String?) -> String {
