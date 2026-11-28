@@ -1,6 +1,7 @@
 import CoreFoundation
 import Darwin
 import Foundation
+import notify
 import os
 import Security
 

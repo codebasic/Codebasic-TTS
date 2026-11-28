@@ -4,6 +4,7 @@ import os
 import CoreFoundation
 import Darwin
 import Foundation
+import notify
 import Security
 
 /// The UI's name is descriptive only. The authenticated principal is the client
