@@ -76,7 +76,9 @@ platforms: [macos]
 
 ## 공개 릴리스 절차
 
-릴리스 명령은 [AGENTS.md의 운영 반영 승인](../../AGENTS.md#검증-병합-후보와-승인)을 받은 뒤 실행한다.
+### 후보 준비 및 검증
+
+아래 빌드·서명·패키징·번들 점검 결과를 릴리스 승인 요청의 근거로 남긴다.
 
 1. `./build.sh build` 성공 + `codesign --verify --deep build/"Codebasic TTS.app"`
    (완료 기준: SIGNATURE_OK).
@@ -86,13 +88,17 @@ platforms: [macos]
    깨뜨릴 수 있음).
 4. 번들 점검: `find "Codebasic TTS.app" -type f` — API 키·개인 음성 파일이
    하나도 없어야 업로드 진행. 완료 기준: 파일 목록에 번들 리소스만 있음.
-5. 커밋·푸시 후 `gh release create vX.Y.Z build/Codebasic-TTS.app.zip
-   --title ... --notes ...`.
-6. 검증: `gh release view vX.Y.Z --json assets`로 에셋 확인 + 익명
+### 승인 후 공개
+
+1. 사용자가 승인된 릴리스 소스를 원격 `main`에 병합했는지 확인한다.
+   [AGENTS.md의 별도 운영 반영 승인](../../AGENTS.md#검증-병합-후보와-승인)을 받은
+   뒤 해당 소스에서 검증한 버전과 ZIP으로
+   `gh release create vX.Y.Z build/Codebasic-TTS.app.zip --title ... --notes ...`를 실행한다.
+2. 검증: `gh release view vX.Y.Z --json assets`로 에셋 확인 + 익명
    `curl -sIL <asset url>` 200 확인.
 
 ## 검증
 
 - 소스 수정 작업: `./build.sh build` + `./build.sh test` 모두 통과가 최소 기준.
 - 설정 편집 작업: 앱 재실행 후 설정이 반영됨 + `settings.json`이 유효 JSON.
-- 릴리스 작업: 6번 항목의 익명 다운로드 200까지 확인해야 완료.
+- 릴리스 작업: 공개 후 익명 다운로드 200까지 확인해야 완료.
