@@ -247,7 +247,7 @@ struct ExplainWorkspace: View {
                       systemImage: "exclamationmark.triangle")
                     .foregroundStyle(.orange)
                 Spacer(minLength: 8)
-                Button("다시 시도") { _ = access.startPairing() }.controlSize(.small)
+                Button("다시 시도") { access.retryPairing() }.controlSize(.small)
             }
             .font(.caption)
         } else if access.legacyReceiptOff, !access.autoReceive {

@@ -260,9 +260,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Opening it connects approved agent apps; closing it keeps them connected.
         Publishers.CombineLatest(appState.$selectedTab, appState.$mainWindowVisible)
             .map { (tab: $0, visible: $1) }
-            .removeDuplicates { ($0.tab == 1 && $0.visible) == ($1.tab == 1 && $1.visible) }
+            .removeDuplicates { ((TTSRuntime.isPreview || $0.tab == 1) && $0.visible) == ((TTSRuntime.isPreview || $1.tab == 1) && $1.visible) }
             .sink { [weak self] state in
-                self?.appState.agentAccess.setPresence(state.tab == 1 && state.visible,
+                // The Preview window shows only the agent workspace.
+                let agentShown = TTSRuntime.isPreview || state.tab == 1
+                self?.appState.agentAccess.setPresence(agentShown && state.visible,
                                                       detail: "tab=\(state.tab) window=\(state.visible ? "visible" : "hidden")")
             }
             .store(in: &cancellables)

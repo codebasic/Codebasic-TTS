@@ -444,7 +444,15 @@ def verify_auto_connect(root, hosts):
         legacy.write_text(json.dumps({"version": 1, "autoReceive": False, "clients": [], "revoked": []}))
         os.chmod(legacy, 0o600)
         server.end()
+        retrying = connect("B")
+        time.sleep(0.5)
+        # Receipt is off in this file, so the app sends no ready signal: only the
+        # helper's own timed retry can reach it and raise the approval request.
         server = app(legacy)
+        assert connect_state(server)["auto"] is False
+        timed, = wait_for(lambda: requests(server), timeout=12)
+        check("a helper that found no app retries on its own timer and reaches the app once it is up")
+        retrying.close()
         assert server("presence on") == "ok"
         state = connect_state(server)
         assert state["choice"] == "off" and state["legacy"] and not state["auto"], state

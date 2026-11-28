@@ -87,8 +87,18 @@ final class AgentTrustStore {
             loadedExisting = false
             // A first launch may connect by itself. A file that exists but is not
             // ours is no trust and no choice, so receipt stays off until asked.
-            if !FileManager.default.fileExists(atPath: url.path) { file.receiptChoice = .auto }
+            var meta = stat()
+            if lstat(url.path, &meta) != 0 && errno == ENOENT { file.receiptChoice = .auto }
         }
+    }
+
+    /// Another app instance (a standby that later takes over the socket, or the
+    /// one that held it before) may have revoked a key or turned receipt off.
+    /// Every change starts from the file on disk, so a stale copy is never written
+    /// back over it. An unsaved denial stays in force in memory.
+    func reload() {
+        guard !hasUnsavedDenial, let loaded = Self.read(url) else { return }
+        file = loaded
     }
 
     var clients: [AgentTrustedClient] { file.clients }
@@ -105,6 +115,7 @@ final class AgentTrustStore {
     /// user's choice. A user's on/off also records the choice.
     @discardableResult
     func setAutoReceive(_ value: Bool, byUser: Bool = true) -> Bool {
+        reload()
         let choice: AgentReceiptChoice = byUser ? (value ? .auto : .off) : receiptChoice
         guard file.autoReceive != value || file.receiptChoice != choice || hasUnsavedDenial else { return true }
         var next = file
@@ -123,6 +134,7 @@ final class AgentTrustStore {
     /// host. Other hosts keep their records even when the labels match.
     func trust(publicKey: Data, label: String, host: String) throws -> AgentTrustedClient {
         guard let keyID = AgentPairingProof.keyID(publicKey) else { throw Failure.invalid }
+        reload()
         guard !file.revoked.contains(keyID) else { throw Failure.revoked }
         var next = file
         let time = now()
@@ -148,6 +160,7 @@ final class AgentTrustStore {
 
     @discardableResult
     func setReceiptEnabled(_ enabled: Bool, for id: UUID) -> Bool {
+        reload()
         guard let index = file.clients.firstIndex(where: { $0.id == id }) else { return false }
         guard file.clients[index].receiptEnabled != enabled || hasUnsavedDenial else { return true }
         var next = file
@@ -157,6 +170,7 @@ final class AgentTrustStore {
 
     /// A reconnect that cannot be recorded is still valid for this run.
     func touch(_ id: UUID) {
+        reload()
         guard let index = file.clients.firstIndex(where: { $0.id == id }) else { return }
         var next = file
         next.clients[index].lastSeen = now()
@@ -168,6 +182,7 @@ final class AgentTrustStore {
     /// write fails.
     @discardableResult
     func forget(_ id: UUID) -> Bool {
+        reload()
         guard let client = file.clients.first(where: { $0.id == id }) else { return false }
         var next = file
         next.clients.removeAll { $0.id == id }

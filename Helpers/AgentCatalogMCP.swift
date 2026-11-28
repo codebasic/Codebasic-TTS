@@ -85,40 +85,44 @@ import Security
     static let pairingQueue = DispatchQueue(label: "codebasic-tts.agent-helper.pairing")
     static let log = Logger(subsystem: TTSRuntime.appID, category: "agent")
     static var readyToken: Int32 = 0
+    static var listening = false
     static var attempt = 0
     static var retryGeneration = 0
     static var stopped = false
-    static var lastSignal: ContinuousClock.Instant?
+    static var nextSignalAttempt = DispatchTime(uptimeNanoseconds: 0)
     static var signalPending = false
 
-    /// After the session's first pairing: listen for the app's ready signal and
-    /// retry while the app is unreachable.
-    static func startReconnecting(after status: String) {
+    /// Called before the session's first pairing, so a ready signal sent while
+    /// that pairing runs is not lost (its attempt simply waits for the lock).
+    static func listenForReady() {
+        guard !listening else { return }
+        listening = true
         let name = AgentPairing.readyNotification(appID: AgentPeerSigning.appID)
         let registered = notify_register_dispatch(name, &readyToken, pairingQueue) { _ in onReadySignal() }
         if registered != 0 { log.error("[AGENT-CONN] helper listen result=\(registered, privacy: .public)") }
+    }
+
+    /// After the session's first pairing: retry while the app is unreachable.
+    static func startReconnecting(after status: String) {
         pairingQueue.async { schedule(after: status) }
     }
 
-    /// Folds bursts of signals (or someone else posting the name in a loop)
-    /// into at most one attempt per `AgentReconnect.signalInterval`.
+    /// At most one signal-driven attempt per `AgentReconnect.signalInterval`,
+    /// each delayed by up to a quarter second so the helpers of several sessions
+    /// do not reach the app at the same instant. A burst of signals (or someone
+    /// posting the name in a loop) collapses into one pending attempt.
     static func onReadySignal() {
-        let now = ContinuousClock.now
-        let interval = Duration.milliseconds(Int64(AgentReconnect.signalInterval * 1000))
-        if let last = lastSignal, now - last < interval {
-            guard !signalPending else { return }
-            signalPending = true
-            pairingQueue.asyncAfter(deadline: .now() + AgentReconnect.signalInterval) {
-                signalPending = false
-                lastSignal = .now
-                attempt = 0
-                backgroundAttempt("ready")
-            }
-            return
+        guard !stopped, !signalPending else { return }
+        signalPending = true
+        let now = DispatchTime.now()
+        let start = max(now, nextSignalAttempt) + Double.random(in: 0...0.25)
+        pairingQueue.asyncAfter(deadline: start) {
+            signalPending = false
+            nextSignalAttempt = .now() + AgentReconnect.signalInterval
+            // A real ready signal means the app can be reached now.
+            attempt = 0
+            backgroundAttempt("ready")
         }
-        lastSignal = now
-        attempt = 0
-        backgroundAttempt("ready")
     }
 
     static func backgroundAttempt(_ trigger: String) {
@@ -141,6 +145,7 @@ import Security
             log.info("[AGENT-CONN] helper wait reason=\(status, privacy: .public)")
         case .stop:
             stopped = true
+            if listening { notify_cancel(readyToken); listening = false }
             log.info("[AGENT-CONN] helper wait reason=terminal:\(status, privacy: .public)")
         case .retry(let base):
             let delay = AgentReconnect.jittered(base, unit: Double.random(in: 0...1))
@@ -181,6 +186,7 @@ import Security
             guard let id = frame["id"] else {
                 if method == "notifications/initialized", initialized, !ready {
                     ready = true
+                    listenForReady()
                     let status = pairingStatus()
                     let key = clientKey.map { String(AgentBytes.hash($0.publicKey).prefix(12)) } ?? "none"
                     log.info("[AGENT-CONN] helper attempt trigger=initialized key=\(key, privacy: .public) result=\(status, privacy: .public)")
