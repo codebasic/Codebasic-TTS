@@ -1,6 +1,8 @@
 import CoreFoundation
 import Darwin
 import Foundation
+import notify
+import os
 import Security
 
 /// One native signed helper per MCP session. This executable owns both local
@@ -74,6 +76,105 @@ import Security
     static let registeredHost = AgentPeerSigning.registeredHost(pid: getpid())
     static var slot: Int?
 
+    // MARK: Reconnecting without a tool call
+    //
+    // The MCP loop and background attempts share `slot`, `clientKey` and the socket
+    // exchange; `stateLock` serializes them. The reconnect bookkeeping below is
+    // touched only on `pairingQueue`. Background attempts never write to stdout.
+    static let stateLock = NSLock()
+    static let pairingQueue = DispatchQueue(label: "codebasic-tts.agent-helper.pairing")
+    static let log = Logger(subsystem: TTSRuntime.appID, category: "agent")
+    static var readyToken: Int32 = 0
+    static var listening = false
+    static var attempt = 0
+    static var retryGeneration = 0
+    static var stopped = false
+    static var nextSignalAttempt = DispatchTime(uptimeNanoseconds: 0)
+    static var signalPending = false
+    static var signalAgain = false
+    /// Bumped by every attempt the helper starts on its own.
+    static var backgroundRuns = 0
+
+    /// Called before the session's first pairing, so a ready signal sent while
+    /// that pairing runs is not lost (its attempt simply waits for the lock).
+    static func listenForReady() {
+        guard !listening else { return }
+        let name = AgentPairing.readyNotification(appID: AgentPeerSigning.appID)
+        let registered = notify_register_dispatch(name, &readyToken, pairingQueue) { _ in onReadySignal() }
+        if registered == 0 { listening = true }
+        else { log.error("[AGENT-CONN] helper listen result=\(registered, privacy: .public)") }
+    }
+
+    /// After the session's first pairing: retry while the app is unreachable.
+    static func startReconnecting(after status: String) {
+        pairingQueue.async {
+            // A signal-driven attempt that already ran has the newer answer.
+            guard backgroundRuns == 0 else { return }
+            schedule(after: status)
+        }
+    }
+
+    /// At most one signal-driven attempt per `AgentReconnect.signalInterval`,
+    /// each delayed by up to a quarter second so the helpers of several sessions
+    /// do not reach the app at the same instant. A burst of signals (or someone
+    /// posting the name in a loop) collapses into one pending attempt.
+    static func onReadySignal() {
+        guard !stopped else { return }
+        // A signal during a pending or running attempt gets one more attempt after it.
+        guard !signalPending else { signalAgain = true; return }
+        signalPending = true
+        let now = DispatchTime.now()
+        let start = max(now, nextSignalAttempt) + Double.random(in: 0...0.25)
+        pairingQueue.asyncAfter(deadline: start) {
+            // A real ready signal means the app can be reached now.
+            attempt = 0
+            backgroundAttempt("ready")
+            // Measured from the end of this attempt, so attempts never overlap
+            // and start at least the interval apart.
+            nextSignalAttempt = .now() + AgentReconnect.signalInterval
+            signalPending = false
+            if signalAgain {
+                signalAgain = false
+                onReadySignal()
+            }
+        }
+    }
+
+    static func backgroundAttempt(_ trigger: String) {
+        guard !stopped else { return }
+        backgroundRuns += 1
+        stateLock.lock()
+        let status = pairingStatus()
+        let key = clientKey.map { String(AgentBytes.hash($0.publicKey).prefix(12)) } ?? "none"
+        stateLock.unlock()
+        log.info("[AGENT-CONN] helper attempt trigger=\(trigger, privacy: .public) key=\(key, privacy: .public) result=\(status, privacy: .public)")
+        schedule(after: status)
+    }
+
+    static func schedule(after status: String) {
+        retryGeneration += 1
+        switch AgentReconnect.next(after: status, attempt: attempt) {
+        case .done:
+            attempt = 0
+        case .waitForSignal:
+            attempt = 0
+            log.info("[AGENT-CONN] helper wait reason=\(status, privacy: .public)")
+        case .stop:
+            stopped = true
+            if listening { notify_cancel(readyToken); listening = false }
+            log.info("[AGENT-CONN] helper wait reason=terminal:\(status, privacy: .public)")
+        case .retry(let base):
+            let delay = AgentReconnect.jittered(base, unit: Double.random(in: 0...1))
+            attempt += 1
+            let generation = retryGeneration
+            log.info("[AGENT-CONN] helper retry attempt=\(attempt, privacy: .public) delay_ms=\(Int(delay * 1000), privacy: .public) reason=\(status, privacy: .public)")
+            pairingQueue.asyncAfter(deadline: .now() + delay) {
+                guard generation == retryGeneration else { return }
+                backgroundAttempt("retry")
+            }
+        }
+    }
+
     static func main() {
         // A keychain dialog raised by a background helper would block the agent's
         // tool call. An inaccessible registered credential stays unavailable.
@@ -91,6 +192,8 @@ import Security
         var initialized = false, ready = false
         var proofs: [Proof] = []
         while let input = readFrame() {
+            stateLock.lock()
+            defer { stateLock.unlock() }
             if input.isEmpty { emit(error(nil, -32700, "Malformed or oversized frame")); continue }
             guard let frame = decode(input), frame["jsonrpc"] as? String == "2.0",
                   let method = frame["method"] as? String else {
@@ -99,7 +202,11 @@ import Security
             guard let id = frame["id"] else {
                 if method == "notifications/initialized", initialized, !ready {
                     ready = true
-                    _ = pairingStatus()
+                    listenForReady()
+                    let status = pairingStatus()
+                    let key = clientKey.map { String(AgentBytes.hash($0.publicKey).prefix(12)) } ?? "none"
+                    log.info("[AGENT-CONN] helper attempt trigger=initialized key=\(key, privacy: .public) result=\(status, privacy: .public)")
+                    startReconnecting(after: status)
                 }
                 continue
             }

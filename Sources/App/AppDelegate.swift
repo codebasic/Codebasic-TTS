@@ -187,18 +187,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func observeSessionLock() {
         let access = appState.agentAccess
         if let session = CGSessionCopyCurrentDictionary() as? [String: Any],
-           (session["CGSSessionScreenIsLocked"] as? Bool) == true { access.setLocked(true) }
+           (session["CGSSessionScreenIsLocked"] as? Bool) == true { access.setLocked(true, reason: "screen") }
         let distributed = DistributedNotificationCenter.default()
         for (name, value) in [("com.apple.screenIsLocked", true), ("com.apple.screenIsUnlocked", false)] {
             distributed.addObserver(forName: Notification.Name(name), object: nil, queue: .main) { _ in
-                MainActor.assumeIsolated { access.setLocked(value) }
+                MainActor.assumeIsolated { access.setLocked(value, reason: "screen") }
             }
         }
         let workspace = NSWorkspace.shared.notificationCenter
         for (name, value) in [(NSWorkspace.sessionDidResignActiveNotification, true),
                               (NSWorkspace.sessionDidBecomeActiveNotification, false)] {
             workspace.addObserver(forName: name, object: nil, queue: .main) { _ in
-                MainActor.assumeIsolated { access.setLocked(value) }
+                MainActor.assumeIsolated { access.setLocked(value, reason: "session") }
             }
         }
     }
@@ -255,6 +255,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.appState.agentAccess.invalidate(selector, deleted: deleted)
         }
         appState.agentAccess.$autoReceive.sink { [weak self] in self?.draftReceiptMenu?.state = $0 ? .on : .off }
+            .store(in: &cancellables)
+        // The Agent tab is "open" while it is selected and its window is on screen.
+        // Opening it connects approved agent apps; closing it keeps them connected.
+        Publishers.CombineLatest(appState.$selectedTab, appState.$mainWindowVisible)
+            .map { (tab: $0, visible: $1) }
+            .removeDuplicates { ((TTSRuntime.isPreview || $0.tab == 1) && $0.visible) == ((TTSRuntime.isPreview || $1.tab == 1) && $1.visible) }
+            .sink { [weak self] state in
+                // The Preview window shows only the agent workspace.
+                let agentShown = TTSRuntime.isPreview || state.tab == 1
+                self?.appState.agentAccess.setPresence(agentShown && state.visible,
+                                                      detail: "tab=\(state.tab) window=\(state.visible ? "visible" : "hidden")")
+            }
             .store(in: &cancellables)
         appState.$phase
             .receive(on: RunLoop.main)

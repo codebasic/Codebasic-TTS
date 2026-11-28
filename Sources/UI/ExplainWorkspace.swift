@@ -171,6 +171,7 @@ struct ExplainWorkspace: View {
 
     private var connectionState: String {
         if access.locked { return "화면 잠금으로 멈춤" }
+        if !access.pairingActive { return "자동 연결 꺼짐" }
         if !access.autoReceive { return "전체 받기 꺼짐" }
         if access.receiving { return "대본 받는 중" }
         if !access.approvalRequests.isEmpty { return "앱 승인 대기 중" }
@@ -195,6 +196,7 @@ struct ExplainWorkspace: View {
                 }
                 .disabled(!access.pairingSupported || (access.locked && !access.autoReceive))
             }
+            connectionNotices
             ForEach(access.approvalRequests) { request in
                 let host = request.host.map { Self.hostName($0) + " · PID \(request.helperPID)" }
                     ?? Self.sessionOnlyDescription(request.launcher, pid: request.helperPID)
@@ -236,6 +238,52 @@ struct ExplainWorkspace: View {
         .accessibilityIdentifier("agent-connection-section")
     }
 
+    /// Why the tab is not connected, from what the app itself saw. A transport
+    /// problem is never presented as something an approval click would fix.
+    @ViewBuilder private var connectionNotices: some View {
+        if !access.pairingActive, access.pairingSupported {
+            HStack(alignment: .firstTextBaseline) {
+                Label("자동 연결을 시작하지 못했습니다. 다른 Codebasic TTS가 실행 중일 수 있습니다.",
+                      systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.orange)
+                Spacer(minLength: 8)
+                Button("다시 시도") { access.retryPairing() }.controlSize(.small)
+            }
+            .font(.caption)
+        } else if access.legacyReceiptOff, !access.autoReceive {
+            Label("이전 버전에서 전체 받기가 꺼진 채 저장되어 자동으로 켜지 않았습니다. 켜면 이후에는 이 탭을 열 때 승인한 앱이 자동으로 연결됩니다.",
+                  systemImage: "info.circle")
+                .font(.caption).foregroundStyle(.secondary)
+        } else if access.autoReceive, !access.locked {
+            if access.noAgentSession, access.approvalRequests.isEmpty,
+               access.connections.allSatisfy({ $0.helperPID == nil }) {
+                Label(access.trusted.isEmpty
+                      ? "실행 중인 에이전트 세션이 없습니다. 에이전트 앱에 MCP 설정을 추가하고 새 세션을 여세요."
+                      : "기억한 에이전트 앱 \(access.trusted.count)개 중 실행 중인 세션이 없습니다. 에이전트 앱에서 새 세션을 열면 자동으로 연결됩니다.",
+                      systemImage: "antenna.radiowaves.left.and.right.slash")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                Text("이 탭이 열려 있으면 승인한 에이전트 앱이 자동으로 연결됩니다. 창을 닫아도 연결은 유지됩니다.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private static func attemptText(_ attempt: AgentSessionController.Attempt?) -> String? {
+        guard let attempt else { return nil }
+        let reason: String
+        switch attempt.result {
+        case "receiving_only", "ready", "instruction_required": return nil
+        case "other_agent": reason = "다른 세션 사용 중"
+        case "disabled": reason = "받기 꺼짐"
+        case "locked": reason = "화면 잠금"
+        case "revoked": reason = "승인 철회됨"
+        case "approval_required": reason = "승인 필요"
+        default: reason = "연결하지 못함"
+        }
+        return "마지막 시도 " + attempt.at.formatted(date: .omitted, time: .shortened) + " · " + reason
+    }
+
     private var agentConnections: some View {
         VStack(alignment: .leading, spacing: 4) {
             ForEach(access.connections) { client in
@@ -245,6 +293,9 @@ struct ExplainWorkspace: View {
                         Text(client.label)
                         Text(host)
                             .foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                        if client.state != .receiving, let attempt = Self.attemptText(access.lastAttempts[client.id]) {
+                            Text(attempt).foregroundStyle(.secondary).lineLimit(1)
+                        }
                     }
                     let needsInstruction = access.instructionClient == client.id && access.receiptBlockedBySelection
                     Text(needsInstruction ? "지시 필요" : Self.connectionState(client.state))

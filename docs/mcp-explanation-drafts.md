@@ -74,6 +74,25 @@ Helpers/tts_mcp_client.py --helper "<앱>/Contents/Helpers/CodebasicAgentMCP" se
 - `approve host=… client=… scope=<persistent|this_run> result=ok|store_failed`: 승인. `this_run`은 앱을 식별할 수 없어 이번 실행에만 허용한 경우입니다.
 - `revoke host=… client=… result=ok|unsaved`: 승인 철회.
 
+### 에이전트 탭 자동 연결 (#31)
+
+에이전트 탭이 선택되어 있고 관리 창이 화면에 보이면 "탭이 열린" 상태입니다. 탭이 열리면 앱은 사용자가 끄지 않은 한 전체 받기를 켜고, 실행 중인 도우미에게 내용 없는 준비 신호(Darwin 알림 `<앱 ID>.agent.ready.<uid>`)를 보냅니다. 도우미는 신호를 받으면 평소의 status → hello → prove를 다시 수행하므로, 이미 승인한 앱은 도구 호출이나 클릭 없이 연결됩니다. 신호는 아무 프로세스나 보낼 수 있지만 검증을 건너뛰게 하지는 못하며, 겹친 신호는 한 번의 시도로 합쳐집니다. 처음 보는 앱은 여전히 승인을 한 번 받아야 합니다. 탭을 닫거나 창을 숨겨도 연결은 유지됩니다.
+
+앱은 탭 열림 외에 앱 시작(받기 켜짐일 때), 화면 잠금 해제, 전체·앱별 받기 켜기, 도우미 프로세스 종료 때도 신호를 보냅니다. 도우미는 신호에 따른 시도를 앞 시도가 끝난 뒤 최소 1초 간격으로, 0~250ms 지터를 두고 합니다. 앱에 닿지 못한 도우미(`app_unavailable`, `unavailable`)는 2초부터 두 배씩 최대 5분 간격(±20%)으로 다시 시도하고, `locked`·`disabled`·`other_agent`·`approval_required`는 다음 신호를 기다리며, `revoked`·`signing_required`·`upgrade_required`에서는 도우미를 다시 시작할 때까지 멈춥니다.
+
+승인·받기 설정은 페어링 소켓을 가진 앱 인스턴스만 바꿉니다. 같은 앱을 하나 더 띄우면 그 창에서는 바꿀 수 없다고 안내하고 `policy change refused reason=not_socket_owner`를 남기며, 소켓을 넘겨받을 때와, 파일이 자신이 마지막으로 읽거나 쓴 뒤 바뀌었을 때(예: 함께 실행 중인 이전 버전이 쓴 경우) 저장된 파일을 다시 읽습니다(`policy adopt reason=external_change`). 승인을 알고 있던 상태에서 파일이 사라졌거나 읽을 수 없으면 승인 없음·받기 꺼짐으로 보고, 이미 철회한 키는 계속 철회 상태로 둡니다. 화면 잠금과 콘솔 사용자 전환은 따로 추적해 둘 다 풀렸을 때만 받기를 다시 엽니다.
+
+사용자가 `전체 받기 끄기`를 누르면 그 선택(`receiptChoice=off`)이 저장되어, 탭을 열어도 다시 켜지지 않습니다. 이 기능 이전 버전에서 받기가 꺼진 채 저장된 파일도 같은 이유로 꺼진 채 두고, 사용자가 받기를 켜거나 끌 때까지 탭에 안내합니다.
+
+앱과 도우미는 같은 subsystem에 다음 줄을 남깁니다(도우미 줄도 같은 명령으로 모입니다).
+
+- `presence state=open|closed tab=<n> window=visible|hidden`: 탭 열림 상태.
+- `receipt choice=auto|off set=on|off reason=tab_open|user`, `receipt choice=… skip reason=user_off|migration|locked`: 받기를 켰거나 켜지 않은 이유.
+- `ready post reason=launch|configure|tab_open|unlock|receipt_on|resume|binding_drop seq=<n> result=ok`: 준비 신호.
+- `presence no_session after_ms=<ms>`: 탭을 연 뒤 접속한 도우미가 없음.
+- `helper attempt trigger=initialized|ready|retry key=<키 ID 앞 12자> result=<상태>`: 도우미가 스스로 시도한 결과. 이어서 `connect … lookup=trusted result=receiving_only`가 같은 키로 찍히면 클릭 없이 연결된 것입니다.
+- `helper retry attempt=<n> delay_ms=<ms> reason=<상태>`, `helper wait reason=<상태|terminal:상태>`: 도우미의 다음 행동.
+
 ## 합성 데이터로 확인
 
 `TTS_REQUIRE_STABLE_SIGNING=1 ./build.sh build`는 앱과 도우미의 안정적인 서명과 강화 런타임을 확인합니다. `./build.sh test`는 저장 충돌과 소켓 재시작을 포함한 단위 테스트를 실행합니다.
