@@ -10,8 +10,10 @@ platforms: [macos]
 # Codebasic TTS 프로젝트 스킬
 
 이 리포지토리(Codebasic TTS — macOS 메뉴막 TTS 앱)에서 소스 수정, 설정 변경,
-빌드, 릴리스를 할 에이전트를 위한 절차서. 상위 문서: `AGENTS.md`(워크스페이스
-구조·gotchas), `README.md`(사용자 안내).
+빌드, 릴리스를 할 에이전트를 위한 절차서. 이슈·워크트리·승인 규칙은
+[AGENTS.md](../../AGENTS.md), 독립 검토 절차는
+[멀티 에이전트 리뷰 가이드](../../docs/multi-agent-review.md)를 따른다.
+사용자 안내는 [README.md](../../README.md)를 참고한다.
 
 ## 저장소 구조 주의
 
@@ -73,6 +75,8 @@ platforms: [macos]
   재실행 → `lsregister -f` → 최후 로그아웃/로그인. 코드 버그가 아니다.
 
 ## 공개 릴리스 절차
+
+릴리스 명령은 [AGENTS.md의 운영 반영 승인](../../AGENTS.md#검증-병합-후보와-승인)을 받은 뒤 실행한다.
 
 1. `./build.sh build` 성공 + `codesign --verify --deep build/"Codebasic TTS.app"`
    (완료 기준: SIGNATURE_OK).
